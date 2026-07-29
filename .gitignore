@@ -1,0 +1,33 @@
+# Allowlist mode: ignore everything at the project root by default,
+# then explicitly track only the source tree and public-facing files.
+
+# Default: ignore everything at the project root
+/*
+
+# Explicitly track these
+!/.gitignore
+!/README.md
+!/CHANGELOG.md
+!/LICENSE
+!/CMakeLists.txt
+!/src/
+
+# Safety-net patterns that apply inside tracked directories too
+**/.vs/
+**/*.user
+**/*.aps
+**/*.obj
+**/*.exe
+**/*.dll
+**/*.pdb
+**/*.ilk
+**/*.idb
+**/*.exp
+**/*.lib
+**/*.tlog
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+
+# Markers used by an external bookkeeping tool (never tracked)
+*.client
