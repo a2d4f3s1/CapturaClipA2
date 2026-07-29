@@ -18,11 +18,27 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(APP_SOURCES
     src/main.cpp
+    src/capture/DibBuffer.cpp
+    src/capture/ScreenSnapshot.cpp
+    src/doc/Document.cpp
+    src/overlay/SelectionOverlay.cpp
+    src/render/D2DContext.cpp
+    src/render/Renderer.cpp
+    src/ui/ClipWindow.cpp
     src/util/Dpi.cpp
 )
 
 set(APP_HEADERS
+    src/capture/DibBuffer.h
+    src/capture/ScreenSnapshot.h
+    src/doc/Annotation.h
+    src/doc/Document.h
+    src/overlay/SelectionOverlay.h
+    src/render/D2DContext.h
+    src/render/Renderer.h
+    src/ui/ClipWindow.h
     src/util/Dpi.h
+    src/util/Timing.h
 )
 
 add_executable(CapturaClipA2 WIN32
@@ -54,8 +70,10 @@ target_link_libraries(CapturaClipA2 PRIVATE
     windowscodecs
     dwmapi
     shcore
+    ole32
     user32
     gdi32
+    msimg32
 )
 
 # Keep the source tree free of build artifacts.
