@@ -1,10 +1,14 @@
 #include "ui/ClipWindow.h"
 
+#include <commdlg.h>
 #include <windowsx.h>
 
 #include <algorithm>
 
 #include "doc/Document.h"
+#include "io/AutoSave.h"
+#include "io/Clipboard.h"
+#include "io/ImageCodec.h"
 #include "render/D2DContext.h"
 #include "util/NameFormat.h"
 #include "util/Timing.h"
@@ -20,10 +24,6 @@ constexpr int kKeyScrollStep = 40;
 // How far in from the edge counts as a resize grip. The window has no visible
 // frame to grab, so the grip lives just inside the outline.
 constexpr LONG kResizeGrip = 6;
-
-// Title format. Placeholders are documented in NameFormat.h; this becomes a
-// setting in a later phase.
-constexpr wchar_t kTitleFormat[] = L"%t";
 
 }  // namespace
 
@@ -168,6 +168,11 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_RBUTTONDOWN:
             // Provisional: the context menu takes this over in a later phase.
+            ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+            return 0;
+
+        case WM_CLOSE:
+            AutoSaveBeforeClosing();
             ::DestroyWindow(hwnd_);
             return 0;
 
@@ -221,6 +226,20 @@ void ClipWindow::OnWheel(int notches, WPARAM keys) noexcept {
 }
 
 void ClipWindow::OnKeyDown(WPARAM key) noexcept {
+    const bool control = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (control) {
+        switch (key) {
+            case 'S':
+                SaveAs();
+                return;
+            case 'C':
+                CopyImage();
+                return;
+            default:
+                break;
+        }
+    }
+
     switch (key) {
         case '1':
         case '2':
@@ -291,8 +310,9 @@ void ClipWindow::ApplyZoom() noexcept {
 void ClipWindow::UpdateTitle() noexcept {
     // No title bar, so this surfaces in the taskbar button. It is also the
     // only feedback for what the current zoom is.
-    std::wstring name =
-        ccl::util::ExpandPlaceholders(kTitleFormat, sourceTitle_);
+    const std::wstring& format =
+        settings_ != nullptr ? settings_->titleFormat : sourceTitle_;
+    std::wstring name = ccl::util::ExpandPlaceholders(format, sourceTitle_);
     if (name.empty()) {
         name = L"CapturaClipA2";
     }
@@ -312,6 +332,80 @@ void ClipWindow::FitToImage() noexcept {
     ApplyZoom();
 }
 
+void ClipWindow::SaveAs() noexcept {
+    if (context_ == nullptr || document_ == nullptr || settings_ == nullptr) {
+        return;
+    }
+
+    // Filter order has to match the format picked from nFilterIndex below.
+    static constexpr wchar_t kFilter[] =
+        L"PNG (*.png)\0*.png\0JPEG (*.jpg)\0*.jpg\0Bitmap (*.bmp)\0*.bmp\0\0";
+
+    ccl::app::ImageFormat format = settings_->defaultFormat;
+    DWORD filterIndex = 1;
+    switch (format) {
+        case ccl::app::ImageFormat::Jpeg: filterIndex = 2; break;
+        case ccl::app::ImageFormat::Bmp: filterIndex = 3; break;
+        default: filterIndex = 1; break;
+    }
+
+    SYSTEMTIME now{};
+    ::GetLocalTime(&now);
+
+    wchar_t path[MAX_PATH];
+    ::swprintf_s(path, L"%04d%02d%02d-%02d%02d%02d", now.wYear, now.wMonth,
+                 now.wDay, now.wHour, now.wMinute, now.wSecond);
+
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter = kFilter;
+    dialog.nFilterIndex = filterIndex;
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = ARRAYSIZE(path);
+    dialog.lpstrDefExt = ccl::io::ExtensionFor(format);
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+
+    if (!::GetSaveFileNameW(&dialog)) {
+        return;
+    }
+
+    switch (dialog.nFilterIndex) {
+        case 2: format = ccl::app::ImageFormat::Jpeg; break;
+        case 3: format = ccl::app::ImageFormat::Bmp; break;
+        default: format = ccl::app::ImageFormat::Png; break;
+    }
+
+    if (ccl::io::SaveImage(*context_, document_->Image(), path, format,
+                           settings_->jpegQuality)) {
+        saved_ = true;
+    } else {
+        ::MessageBoxW(hwnd_, L"Failed to save the image.", L"CapturaClipA2",
+                      MB_ICONERROR | MB_OK);
+    }
+}
+
+void ClipWindow::CopyImage() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    ccl::io::CopyToClipboard(hwnd_, document_->Image());
+}
+
+void ClipWindow::AutoSaveBeforeClosing() noexcept {
+    if (saved_ || context_ == nullptr || document_ == nullptr ||
+        settings_ == nullptr) {
+        return;
+    }
+    // Holding Shift while closing skips the automatic save.
+    if ((::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+        return;
+    }
+
+    ccl::io::AutoSaveImage(*context_, document_->Image(), *settings_,
+                           sourceTitle_);
+}
+
 void ClipWindow::Draw() noexcept {
     renderer_.Draw(view_);
 
@@ -321,16 +415,21 @@ void ClipWindow::Draw() noexcept {
     }
 }
 
-bool ClipWindow::Create(const ccl::render::D2DContext& context,
-                        const ccl::doc::Document& document, POINT position,
+bool ClipWindow::Create(ccl::render::D2DContext& context,
+                        const ccl::doc::Document& document,
+                        const ccl::app::Settings& settings, POINT position,
                         const std::wstring& sourceTitle,
                         LONGLONG releasedAt) noexcept {
     if (!document.IsValid()) {
         return false;
     }
     releasedAt_ = releasedAt;
+    context_ = &context;
     document_ = &document;
+    settings_ = &settings;
     sourceTitle_ = sourceTitle;
+    view_.SetZoomStepPercent(settings.zoomStepPercent);
+    renderer_.SetSmoothScaling(settings.smoothScaling);
     ccl::timing::Stopwatch watch;
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);
@@ -383,6 +482,10 @@ bool ClipWindow::Create(const ccl::render::D2DContext& context,
     // Keyboard and wheel messages go to the focused window, so the capture has
     // to take focus for its shortcuts to work without clicking it first.
     ::SetForegroundWindow(hwnd_);
+
+    if (settings.copyOnCapture) {
+        CopyImage();
+    }
     return true;
 }
 

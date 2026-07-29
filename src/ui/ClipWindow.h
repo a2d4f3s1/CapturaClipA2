@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "app/Settings.h"
 #include "render/Renderer.h"
 #include "view/ViewState.h"
 
@@ -24,8 +25,9 @@ namespace ccl::ui {
 // is bound to the middle button and the left button scrolls the image.
 class ClipWindow {
 public:
-    bool Create(const ccl::render::D2DContext& context,
-                const ccl::doc::Document& document, POINT position,
+    bool Create(ccl::render::D2DContext& context,
+                const ccl::doc::Document& document,
+                const ccl::app::Settings& settings, POINT position,
                 const std::wstring& sourceTitle, LONGLONG releasedAt) noexcept;
 
     void Run() noexcept;
@@ -46,15 +48,24 @@ private:
     void FitToImage() noexcept;
     void UpdateTitle() noexcept;
 
+    void SaveAs() noexcept;
+    void CopyImage() noexcept;
+    // Saves automatically before the capture is discarded, unless the image has
+    // already been saved or Shift is held to skip it.
+    void AutoSaveBeforeClosing() noexcept;
+
     SIZE ContentSize() const noexcept;
     SIZE ViewportSize() const noexcept;
     void ClampScroll() noexcept;
 
     HWND hwnd_ = nullptr;
     ccl::render::Renderer renderer_;
+    ccl::render::D2DContext* context_ = nullptr;
     const ccl::doc::Document* document_ = nullptr;
+    const ccl::app::Settings* settings_ = nullptr;
     ccl::view::ViewState view_;
     std::wstring sourceTitle_;
+    bool saved_ = false;
 
     bool moving_ = false;
     POINT dragOrigin_{};

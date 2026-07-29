@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include "app/Settings.h"
 #include "capture/ScreenSnapshot.h"
 #include "capture/WindowPicker.h"
 #include "doc/Document.h"
@@ -9,14 +10,6 @@
 #include "util/Timing.h"
 
 namespace {
-
-// Deliberate pause before the screen is grabbed, so that a menu fading out or
-// an animation still settling does not end up in the picture.
-//
-// Zero by default: the grab happens at launch, so there is normally nothing to
-// wait for, and Sleep's resolution means even a 10ms request costs about 25ms.
-// Becomes a setting in a later phase.
-constexpr UINT kCapturePreparationMs = 0;
 
 void ReportFatal(const wchar_t* what) noexcept {
     ::MessageBoxW(nullptr, what, L"CapturaClipA2", MB_ICONERROR | MB_OK);
@@ -37,6 +30,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     const ccl::timing::ScopedFlush flushLogOnExit;
     ccl::timing::Stopwatch watch;
 
+    ccl::app::Settings settings;
+    settings.Load();
+    watch.Lap(L"  settings load");
+
     // Recorded before the overlay covers the screen, so that clicking can pick
     // the window that was actually under the cursor.
     ccl::capture::WindowList windows;
@@ -44,7 +41,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     watch.Lap(L"  window list");
 
     ccl::capture::ScreenSnapshot snapshot;
-    if (!snapshot.Take(kCapturePreparationMs)) {
+    if (!snapshot.Take(settings.preparationMs)) {
         ReportFatal(L"Failed to capture the screen.");
         return 1;
     }
@@ -82,7 +79,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
                          bounds.top + selection.area.top};
 
     ccl::ui::ClipWindow window;
-    if (!window.Create(context, document, position, selection.title,
+    if (!window.Create(context, document, settings, position, selection.title,
                        selection.releasedAt)) {
         ReportFatal(L"Failed to create the capture window.");
         return 1;

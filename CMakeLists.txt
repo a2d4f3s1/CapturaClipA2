@@ -18,10 +18,14 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(APP_SOURCES
     src/main.cpp
+    src/app/Settings.cpp
     src/capture/DibBuffer.cpp
     src/capture/ScreenSnapshot.cpp
     src/capture/WindowPicker.cpp
     src/doc/Document.cpp
+    src/io/AutoSave.cpp
+    src/io/Clipboard.cpp
+    src/io/ImageCodec.cpp
     src/overlay/SelectionOverlay.cpp
     src/render/D2DContext.cpp
     src/render/Renderer.cpp
@@ -31,11 +35,15 @@ set(APP_SOURCES
 )
 
 set(APP_HEADERS
+    src/app/Settings.h
     src/capture/DibBuffer.h
     src/capture/ScreenSnapshot.h
     src/capture/WindowPicker.h
     src/doc/Annotation.h
     src/doc/Document.h
+    src/io/AutoSave.h
+    src/io/Clipboard.h
+    src/io/ImageCodec.h
     src/overlay/SelectionOverlay.h
     src/render/D2DContext.h
     src/render/Renderer.h
@@ -76,6 +84,9 @@ target_link_libraries(CapturaClipA2 PRIVATE
     dwmapi
     shcore
     ole32
+    oleaut32
+    shell32
+    comdlg32
     user32
     gdi32
     msimg32

@@ -13,11 +13,7 @@ public:
     static constexpr float kMinZoom = 0.1f;
     static constexpr float kMaxZoom = 5.0f;
 
-    // Percentage change per wheel notch. Multiplicative rather than additive:
-    // adding a fixed percentage collapses to zero when zooming out, while
-    // multiplying gives the same felt step in both directions and never
-    // reaches zero. Becomes a setting in a later phase.
-    static constexpr float kZoomStepPercent = 10.0f;
+    static constexpr float kDefaultZoomStepPercent = 10.0f;
 
     // Fraction of a step used when the modifier for fine adjustment is held.
     static constexpr float kFineStepFactor = 0.2f;
@@ -34,13 +30,21 @@ public:
         zoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
     }
 
+    void SetZoomStepPercent(float percent) noexcept {
+        zoomStepPercent_ = std::clamp(percent, 1.0f, 100.0f);
+    }
+
+    // Multiplicative rather than additive: adding a fixed percentage collapses
+    // to zero when zooming out, while multiplying gives the same felt step in
+    // both directions and never reaches zero.
     void StepZoom(int notches, bool fine) noexcept {
         if (notches == 0) {
             return;
         }
         const float exponent =
             static_cast<float>(notches) * (fine ? kFineStepFactor : 1.0f);
-        const float factor = std::pow(1.0f + kZoomStepPercent / 100.0f, exponent);
+        const float factor =
+            std::pow(1.0f + zoomStepPercent_ / 100.0f, exponent);
         SetZoom(zoom_ * factor);
     }
 
@@ -72,6 +76,7 @@ public:
 
 private:
     float zoom_ = 1.0f;
+    float zoomStepPercent_ = kDefaultZoomStepPercent;
     POINT scroll_{0, 0};
     BYTE opacity_ = kMaxOpacity;
 };
