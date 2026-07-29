@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include "capture/ScreenSnapshot.h"
+#include "capture/WindowPicker.h"
 #include "doc/Document.h"
 #include "overlay/SelectionOverlay.h"
 #include "render/D2DContext.h"
@@ -36,6 +37,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     const ccl::timing::ScopedFlush flushLogOnExit;
     ccl::timing::Stopwatch watch;
 
+    // Recorded before the overlay covers the screen, so that clicking can pick
+    // the window that was actually under the cursor.
+    ccl::capture::WindowList windows;
+    windows.Capture();
+    watch.Lap(L"  window list");
+
     ccl::capture::ScreenSnapshot snapshot;
     if (!snapshot.Take(kCapturePreparationMs)) {
         ReportFatal(L"Failed to capture the screen.");
@@ -44,7 +51,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     ccl::timing::Report(L"launch -> snapshot taken", launchStart);
 
     const ccl::overlay::SelectionResult selection =
-        ccl::overlay::RunSelection(snapshot, launchStart);
+        ccl::overlay::RunSelection(snapshot, windows, launchStart);
     if (!selection.accepted) {
         return 0;
     }
@@ -75,7 +82,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
                          bounds.top + selection.area.top};
 
     ccl::ui::ClipWindow window;
-    if (!window.Create(context, document, position, selection.releasedAt)) {
+    if (!window.Create(context, document, position, selection.title,
+                       selection.releasedAt)) {
         ReportFatal(L"Failed to create the capture window.");
         return 1;
     }

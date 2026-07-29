@@ -6,6 +6,7 @@
 
 #include "doc/Document.h"
 #include "render/D2DContext.h"
+#include "util/NameFormat.h"
 #include "util/Timing.h"
 
 namespace ccl::ui {
@@ -19,6 +20,10 @@ constexpr int kKeyScrollStep = 40;
 // How far in from the edge counts as a resize grip. The window has no visible
 // frame to grab, so the grip lives just inside the outline.
 constexpr LONG kResizeGrip = 6;
+
+// Title format. Placeholders are documented in NameFormat.h; this becomes a
+// setting in a later phase.
+constexpr wchar_t kTitleFormat[] = L"%t";
 
 }  // namespace
 
@@ -47,10 +52,20 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_NCCALCSIZE:
             // Claim the whole window as client area: the window is sizable
             // (WS_THICKFRAME) but must not draw a system frame.
-            if (wParam == TRUE) {
+            //
+            // Compared against FALSE rather than TRUE because the flag arrives
+            // as any non-zero value; testing for exactly 1 let some calls fall
+            // through to the default handling, which reserved the resize
+            // border and made the frame visibly thicken on activation.
+            if (wParam != FALSE) {
                 return 0;
             }
             break;
+
+        case WM_NCACTIVATE:
+            // Passing -1 as the region tells the default handler not to repaint
+            // the non-client area, which does not exist here.
+            return ::DefWindowProcW(hwnd_, msg, wParam, -1);
 
         case WM_NCHITTEST: {
             // Supply the resize grips by hand, since there is no visible frame
@@ -274,10 +289,16 @@ void ClipWindow::ApplyZoom() noexcept {
 }
 
 void ClipWindow::UpdateTitle() noexcept {
-    // No title bar, so this surfaces in the taskbar button. It is the only
-    // feedback for what the current zoom actually is.
-    wchar_t title[64];
-    ::swprintf_s(title, L"CapturaClipA2  %d%%",
+    // No title bar, so this surfaces in the taskbar button. It is also the
+    // only feedback for what the current zoom is.
+    std::wstring name =
+        ccl::util::ExpandPlaceholders(kTitleFormat, sourceTitle_);
+    if (name.empty()) {
+        name = L"CapturaClipA2";
+    }
+
+    wchar_t title[400];
+    ::swprintf_s(title, L"%s  %d%%", name.c_str(),
                  static_cast<int>(std::lround(view_.Zoom() * 100.0f)));
     ::SetWindowTextW(hwnd_, title);
 }
@@ -302,12 +323,14 @@ void ClipWindow::Draw() noexcept {
 
 bool ClipWindow::Create(const ccl::render::D2DContext& context,
                         const ccl::doc::Document& document, POINT position,
+                        const std::wstring& sourceTitle,
                         LONGLONG releasedAt) noexcept {
     if (!document.IsValid()) {
         return false;
     }
     releasedAt_ = releasedAt;
     document_ = &document;
+    sourceTitle_ = sourceTitle;
     ccl::timing::Stopwatch watch;
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);

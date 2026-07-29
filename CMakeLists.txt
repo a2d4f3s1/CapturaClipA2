@@ -20,17 +20,20 @@ set(APP_SOURCES
     src/main.cpp
     src/capture/DibBuffer.cpp
     src/capture/ScreenSnapshot.cpp
+    src/capture/WindowPicker.cpp
     src/doc/Document.cpp
     src/overlay/SelectionOverlay.cpp
     src/render/D2DContext.cpp
     src/render/Renderer.cpp
     src/ui/ClipWindow.cpp
     src/util/Dpi.cpp
+    src/util/NameFormat.cpp
 )
 
 set(APP_HEADERS
     src/capture/DibBuffer.h
     src/capture/ScreenSnapshot.h
+    src/capture/WindowPicker.h
     src/doc/Annotation.h
     src/doc/Document.h
     src/overlay/SelectionOverlay.h
@@ -38,6 +41,7 @@ set(APP_HEADERS
     src/render/Renderer.h
     src/ui/ClipWindow.h
     src/util/Dpi.h
+    src/util/NameFormat.h
     src/util/Timing.h
     src/view/ViewState.h
 )

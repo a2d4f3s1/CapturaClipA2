@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 #include "render/Renderer.h"
 #include "view/ViewState.h"
 
@@ -24,7 +26,7 @@ class ClipWindow {
 public:
     bool Create(const ccl::render::D2DContext& context,
                 const ccl::doc::Document& document, POINT position,
-                LONGLONG releasedAt) noexcept;
+                const std::wstring& sourceTitle, LONGLONG releasedAt) noexcept;
 
     void Run() noexcept;
 
@@ -52,6 +54,7 @@ private:
     ccl::render::Renderer renderer_;
     const ccl::doc::Document* document_ = nullptr;
     ccl::view::ViewState view_;
+    std::wstring sourceTitle_;
 
     bool moving_ = false;
     POINT dragOrigin_{};

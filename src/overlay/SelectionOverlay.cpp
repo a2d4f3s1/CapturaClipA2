@@ -3,6 +3,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "util/Timing.h"
 
@@ -13,6 +14,10 @@ constexpr wchar_t kOverlayClass[] = L"CapturaClipA2.SelectionOverlay";
 
 // Width of the rubber band outline, in pixels.
 constexpr int kFrameWidth = 1;
+
+// Movement below this counts as a click rather than a drag. Zero would mean a
+// slight tremor turns a window pick into an empty selection.
+constexpr int kClickThreshold = 3;
 
 bool Intersect(const RECT& a, const RECT& b, RECT& out) noexcept {
     return ::IntersectRect(&out, &a, &b) != FALSE;
@@ -29,8 +34,9 @@ void OutlineEdges(const RECT& inner, RECT (&edges)[4]) noexcept {
 
 class Overlay {
 public:
-    Overlay(const ccl::capture::ScreenSnapshot& snapshot, LONGLONG launchStart)
-        : snapshot_(snapshot), launchStart_(launchStart) {}
+    Overlay(const ccl::capture::ScreenSnapshot& snapshot,
+            const ccl::capture::WindowList& windows, LONGLONG launchStart)
+        : snapshot_(snapshot), windows_(windows), launchStart_(launchStart) {}
 
     ~Overlay();
 
@@ -52,7 +58,14 @@ private:
     RECT ScreenRect() const noexcept;
     void Finish(bool accepted) noexcept;
 
+    // Whole-window pick. Returns false when no recorded window covers the
+    // point, in which case the click is ignored.
+    bool PickWindowAt(POINT point, bool excludeFrame) noexcept;
+    std::wstring TitleAt(POINT point) const noexcept;
+    POINT ToScreen(POINT point) const noexcept;
+
     const ccl::capture::ScreenSnapshot& snapshot_;
+    const ccl::capture::WindowList& windows_;
     LONGLONG launchStart_ = 0;
 
     HWND hwnd_ = nullptr;
@@ -74,6 +87,10 @@ private:
     bool reportedFirstFrame_ = false;
     LONGLONG releasedAt_ = 0;
     ccl::timing::FrameStats frameStats_;
+
+    bool pickedWindow_ = false;
+    RECT pickedArea_{};
+    std::wstring title_;
 };
 
 Overlay::~Overlay() {
@@ -158,14 +175,31 @@ LRESULT Overlay::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             ::ReleaseCapture();
             cursor_ = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
 
+            // A click rather than a drag picks the whole window under the
+            // cursor; with Ctrl held, its client area only.
+            if (std::abs(cursor_.x - anchor_.x) <= kClickThreshold &&
+                std::abs(cursor_.y - anchor_.y) <= kClickThreshold) {
+                if (PickWindowAt(anchor_, (wParam & MK_CONTROL) != 0)) {
+                    releasedAt_ = releasedAt;
+                    Finish(true);
+                } else {
+                    hasSelection_ = false;
+                    RedrawSelection();
+                }
+                return 0;
+            }
+
             const RECT area = NormalizedSelection();
             if (area.right - area.left <= 0 || area.bottom - area.top <= 0) {
-                // A click without a drag selects nothing; stay in selection
-                // mode instead of producing an empty capture.
                 hasSelection_ = false;
                 RedrawSelection();
                 return 0;
             }
+
+            // Name the capture after whatever sits under the middle of the
+            // selection.
+            title_ = TitleAt(POINT{(area.left + area.right) / 2,
+                                   (area.top + area.bottom) / 2});
             releasedAt_ = releasedAt;
             Finish(true);
             return 0;
@@ -213,6 +247,40 @@ RECT Overlay::NormalizedSelection() const noexcept {
     area.right = std::clamp(std::max(anchor_.x, cursor_.x), screen.left, screen.right);
     area.bottom = std::clamp(std::max(anchor_.y, cursor_.y), screen.top, screen.bottom);
     return area;
+}
+
+POINT Overlay::ToScreen(POINT point) const noexcept {
+    const ccl::capture::VirtualScreen& bounds = snapshot_.Bounds();
+    return POINT{point.x + bounds.left, point.y + bounds.top};
+}
+
+std::wstring Overlay::TitleAt(POINT point) const noexcept {
+    const ccl::capture::WindowInfo* info = windows_.Hit(ToScreen(point));
+    return info != nullptr ? info->title : std::wstring{};
+}
+
+bool Overlay::PickWindowAt(POINT point, bool excludeFrame) noexcept {
+    const ccl::capture::WindowInfo* info = windows_.Hit(ToScreen(point));
+    if (info == nullptr) {
+        return false;
+    }
+
+    const RECT& source = excludeFrame ? info->client : info->frame;
+    const ccl::capture::VirtualScreen& bounds = snapshot_.Bounds();
+
+    RECT area{source.left - bounds.left, source.top - bounds.top,
+              source.right - bounds.left, source.bottom - bounds.top};
+
+    const RECT screen = ScreenRect();
+    if (!Intersect(area, screen, area) || area.right <= area.left ||
+        area.bottom <= area.top) {
+        return false;
+    }
+
+    pickedArea_ = area;
+    pickedWindow_ = true;
+    title_ = info->title;
+    return true;
 }
 
 void Overlay::Finish(bool accepted) noexcept {
@@ -349,8 +417,9 @@ SelectionResult Overlay::Run() noexcept {
 
     result.accepted = accepted_;
     if (accepted_) {
-        result.area = NormalizedSelection();
+        result.area = pickedWindow_ ? pickedArea_ : NormalizedSelection();
         result.releasedAt = releasedAt_;
+        result.title = title_;
     }
     return result;
 }
@@ -358,11 +427,12 @@ SelectionResult Overlay::Run() noexcept {
 }  // namespace
 
 SelectionResult RunSelection(const ccl::capture::ScreenSnapshot& snapshot,
+                             const ccl::capture::WindowList& windows,
                              LONGLONG launchStart) noexcept {
     if (!snapshot.IsValid()) {
         return SelectionResult{};
     }
-    Overlay overlay(snapshot, launchStart);
+    Overlay overlay(snapshot, windows, launchStart);
     return overlay.Run();
 }
 
