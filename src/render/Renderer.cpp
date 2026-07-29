@@ -68,7 +68,7 @@ bool Renderer::EnsureImageBitmap() noexcept {
     return SUCCEEDED(hr);
 }
 
-void Renderer::Draw() noexcept {
+void Renderer::Draw(const ccl::view::ViewState& view) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -93,10 +93,22 @@ void Renderer::Draw() noexcept {
     if (image_) {
         const auto inset = static_cast<float>(kWindowBorder);
         const D2D1_SIZE_F size = image_->GetSize();
-        target_->DrawBitmap(
-            image_.Get(),
-            D2D1::RectF(inset, inset, inset + size.width, inset + size.height),
-            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        const float zoom = view.Zoom();
+        const POINT scroll = view.Scroll();
+
+        // The zoomed image is laid out at the scroll offset; anything outside
+        // the window is simply clipped by the render target.
+        const float left = inset - static_cast<float>(scroll.x);
+        const float top = inset - static_cast<float>(scroll.y);
+        const D2D1_RECT_F destination =
+            D2D1::RectF(left, top, left + size.width * zoom,
+                        top + size.height * zoom);
+
+        const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
+            smoothScaling_ ? D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+                           : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+
+        target_->DrawBitmap(image_.Get(), destination, 1.0f, interpolation);
     }
 
     if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {

@@ -39,6 +39,7 @@ set(APP_HEADERS
     src/ui/ClipWindow.h
     src/util/Dpi.h
     src/util/Timing.h
+    src/view/ViewState.h
 )
 
 add_executable(CapturaClipA2 WIN32
