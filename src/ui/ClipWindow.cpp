@@ -4,6 +4,9 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
+#include <utility>
+#include <vector>
 
 #include "doc/Document.h"
 #include "io/AutoSave.h"
@@ -24,6 +27,62 @@ constexpr int kKeyScrollStep = 40;
 // How far in from the edge counts as a resize grip. The window has no visible
 // frame to grab, so the grip lives just inside the outline.
 constexpr LONG kResizeGrip = 6;
+
+// Points closer together than this are dropped while drawing, which keeps the
+// stroke geometry small without any visible difference.
+constexpr float kMinPointSpacing = 0.75f;
+
+bool IsKeyDown(int key) noexcept {
+    return (::GetKeyState(key) & 0x8000) != 0;
+}
+
+float DistanceToSegmentSquared(float px, float py, float ax, float ay, float bx,
+                               float by) noexcept {
+    const float dx = bx - ax;
+    const float dy = by - ay;
+    const float lengthSquared = dx * dx + dy * dy;
+
+    float closestX = ax;
+    float closestY = ay;
+    if (lengthSquared > 0.0f) {
+        float t = ((px - ax) * dx + (py - ay) * dy) / lengthSquared;
+        t = std::clamp(t, 0.0f, 1.0f);
+        closestX = ax + t * dx;
+        closestY = ay + t * dy;
+    }
+
+    const float ox = px - closestX;
+    const float oy = py - closestY;
+    return ox * ox + oy * oy;
+}
+
+// Measured against the segments rather than only the recorded points, so that
+// a straight line -- which is just two points far apart -- can still be erased
+// anywhere along its length.
+bool StrokeHit(const ccl::doc::Stroke& stroke, D2D1_POINT_2F point,
+               float radius) noexcept {
+    if (stroke.points.empty()) {
+        return false;
+    }
+
+    const float threshold = radius + stroke.width * 0.5f;
+    const float thresholdSquared = threshold * threshold;
+
+    if (stroke.points.size() == 1) {
+        const float dx = stroke.points[0].x - point.x;
+        const float dy = stroke.points[0].y - point.y;
+        return dx * dx + dy * dy <= thresholdSquared;
+    }
+
+    for (size_t i = 1; i < stroke.points.size(); ++i) {
+        if (DistanceToSegmentSquared(point.x, point.y, stroke.points[i - 1].x,
+                                     stroke.points[i - 1].y, stroke.points[i].x,
+                                     stroke.points[i].y) <= thresholdSquared) {
+            return true;
+        }
+    }
+    return false;
+}
 
 }  // namespace
 
@@ -91,6 +150,13 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return HTCLIENT;
         }
 
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTCLIENT) {
+                UpdateCursor();
+                return TRUE;
+            }
+            break;
+
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             ::BeginPaint(hwnd_, &ps);
@@ -111,7 +177,19 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_KEYDOWN:
+            if (wParam == VK_SPACE) {
+                spaceHeld_ = true;
+                UpdateCursor();
+                return 0;
+            }
             OnKeyDown(wParam);
+            return 0;
+
+        case WM_KEYUP:
+            if (wParam == VK_SPACE) {
+                spaceHeld_ = false;
+                UpdateCursor();
+            }
             return 0;
 
         case WM_MBUTTONDOWN:
@@ -122,41 +200,26 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_LBUTTONDOWN:
-            scrolling_ = true;
-            ::GetCursorPos(&scrollOrigin_);
-            scrollStart_ = view_.Scroll();
-            ::SetCapture(hwnd_);
+            OnLeftDown(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
             return 0;
 
-        case WM_MOUSEMOVE: {
-            if (moving_) {
-                POINT now{};
-                ::GetCursorPos(&now);
-                ::SetWindowPos(hwnd_, nullptr,
-                               windowOrigin_.left + (now.x - dragOrigin_.x),
-                               windowOrigin_.top + (now.y - dragOrigin_.y), 0, 0,
-                               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                return 0;
-            }
-            if (scrolling_) {
-                POINT now{};
-                ::GetCursorPos(&now);
-                // Dragging moves the image itself, so the scroll offset goes
-                // the opposite way to the cursor.
-                view_.SetScroll(
-                    POINT{scrollStart_.x - (now.x - scrollOrigin_.x),
-                          scrollStart_.y - (now.y - scrollOrigin_.y)},
-                    ContentSize(), ViewportSize());
-                Draw();
-            }
+        case WM_MOUSEMOVE:
+            OnMouseMove(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
             return 0;
-        }
+
+        case WM_LBUTTONUP:
+            OnLeftUp();
+            return 0;
+
+        case WM_MOUSELEAVE:
+            trackingLeave_ = false;
+            cursorInside_ = false;
+            Draw();
+            return 0;
 
         case WM_MBUTTONUP:
-        case WM_LBUTTONUP:
-            if (moving_ || scrolling_) {
+            if (moving_) {
                 moving_ = false;
-                scrolling_ = false;
                 ::ReleaseCapture();
             }
             return 0;
@@ -164,6 +227,10 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CAPTURECHANGED:
             moving_ = false;
             scrolling_ = false;
+            if (drawing_) {
+                EndStroke();
+            }
+            erasing_ = false;
             return 0;
 
         case WM_RBUTTONDOWN:
@@ -172,6 +239,7 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CLOSE:
+            ccl::timing::ReportFrames(L"clip window draw", drawStats_);
             AutoSaveBeforeClosing();
             ::DestroyWindow(hwnd_);
             return 0;
@@ -188,6 +256,224 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
     }
     return ::DefWindowProcW(hwnd_, msg, wParam, lParam);
+}
+
+bool ClipWindow::ScrollingWithLeftButton() const noexcept {
+    return spaceHeld_ || tool_.tool == ccl::tool::Tool::View;
+}
+
+bool ClipWindow::ShowsBrushCursor() const noexcept {
+    return cursorInside_ && !ScrollingWithLeftButton() &&
+           (tool_.tool == ccl::tool::Tool::Pen ||
+            tool_.tool == ccl::tool::Tool::Eraser);
+}
+
+void ClipWindow::TrackMouseLeave() noexcept {
+    cursorInside_ = true;
+    if (trackingLeave_) {
+        return;
+    }
+    // Needed to get WM_MOUSELEAVE, without which the brush outline would stay
+    // painted after the cursor has gone.
+    TRACKMOUSEEVENT track{};
+    track.cbSize = sizeof(track);
+    track.dwFlags = TME_LEAVE;
+    track.hwndTrack = hwnd_;
+    trackingLeave_ = ::TrackMouseEvent(&track) != FALSE;
+}
+
+void ClipWindow::UpdateCursor() noexcept {
+    if (ScrollingWithLeftButton()) {
+        ::SetCursor(::LoadCursorW(nullptr, IDC_SIZEALL));
+        return;
+    }
+
+    if (tool_.tool == ccl::tool::Tool::Pen ||
+        tool_.tool == ccl::tool::Tool::Eraser) {
+        // The size ring stands in for the pointer. A crosshair drawn on top of
+        // it just sits in the middle and hides how big the brush actually is.
+        ::SetCursor(nullptr);
+        return;
+    }
+
+    ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+}
+
+D2D1_POINT_2F ClipWindow::ToImage(POINT client) const noexcept {
+    const float zoom = view_.Zoom();
+    const POINT scroll = view_.Scroll();
+    const auto border = static_cast<float>(ccl::render::kWindowBorder);
+
+    return D2D1::Point2F(
+        (static_cast<float>(client.x) - border + static_cast<float>(scroll.x)) / zoom,
+        (static_cast<float>(client.y) - border + static_cast<float>(scroll.y)) / zoom);
+}
+
+void ClipWindow::BeginStroke(POINT client) noexcept {
+    activeStroke_ = ccl::doc::Stroke{};
+    activeStroke_.color = tool_.color;
+    activeStroke_.width = tool_.Width();
+    activeStroke_.antialias = tool_.antialias;
+
+    const D2D1_POINT_2F point = ToImage(client);
+    activeStroke_.points.push_back({point.x, point.y, 1.0f});
+
+    drawing_ = true;
+    // Decided at press time and held for the whole stroke, so the line does not
+    // flip between freehand and straight midway through.
+    straightLine_ = IsKeyDown(VK_SHIFT);
+    ::SetCapture(hwnd_);
+    Draw();
+}
+
+void ClipWindow::ContinueStroke(POINT client) noexcept {
+    const D2D1_POINT_2F point = ToImage(client);
+
+    if (straightLine_) {
+        activeStroke_.points.resize(1);
+        activeStroke_.points.push_back({point.x, point.y, 1.0f});
+    } else {
+        const auto& last = activeStroke_.points.back();
+        if (std::abs(last.x - point.x) < kMinPointSpacing &&
+            std::abs(last.y - point.y) < kMinPointSpacing) {
+            return;
+        }
+        activeStroke_.points.push_back({point.x, point.y, 1.0f});
+    }
+    Draw();
+}
+
+void ClipWindow::EndStroke() noexcept {
+    if (!drawing_) {
+        return;
+    }
+    drawing_ = false;
+    ::ReleaseCapture();
+
+    if (document_ != nullptr && !activeStroke_.points.empty()) {
+        history_.Record(document_->Annotations());
+
+        ccl::doc::Annotation annotation;
+        annotation.kind = ccl::doc::AnnotationKind::Stroke;
+        annotation.stroke = std::move(activeStroke_);
+        document_->Annotations().push_back(std::move(annotation));
+    }
+
+    activeStroke_ = ccl::doc::Stroke{};
+    Draw();
+}
+
+void ClipWindow::EraseAt(POINT client) noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+
+    auto& annotations = document_->Annotations();
+    const D2D1_POINT_2F point = ToImage(client);
+    const float radius = tool_.Width() * 0.5f;
+
+    std::vector<size_t> victims;
+    for (size_t i = 0; i < annotations.size(); ++i) {
+        if (annotations[i].kind == ccl::doc::AnnotationKind::Stroke &&
+            StrokeHit(annotations[i].stroke, point, radius)) {
+            victims.push_back(i);
+        }
+    }
+    if (victims.empty()) {
+        return;
+    }
+
+    // One undo entry per erase drag, not per stroke removed.
+    if (!erasedAny_) {
+        history_.Record(annotations);
+        erasedAny_ = true;
+    }
+
+    for (size_t i = victims.size(); i > 0; --i) {
+        annotations.erase(annotations.begin() +
+                          static_cast<std::ptrdiff_t>(victims[i - 1]));
+    }
+}
+
+void ClipWindow::OnLeftDown(POINT client) noexcept {
+    if (ScrollingWithLeftButton()) {
+        scrolling_ = true;
+        ::GetCursorPos(&scrollOrigin_);
+        scrollStart_ = view_.Scroll();
+        ::SetCapture(hwnd_);
+        return;
+    }
+
+    switch (tool_.tool) {
+        case ccl::tool::Tool::Pen:
+            BeginStroke(client);
+            return;
+        case ccl::tool::Tool::Eraser:
+            erasing_ = true;
+            erasedAny_ = false;
+            ::SetCapture(hwnd_);
+            EraseAt(client);
+            Draw();
+            return;
+        default:
+            return;
+    }
+}
+
+void ClipWindow::OnMouseMove(POINT client) noexcept {
+    lastCursor_ = client;
+    TrackMouseLeave();
+
+    if (moving_) {
+        POINT now{};
+        ::GetCursorPos(&now);
+        ::SetWindowPos(hwnd_, nullptr,
+                       windowOrigin_.left + (now.x - dragOrigin_.x),
+                       windowOrigin_.top + (now.y - dragOrigin_.y), 0, 0,
+                       SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+
+    if (scrolling_) {
+        POINT now{};
+        ::GetCursorPos(&now);
+        // Dragging moves the image itself, so the scroll offset goes the
+        // opposite way to the cursor.
+        view_.SetScroll(POINT{scrollStart_.x - (now.x - scrollOrigin_.x),
+                              scrollStart_.y - (now.y - scrollOrigin_.y)},
+                        ContentSize(), ViewportSize());
+        Draw();
+        return;
+    }
+
+    if (drawing_) {
+        ContinueStroke(client);
+        return;
+    }
+
+    if (erasing_) {
+        EraseAt(client);
+    }
+
+    if (ShowsBrushCursor() || erasing_) {
+        // Only ask for a repaint rather than drawing here. Moving the pointer
+        // generates far more messages than the screen can show, and letting
+        // them collapse into a single WM_PAINT keeps the cost proportional to
+        // what is actually displayed.
+        ::InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void ClipWindow::OnLeftUp() noexcept {
+    if (drawing_) {
+        EndStroke();
+        return;
+    }
+    if (scrolling_ || erasing_) {
+        scrolling_ = false;
+        erasing_ = false;
+        ::ReleaseCapture();
+    }
 }
 
 SIZE ClipWindow::ContentSize() const noexcept {
@@ -226,8 +512,7 @@ void ClipWindow::OnWheel(int notches, WPARAM keys) noexcept {
 }
 
 void ClipWindow::OnKeyDown(WPARAM key) noexcept {
-    const bool control = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    if (control) {
+    if (IsKeyDown(VK_CONTROL)) {
         switch (key) {
             case 'S':
                 SaveAs();
@@ -235,12 +520,66 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             case 'C':
                 CopyImage();
                 return;
+            case 'Z':
+                if (document_ != nullptr &&
+                    history_.Undo(document_->Annotations())) {
+                    Draw();
+                }
+                return;
+            case 'Y':
+                if (document_ != nullptr &&
+                    history_.Redo(document_->Annotations())) {
+                    Draw();
+                }
+                return;
             default:
                 break;
         }
     }
 
+    // Shift+digit picks a quick colour; the digits alone are zoom presets.
+    if (IsKeyDown(VK_SHIFT) && key >= '1' && key <= '8') {
+        tool_.color = ccl::tool::kQuickColors[key - '1'];
+        return;
+    }
+
     switch (key) {
+        case 'V':
+            tool_.tool = ccl::tool::Tool::View;
+            UpdateCursor();
+            UpdateTitle();
+            Draw();
+            return;
+        case 'B':
+            tool_.tool = ccl::tool::Tool::Pen;
+            UpdateCursor();
+            UpdateTitle();
+            Draw();
+            return;
+        case 'E':
+            tool_.tool = ccl::tool::Tool::Eraser;
+            UpdateCursor();
+            UpdateTitle();
+            Draw();
+            return;
+
+        case VK_OEM_4:  // [
+            tool_.StepWidth(-1);
+            UpdateTitle();
+            Draw();
+            return;
+        case VK_OEM_6:  // ]
+            tool_.StepWidth(1);
+            UpdateTitle();
+            Draw();
+            return;
+
+        case 'A':
+            tool_.antialias = !tool_.antialias;
+            UpdateTitle();
+            Draw();
+            return;
+
         case '1':
         case '2':
         case '3':
@@ -317,9 +656,22 @@ void ClipWindow::UpdateTitle() noexcept {
         name = L"CapturaClipA2";
     }
 
-    wchar_t title[400];
-    ::swprintf_s(title, L"%s  %d%%", name.c_str(),
-                 static_cast<int>(std::lround(view_.Zoom() * 100.0f)));
+    const int zoom = static_cast<int>(std::lround(view_.Zoom() * 100.0f));
+
+    wchar_t title[440];
+    switch (tool_.tool) {
+        case ccl::tool::Tool::Pen:
+            ::swprintf_s(title, L"%s  %d%%  Pen %.0fpx%s", name.c_str(), zoom,
+                         tool_.Width(), tool_.antialias ? L"" : L" (aliased)");
+            break;
+        case ccl::tool::Tool::Eraser:
+            ::swprintf_s(title, L"%s  %d%%  Eraser %.0fpx", name.c_str(), zoom,
+                         tool_.Width());
+            break;
+        default:
+            ::swprintf_s(title, L"%s  %d%%", name.c_str(), zoom);
+            break;
+    }
     ::SetWindowTextW(hwnd_, title);
 }
 
@@ -398,7 +750,7 @@ void ClipWindow::AutoSaveBeforeClosing() noexcept {
         return;
     }
     // Holding Shift while closing skips the automatic save.
-    if ((::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+    if (IsKeyDown(VK_SHIFT)) {
         return;
     }
 
@@ -407,16 +759,28 @@ void ClipWindow::AutoSaveBeforeClosing() noexcept {
 }
 
 void ClipWindow::Draw() noexcept {
-    renderer_.Draw(view_);
+    const LONGLONG frameStart = ccl::timing::Now();
 
-    if (!reportedFirstFrame_) {
-        reportedFirstFrame_ = true;
-        ccl::timing::Report(L"release -> window shown", releasedAt_);
+    ccl::render::BrushCursor cursor{};
+    const bool showCursor = ShowsBrushCursor();
+    if (showCursor) {
+        cursor.position = ToImage(lastCursor_);
+        cursor.radius = tool_.Width() * 0.5f;
+        cursor.antialias = tool_.antialias;
+    }
+
+    renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
+                   showCursor ? &cursor : nullptr);
+
+    // Frames before the window is actually on screen are not representative,
+    // so they are kept out of the statistics.
+    if (reportedFirstFrame_) {
+        drawStats_.Add(ccl::timing::MillisecondsSince(frameStart));
     }
 }
 
 bool ClipWindow::Create(ccl::render::D2DContext& context,
-                        const ccl::doc::Document& document,
+                        ccl::doc::Document& document,
                         const ccl::app::Settings& settings, POINT position,
                         const std::wstring& sourceTitle,
                         LONGLONG releasedAt) noexcept {
@@ -451,10 +815,11 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     // is what makes the window translucent; at full opacity it costs nothing
     // visible. Both become settings alongside the other appearance options.
     //
-    // The window is the image plus the outline on each side, and it is placed
-    // so that the image itself lands exactly where the selection was.
     // WS_THICKFRAME makes the window sizable; WM_NCCALCSIZE then hides the
     // frame it would otherwise draw, and WM_NCHITTEST supplies the grips.
+    //
+    // The window is the image plus the outline on each side, and it is placed
+    // so that the image itself lands exactly where the selection was.
     const int frame = 2 * ccl::render::kWindowBorder;
     hwnd_ = ::CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_LAYERED, kClipWindowClass,
@@ -477,6 +842,13 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
 
     ::ShowWindow(hwnd_, SW_SHOW);
     Draw();
+
+    // Reported here rather than inside Draw: window creation itself sends a
+    // WM_SIZE, and the draw it triggers happens before there is anything to
+    // draw onto, so treating that as the first frame measured the wrong thing.
+    ccl::timing::Report(L"release -> window shown", releasedAt_);
+    reportedFirstFrame_ = true;
+
     ApplyOpacity();
 
     // Keyboard and wheel messages go to the focused window, so the capture has

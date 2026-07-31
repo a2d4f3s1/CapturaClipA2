@@ -23,6 +23,7 @@ set(APP_SOURCES
     src/capture/ScreenSnapshot.cpp
     src/capture/WindowPicker.cpp
     src/doc/Document.cpp
+    src/doc/History.cpp
     src/io/AutoSave.cpp
     src/io/Clipboard.cpp
     src/io/ImageCodec.cpp
@@ -41,6 +42,7 @@ set(APP_HEADERS
     src/capture/WindowPicker.h
     src/doc/Annotation.h
     src/doc/Document.h
+    src/doc/History.h
     src/io/AutoSave.h
     src/io/Clipboard.h
     src/io/ImageCodec.h
@@ -48,6 +50,7 @@ set(APP_HEADERS
     src/render/D2DContext.h
     src/render/Renderer.h
     src/ui/ClipWindow.h
+    src/tool/ToolState.h
     src/util/Dpi.h
     src/util/NameFormat.h
     src/util/Timing.h

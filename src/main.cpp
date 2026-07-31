@@ -65,7 +65,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     // The only GPU-to-CPU read in the whole flow, and only for the pixels that
     // were actually selected.
-    ccl::doc::Document document(snapshot.ExtractRegion(selection.area));
+    ccl::doc::Document document{snapshot.ExtractRegion(selection.area)};
     if (!document.IsValid()) {
         ReportFatal(L"Failed to extract the selected region.");
         return 1;
