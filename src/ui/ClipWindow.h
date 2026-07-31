@@ -55,6 +55,9 @@ private:
     void UpdateTitle() noexcept;
     void UpdateCursor() noexcept;
 
+    void ShowContextMenu(POINT screen) noexcept;
+    void OnCommand(int command) noexcept;
+
     void SaveAs() noexcept;
     void CopyImage() noexcept;
     // Saves automatically before the capture is discarded, unless the image has

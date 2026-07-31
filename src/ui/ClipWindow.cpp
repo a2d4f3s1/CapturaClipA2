@@ -36,6 +36,29 @@ bool IsKeyDown(int key) noexcept {
     return (::GetKeyState(key) & 0x8000) != 0;
 }
 
+// Context menu command ids. Ranges leave room for the per-entry items that
+// follow each base value.
+enum MenuId : UINT {
+    kMenuSave = 100,
+    kMenuCopy,
+    kMenuUndo,
+    kMenuRedo,
+    kMenuFit,
+    kMenuAntialias,
+    kMenuExit,
+
+    kMenuToolBase = 200,   // + Tool
+    kMenuColorBase = 300,  // + index into kQuickColors
+    kMenuWidthBase = 400,  // + index into kWidthPresets
+    kMenuZoomBase = 500,   // + zoom in hundreds of percent
+};
+
+constexpr float kWidthPresets[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
+
+constexpr const wchar_t* kColorNames[] = {
+    L"赤", L"緑", L"青", L"黄", L"マゼンタ", L"シアン", L"白", L"黒",
+};
+
 float DistanceToSegmentSquared(float px, float py, float ax, float ay, float bx,
                                float by) noexcept {
     const float dx = bx - ax;
@@ -233,10 +256,12 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             erasing_ = false;
             return 0;
 
-        case WM_RBUTTONDOWN:
-            // Provisional: the context menu takes this over in a later phase.
-            ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        case WM_RBUTTONUP: {
+            POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ::ClientToScreen(hwnd_, &screen);
+            ShowContextMenu(screen);
             return 0;
+        }
 
         case WM_CLOSE:
             ccl::timing::ReportFrames(L"clip window draw", drawStats_);
@@ -682,6 +707,150 @@ void ClipWindow::ApplyOpacity() noexcept {
 void ClipWindow::FitToImage() noexcept {
     view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
     ApplyZoom();
+}
+
+void ClipWindow::ShowContextMenu(POINT screen) noexcept {
+    const HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+
+    const UINT checked = MF_STRING | MF_CHECKED;
+    const UINT plain = MF_STRING;
+
+    ::AppendMenuW(menu, plain, kMenuSave, L"保存...\tCtrl+S");
+    ::AppendMenuW(menu, plain, kMenuCopy, L"クリップボードにコピー\tCtrl+C");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    ::AppendMenuW(menu, plain | (history_.CanUndo() ? 0u : MF_GRAYED), kMenuUndo,
+                  L"元に戻す\tCtrl+Z");
+    ::AppendMenuW(menu, plain | (history_.CanRedo() ? 0u : MF_GRAYED), kMenuRedo,
+                  L"やり直し\tCtrl+Y");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    const HMENU tools = ::CreatePopupMenu();
+    const auto toolEntry = [&](ccl::tool::Tool tool, const wchar_t* label) {
+        ::AppendMenuW(tools, tool_.tool == tool ? checked : plain,
+                      kMenuToolBase + static_cast<UINT>(tool), label);
+    };
+    toolEntry(ccl::tool::Tool::View, L"ビュー\tV");
+    toolEntry(ccl::tool::Tool::Pen, L"ペン\tB");
+    toolEntry(ccl::tool::Tool::Eraser, L"消しゴム\tE");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"ツール");
+
+    const HMENU colors = ::CreatePopupMenu();
+    for (size_t i = 0; i < ccl::tool::kQuickColors.size(); ++i) {
+        const auto& entry = ccl::tool::kQuickColors[i];
+        const bool active = entry.r == tool_.color.r && entry.g == tool_.color.g &&
+                            entry.b == tool_.color.b;
+        wchar_t label[64];
+        ::swprintf_s(label, L"%s\tShift+%zu", kColorNames[i], i + 1);
+        ::AppendMenuW(colors, active ? checked : plain,
+                      kMenuColorBase + static_cast<UINT>(i), label);
+    }
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(colors), L"色");
+
+    const HMENU widths = ::CreatePopupMenu();
+    for (size_t i = 0; i < ARRAYSIZE(kWidthPresets); ++i) {
+        wchar_t label[32];
+        ::swprintf_s(label, L"%.0f px", kWidthPresets[i]);
+        ::AppendMenuW(widths,
+                      tool_.Width() == kWidthPresets[i] ? checked : plain,
+                      kMenuWidthBase + static_cast<UINT>(i), label);
+    }
+    ::AppendMenuW(widths, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(widths, tool_.antialias ? checked : plain, kMenuAntialias,
+                  L"なめらかにする\tA");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(widths), L"線");
+
+    const HMENU zoom = ::CreatePopupMenu();
+    for (int percent = 100; percent <= 500; percent += 100) {
+        wchar_t label[32];
+        ::swprintf_s(label, L"%d%%\t%d", percent, percent / 100);
+        const bool active =
+            std::lround(view_.Zoom() * 100.0f) == static_cast<long>(percent);
+        ::AppendMenuW(zoom, active ? checked : plain,
+                      kMenuZoomBase + static_cast<UINT>(percent), label);
+    }
+    ::AppendMenuW(zoom, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(zoom, plain, kMenuFit, L"画像サイズに合わせる\tF");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(zoom), L"表示");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, plain, kMenuExit, L"終了");
+
+    // TPM_RETURNCMD hands the choice back directly, which avoids routing it
+    // through WM_COMMAND for a menu that only exists for the duration of the
+    // call.
+    const int command = ::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+        screen.x, screen.y, 0, hwnd_, nullptr);
+
+    ::DestroyMenu(menu);
+
+    if (command != 0) {
+        OnCommand(command);
+    }
+}
+
+void ClipWindow::OnCommand(int command) noexcept {
+    const auto id = static_cast<UINT>(command);
+
+    if (id >= kMenuZoomBase) {
+        view_.SetZoom(static_cast<float>(id - kMenuZoomBase) / 100.0f);
+        ApplyZoom();
+        return;
+    }
+    if (id >= kMenuWidthBase) {
+        tool_.SetWidth(kWidthPresets[id - kMenuWidthBase]);
+        UpdateTitle();
+        Draw();
+        return;
+    }
+    if (id >= kMenuColorBase) {
+        tool_.color = ccl::tool::kQuickColors[id - kMenuColorBase];
+        Draw();
+        return;
+    }
+    if (id >= kMenuToolBase) {
+        tool_.tool = static_cast<ccl::tool::Tool>(id - kMenuToolBase);
+        UpdateCursor();
+        UpdateTitle();
+        Draw();
+        return;
+    }
+
+    switch (id) {
+        case kMenuSave:
+            SaveAs();
+            return;
+        case kMenuCopy:
+            CopyImage();
+            return;
+        case kMenuUndo:
+            if (document_ != nullptr && history_.Undo(document_->Annotations())) {
+                Draw();
+            }
+            return;
+        case kMenuRedo:
+            if (document_ != nullptr && history_.Redo(document_->Annotations())) {
+                Draw();
+            }
+            return;
+        case kMenuFit:
+            FitToImage();
+            return;
+        case kMenuAntialias:
+            tool_.antialias = !tool_.antialias;
+            UpdateTitle();
+            Draw();
+            return;
+        case kMenuExit:
+            ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+            return;
+        default:
+            return;
+    }
 }
 
 void ClipWindow::SaveAs() noexcept {
