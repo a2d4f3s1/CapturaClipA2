@@ -53,6 +53,7 @@ private:
     void DiscardDeviceResources() noexcept;
 
     void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;
+    void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
 
     const D2DContext* context_ = nullptr;
     HWND hwnd_ = nullptr;

@@ -72,10 +72,16 @@ private:
     // Client pixels to image coordinates, undoing zoom and scroll.
     D2D1_POINT_2F ToImage(POINT client) const noexcept;
 
-    void BeginStroke(POINT client) noexcept;
-    void ContinueStroke(POINT client) noexcept;
+    float WidthForPressure(float pressure) const noexcept;
+    void BeginStroke(POINT client, float pressure) noexcept;
+    void ContinueStroke(POINT client, float pressure) noexcept;
     void EndStroke() noexcept;
     void EraseAt(POINT client) noexcept;
+
+    // Pen input arrives as pointer messages, which carry pressure. Returns
+    // false for anything that is not a pen so it falls through to the ordinary
+    // mouse handling.
+    bool HandlePointerMessage(UINT msg, WPARAM wParam) noexcept;
 
     SIZE ContentSize() const noexcept;
     SIZE ViewportSize() const noexcept;
@@ -111,6 +117,13 @@ private:
     bool drawing_ = false;
     bool straightLine_ = false;
     ccl::doc::Stroke activeStroke_;
+
+    // Set while a pen is in contact, so pointer and mouse messages for the
+    // same gesture are not both acted on.
+    bool penActive_ = false;
+    // Tool to restore after drawing with the eraser end of a pen.
+    ccl::tool::Tool toolBeforePenEraser_ = ccl::tool::Tool::Pen;
+    bool penEraserActive_ = false;
 
     bool erasing_ = false;
     bool erasedAny_ = false;

@@ -23,6 +23,12 @@ public:
     UINT preparationMs = 0;
     bool copyOnCapture = false;
 
+    // Drawing
+    bool usePenPressure = true;
+    // Width at zero pressure, as a fraction of the nominal brush width. Keeps a
+    // light touch from thinning to nothing.
+    float pressureMinScale = 0.15f;
+
     // Appearance
     std::wstring titleFormat = L"%t";
     bool smoothScaling = true;

@@ -97,6 +97,10 @@ void Settings::Load() noexcept {
                                             path_.c_str());
     copyOnCapture = ReadBool(L"Capture", L"CopyOnCapture", copyOnCapture, path_);
 
+    usePenPressure = ReadBool(L"Drawing", L"UsePenPressure", usePenPressure, path_);
+    pressureMinScale =
+        ReadFloat(L"Drawing", L"PressureMinScale", pressureMinScale, path_);
+
     titleFormat = ReadString(L"Appearance", L"TitleFormat", titleFormat, path_);
     smoothScaling = ReadBool(L"Appearance", L"SmoothScaling", smoothScaling, path_);
     zoomStepPercent =
@@ -122,6 +126,8 @@ void Settings::Load() noexcept {
     if (zoomStepPercent > 100.0f) zoomStepPercent = 100.0f;
     if (paletteScalePercent < 50) paletteScalePercent = 50;
     if (paletteScalePercent > 300) paletteScalePercent = 300;
+    if (pressureMinScale < 0.0f) pressureMinScale = 0.0f;
+    if (pressureMinScale > 1.0f) pressureMinScale = 1.0f;
 }
 
 void Settings::Save() const noexcept {
@@ -149,6 +155,14 @@ void Settings::Save() const noexcept {
                L"; Copy every capture to the clipboard automatically.\n"
                L"CopyOnCapture=%d\n"
                L"\n"
+               L"[Drawing]\n"
+               L"; Vary stroke width with pen pressure. Needs a pressure-\n"
+               L"; sensitive pen; a mouse always draws at full width.\n"
+               L"UsePenPressure=%d\n"
+               L"; Width at the lightest touch, as a fraction of the brush\n"
+               L"; width. 0.15 keeps a faint line rather than nothing at all.\n"
+               L"PressureMinScale=%g\n"
+               L"\n"
                L"[Appearance]\n"
                L"; Placeholders: %%y year, %%Y year (2 digits), %%m month, %%d day,\n"
                L";               %%h hour, %%n minute, %%s second, %%t source name\n"
@@ -175,7 +189,8 @@ void Settings::Save() const noexcept {
                L"; Days to keep automatically saved files. 0 keeps them forever.\n"
                L"; Expired files go to the Recycle Bin rather than being deleted.\n"
                L"HistoryDays=%d\n",
-               preparationMs, copyOnCapture ? 1 : 0, titleFormat.c_str(),
+               preparationMs, copyOnCapture ? 1 : 0, usePenPressure ? 1 : 0,
+               pressureMinScale, titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
                FormatName(defaultFormat),
                jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays);

@@ -14,18 +14,35 @@ struct Color {
 struct StrokePoint {
     float x = 0.0f;
     float y = 0.0f;
-    // 0..1. Always 1 for mouse input; kept per-point so that pen pressure can
-    // be added later without rebuilding the stroke representation or the
-    // rendering that depends on it.
-    float pressure = 1.0f;
+    // The width the line actually has here, in image pixels.
+    //
+    // Stored resolved rather than as a pressure to be scaled later, because the
+    // width comes from different places depending on how the line was drawn --
+    // pen pressure while drawing freehand, the brush size at each end of a
+    // straight line -- and the renderer should not have to care which.
+    float width = 3.0f;
 };
 
 // A single drawn line, in image coordinates at 100% zoom.
 struct Stroke {
     std::vector<StrokePoint> points;
     Color color;
-    float width = 3.0f;
     bool antialias = true;
+
+    // True when the width changes along the stroke, which means it has to be
+    // drawn segment by segment rather than as a single path.
+    bool HasVariableWidth() const noexcept {
+        if (points.size() < 2) {
+            return false;
+        }
+        const float first = points.front().width;
+        for (const StrokePoint& point : points) {
+            if (point.width != first) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 // Annotations are kept as objects instead of being burned into the image.

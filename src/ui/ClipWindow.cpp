@@ -47,6 +47,7 @@ enum MenuId : UINT {
     kMenuRedo,
     kMenuFit,
     kMenuAntialias,
+    kMenuPressure,
     kMenuEyedropper,
     kMenuColorPicker,
     kMenuExit,
@@ -92,19 +93,24 @@ bool StrokeHit(const ccl::doc::Stroke& stroke, D2D1_POINT_2F point,
         return false;
     }
 
-    const float threshold = radius + stroke.width * 0.5f;
-    const float thresholdSquared = threshold * threshold;
-
     if (stroke.points.size() == 1) {
+        const float threshold = radius + stroke.points[0].width * 0.5f;
         const float dx = stroke.points[0].x - point.x;
         const float dy = stroke.points[0].y - point.y;
-        return dx * dx + dy * dy <= thresholdSquared;
+        return dx * dx + dy * dy <= threshold * threshold;
     }
 
+    // Compared against each segment's own width, since a tapered line is much
+    // thinner at one end than the other.
     for (size_t i = 1; i < stroke.points.size(); ++i) {
+        const float widest =
+            std::max(stroke.points[i - 1].width, stroke.points[i].width);
+        const float threshold = radius + widest * 0.5f;
+
         if (DistanceToSegmentSquared(point.x, point.y, stroke.points[i - 1].x,
                                      stroke.points[i - 1].y, stroke.points[i].x,
-                                     stroke.points[i].y) <= thresholdSquared) {
+                                     stroke.points[i].y) <=
+            threshold * threshold) {
             return true;
         }
     }
@@ -226,7 +232,22 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             ::SetCapture(hwnd_);
             return 0;
 
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP:
+            if (HandlePointerMessage(msg, wParam)) {
+                return 0;
+            }
+            // Not a pen: let the default handling turn it into the mouse
+            // messages the rest of this window expects.
+            break;
+
         case WM_LBUTTONDOWN:
+            // Ignored while a pen is down, since the same gesture would
+            // otherwise be handled twice.
+            if (penActive_) {
+                return 0;
+            }
             OnLeftDown(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
             return 0;
 
@@ -344,14 +365,21 @@ D2D1_POINT_2F ClipWindow::ToImage(POINT client) const noexcept {
         (static_cast<float>(client.y) - border + static_cast<float>(scroll.y)) / zoom);
 }
 
-void ClipWindow::BeginStroke(POINT client) noexcept {
+float ClipWindow::WidthForPressure(float pressure) const noexcept {
+    if (!tool_.usePressure || settings_ == nullptr) {
+        return tool_.Width();
+    }
+    const float minScale = settings_->pressureMinScale;
+    return tool_.Width() * (minScale + (1.0f - minScale) * pressure);
+}
+
+void ClipWindow::BeginStroke(POINT client, float pressure) noexcept {
     activeStroke_ = ccl::doc::Stroke{};
     activeStroke_.color = tool_.Color();
-    activeStroke_.width = tool_.Width();
     activeStroke_.antialias = tool_.antialias;
 
     const D2D1_POINT_2F point = ToImage(client);
-    activeStroke_.points.push_back({point.x, point.y, 1.0f});
+    activeStroke_.points.push_back({point.x, point.y, WidthForPressure(pressure)});
 
     drawing_ = true;
     // Decided at press time and held for the whole stroke, so the line does not
@@ -361,19 +389,27 @@ void ClipWindow::BeginStroke(POINT client) noexcept {
     Draw();
 }
 
-void ClipWindow::ContinueStroke(POINT client) noexcept {
+void ClipWindow::ContinueStroke(POINT client, float pressure) noexcept {
     const D2D1_POINT_2F point = ToImage(client);
 
     if (straightLine_) {
+        // Two points only. Both ends take a brush size rather than a pressure:
+        // the force of putting a pen down is hard to aim, whereas [ and ] can
+        // be nudged while the line is previewed. The far end keeps whatever
+        // width it was given, so moving the pointer does not undo it.
+        const float endWidth = activeStroke_.points.size() == 2
+                                   ? activeStroke_.points.back().width
+                                   : tool_.Width();
         activeStroke_.points.resize(1);
-        activeStroke_.points.push_back({point.x, point.y, 1.0f});
+        activeStroke_.points.push_back({point.x, point.y, endWidth});
     } else {
         const auto& last = activeStroke_.points.back();
         if (std::abs(last.x - point.x) < kMinPointSpacing &&
             std::abs(last.y - point.y) < kMinPointSpacing) {
             return;
         }
-        activeStroke_.points.push_back({point.x, point.y, 1.0f});
+        activeStroke_.points.push_back(
+            {point.x, point.y, WidthForPressure(pressure)});
     }
     Draw();
 }
@@ -430,6 +466,104 @@ void ClipWindow::EraseAt(POINT client) noexcept {
     }
 }
 
+bool ClipWindow::HandlePointerMessage(UINT msg, WPARAM wParam) noexcept {
+    const UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
+
+    POINTER_INPUT_TYPE type = PT_POINTER;
+    if (!::GetPointerType(pointerId, &type) || type != PT_PEN) {
+        // Mouse and touch keep going through the ordinary handlers.
+        return false;
+    }
+
+    POINTER_PEN_INFO pen{};
+    if (!::GetPointerPenInfo(pointerId, &pen)) {
+        return false;
+    }
+
+    POINT client = pen.pointerInfo.ptPixelLocation;
+    ::ScreenToClient(hwnd_, &client);
+
+    // Pressure is reported 0-1024; a pen that does not report it sends 0, in
+    // which case the stroke is drawn at full width.
+    const bool reportsPressure = (pen.penMask & PEN_MASK_PRESSURE) != 0 &&
+                                 pen.pressure > 0;
+    const float pressure =
+        reportsPressure ? static_cast<float>(pen.pressure) / 1024.0f : 1.0f;
+
+    // The tail end of the pen is a natural eraser, so it selects the eraser for
+    // the duration of the stroke and then hands the tool back.
+    const bool inverted =
+        (pen.penFlags & (PEN_FLAG_INVERTED | PEN_FLAG_ERASER)) != 0;
+
+    switch (msg) {
+        case WM_POINTERDOWN: {
+            penActive_ = true;
+            lastCursor_ = client;
+            TrackMouseLeave();
+
+            if (inverted && tool_.tool != ccl::tool::Tool::Eraser) {
+                toolBeforePenEraser_ = tool_.tool;
+                penEraserActive_ = true;
+                tool_.tool = ccl::tool::Tool::Eraser;
+                UpdateTitle();
+            }
+
+            if (ScrollingWithLeftButton()) {
+                scrolling_ = true;
+                ::GetCursorPos(&scrollOrigin_);
+                scrollStart_ = view_.Scroll();
+            } else if (tool_.tool == ccl::tool::Tool::Eraser) {
+                erasing_ = true;
+                erasedAny_ = false;
+                EraseAt(client);
+                Draw();
+            } else if (tool_.tool == ccl::tool::Tool::Pen) {
+                BeginStroke(client, pressure);
+            }
+            return true;
+        }
+
+        case WM_POINTERUPDATE:
+            lastCursor_ = client;
+            if (drawing_) {
+                ContinueStroke(client, pressure);
+            } else if (erasing_) {
+                EraseAt(client);
+                Draw();
+            } else if (scrolling_) {
+                POINT now{};
+                ::GetCursorPos(&now);
+                view_.SetScroll(POINT{scrollStart_.x - (now.x - scrollOrigin_.x),
+                                      scrollStart_.y - (now.y - scrollOrigin_.y)},
+                                ContentSize(), ViewportSize());
+                Draw();
+            } else if (ShowsBrushCursor()) {
+                ::InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return true;
+
+        case WM_POINTERUP:
+            penActive_ = false;
+            if (drawing_) {
+                EndStroke();
+            }
+            erasing_ = false;
+            scrolling_ = false;
+
+            if (penEraserActive_) {
+                penEraserActive_ = false;
+                tool_.tool = toolBeforePenEraser_;
+                UpdateCursor();
+                UpdateTitle();
+                Draw();
+            }
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 void ClipWindow::OnLeftDown(POINT client) noexcept {
     // Alt+click samples a colour without leaving the current tool, matching
     // the shortcut image editors use.
@@ -450,7 +584,7 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
 
     switch (tool_.tool) {
         case ccl::tool::Tool::Pen:
-            BeginStroke(client);
+            BeginStroke(client, 1.0f);
             return;
         case ccl::tool::Tool::Eraser:
             erasing_ = true;
@@ -505,7 +639,7 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
     }
 
     if (drawing_) {
-        ContinueStroke(client);
+        ContinueStroke(client, 1.0f);
         return;
     }
 
@@ -625,15 +759,29 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             return;
 
         case VK_OEM_4:  // [
-            tool_.StepWidth(-1);
+        case VK_OEM_6: {  // ]
+            const int steps = key == VK_OEM_6 ? 1 : -1;
+
+            // While a straight line is being previewed, the size keys retarget
+            // one of its ends -- the far end normally, the starting end with
+            // Ctrl -- which is how a taper is dialled in without having to aim
+            // the pen pressure.
+            //
+            // Each end steps from its own current width rather than from the
+            // brush size, so adjusting one end leaves the other alone.
+            if (drawing_ && straightLine_ && activeStroke_.points.size() == 2) {
+                float& target = IsKeyDown(VK_CONTROL)
+                                    ? activeStroke_.points.front().width
+                                    : activeStroke_.points.back().width;
+                target = ccl::tool::ToolState::SteppedWidth(target, steps);
+            } else {
+                tool_.StepWidth(steps);
+            }
+
             UpdateTitle();
             Draw();
             return;
-        case VK_OEM_6:  // ]
-            tool_.StepWidth(1);
-            UpdateTitle();
-            Draw();
-            return;
+        }
 
         case 'A':
             tool_.antialias = !tool_.antialias;
@@ -722,6 +870,14 @@ void ClipWindow::UpdateTitle() noexcept {
     wchar_t title[440];
     switch (tool_.tool) {
         case ccl::tool::Tool::Pen:
+            // While a straight line is being drawn, both ends are reported, so
+            // it is clear which one the size keys just changed.
+            if (drawing_ && straightLine_ && activeStroke_.points.size() == 2) {
+                ::swprintf_s(title, L"%s  %d%%  Line %.0f → %.0fpx", name.c_str(),
+                             zoom, activeStroke_.points.front().width,
+                             activeStroke_.points.back().width);
+                break;
+            }
             ::swprintf_s(title, L"%s  %d%%  Pen %.0fpx%s", name.c_str(), zoom,
                          tool_.Width(), tool_.antialias ? L"" : L" (aliased)");
             break;
@@ -850,6 +1006,8 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(widths, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(widths, tool_.antialias ? checked : plain, kMenuAntialias,
                   L"なめらかにする\tA");
+    ::AppendMenuW(widths, tool_.usePressure ? checked : plain, kMenuPressure,
+                  L"筆圧を使う");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(widths), L"線");
 
     const HMENU zoom = ::CreatePopupMenu();
@@ -925,6 +1083,9 @@ void ClipWindow::OnCommand(int command) noexcept {
             tool_.antialias = !tool_.antialias;
             UpdateTitle();
             Draw();
+            return;
+        case kMenuPressure:
+            tool_.usePressure = !tool_.usePressure;
             return;
         case kMenuEyedropper:
             SelectTool(ccl::tool::Tool::Eyedropper);
@@ -1050,6 +1211,7 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     sourceTitle_ = sourceTitle;
     view_.SetZoomStepPercent(settings.zoomStepPercent);
     renderer_.SetSmoothScaling(settings.smoothScaling);
+    tool_.usePressure = settings.usePenPressure;
     ccl::timing::Stopwatch watch;
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);

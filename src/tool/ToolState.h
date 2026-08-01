@@ -40,6 +40,9 @@ public:
 
     Tool tool = Tool::View;
     bool antialias = true;
+    // Runtime state, seeded from the settings file but toggleable from the
+    // menu; editing the file to try it out is too much friction.
+    bool usePressure = true;
 
     const ccl::doc::Color& Color() const noexcept { return color_; }
 
@@ -76,15 +79,22 @@ public:
         width_ = std::clamp(width, kMinWidth, kMaxWidth);
     }
 
-    // Multiplicative so that the step feels the same at 2px and at 60px.
-    void StepWidth(int steps) noexcept {
+    // Multiplicative so that a step feels the same at 2px and at 60px.
+    //
+    // Exposed as a free-standing calculation because the ends of a tapered line
+    // each step from their own width. Routing those through the brush size
+    // would make adjusting one end drag the other to match.
+    static float SteppedWidth(float width, int steps) noexcept {
         for (int i = 0; i < steps; ++i) {
-            SetWidth(width_ * 1.25f + 0.5f);
+            width = std::clamp(width * 1.25f + 0.5f, kMinWidth, kMaxWidth);
         }
         for (int i = 0; i > steps; --i) {
-            SetWidth((width_ - 0.5f) / 1.25f);
+            width = std::clamp((width - 0.5f) / 1.25f, kMinWidth, kMaxWidth);
         }
+        return width;
     }
+
+    void StepWidth(int steps) noexcept { SetWidth(SteppedWidth(width_, steps)); }
 
 private:
     ccl::doc::Color color_ = kQuickColors[1];  // green

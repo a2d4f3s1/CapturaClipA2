@@ -1,5 +1,8 @@
 #include "render/Renderer.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "doc/Document.h"
 #include "render/D2DContext.h"
 #include "util/Timing.h"
@@ -96,6 +99,41 @@ bool Renderer::EnsureImageBitmap() noexcept {
     return SUCCEEDED(hr);
 }
 
+void Renderer::DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept {
+    // Direct2D strokes a path at one width, so a stroke whose width changes has
+    // to be drawn segment by segment. Long segments are subdivided so the width
+    // ramps smoothly -- that is what gives a straight line, which is only two
+    // points, a taper from its start pressure to its end pressure.
+    constexpr float kSubdivisionLength = 4.0f;
+    constexpr int kMaxSubdivisions = 64;
+
+    for (size_t i = 1; i < stroke.points.size(); ++i) {
+        const ccl::doc::StrokePoint& from = stroke.points[i - 1];
+        const ccl::doc::StrokePoint& to = stroke.points[i];
+
+        const float dx = to.x - from.x;
+        const float dy = to.y - from.y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+
+        int steps = static_cast<int>(length / kSubdivisionLength);
+        steps = std::clamp(steps, 1, kMaxSubdivisions);
+
+        for (int step = 0; step < steps; ++step) {
+            const float t0 = static_cast<float>(step) / static_cast<float>(steps);
+            const float t1 =
+                static_cast<float>(step + 1) / static_cast<float>(steps);
+            const float mid = (t0 + t1) * 0.5f;
+
+            const float width = from.width + (to.width - from.width) * mid;
+
+            target_->DrawLine(
+                D2D1::Point2F(from.x + dx * t0, from.y + dy * t0),
+                D2D1::Point2F(from.x + dx * t1, from.y + dy * t1), brush_.Get(),
+                width, strokeStyle_.Get());
+        }
+    }
+}
+
 void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
     if (stroke.points.empty() || !brush_) {
         return;
@@ -109,10 +147,15 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
     // A press without movement should still leave a mark.
     if (stroke.points.size() == 1) {
         const auto& point = stroke.points.front();
-        const float radius = stroke.width * 0.5f;
+        const float radius = point.width * 0.5f;
         target_->FillEllipse(
             D2D1::Ellipse(D2D1::Point2F(point.x, point.y), radius, radius),
             brush_.Get());
+        return;
+    }
+
+    if (stroke.HasVariableWidth()) {
+        DrawVariableStroke(stroke);
         return;
     }
 
@@ -135,8 +178,8 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
     sink->EndFigure(D2D1_FIGURE_END_OPEN);
     sink->Close();
 
-    target_->DrawGeometry(geometry.Get(), brush_.Get(), stroke.width,
-                          strokeStyle_.Get());
+    target_->DrawGeometry(geometry.Get(), brush_.Get(),
+                          stroke.points.front().width, strokeStyle_.Get());
 }
 
 void Renderer::Draw(const ccl::view::ViewState& view,
