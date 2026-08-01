@@ -95,6 +95,7 @@ target_link_libraries(CapturaClipA2 PRIVATE
     user32
     gdi32
     msimg32
+    imm32
 )
 
 # Keep the source tree free of build artifacts.

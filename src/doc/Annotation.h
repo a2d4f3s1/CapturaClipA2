@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace ccl::doc {
@@ -45,6 +46,23 @@ struct Stroke {
     }
 };
 
+// A piece of text placed on the image, kept as text rather than as pixels so
+// that the wording, size and colour stay editable after the fact.
+struct TextAnnotation {
+    std::wstring text;
+    // Top-left corner, in image coordinates at 100% zoom.
+    float x = 0.0f;
+    float y = 0.0f;
+    float fontSize = 30.0f;  // image pixels
+    std::wstring fontFamily = L"Meiryo";
+    Color color;
+    // A drop shadow or an outline keeps text legible over a busy screenshot,
+    // which is most of what gets captured.
+    bool shadow = true;
+    bool outline = false;
+    Color outlineColor{0.0f, 0.0f, 0.0f, 1.0f};
+};
+
 // Annotations are kept as objects instead of being burned into the image.
 //
 // This is the structural difference the whole tool hinges on: erasing a
@@ -61,6 +79,7 @@ enum class AnnotationKind {
 struct Annotation {
     AnnotationKind kind = AnnotationKind::Stroke;
     Stroke stroke;
+    TextAnnotation text;
 };
 
 using AnnotationList = std::vector<Annotation>;

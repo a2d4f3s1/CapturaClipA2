@@ -30,7 +30,7 @@ struct BrushCursor {
 // Draws a document into a window, honouring the view state (zoom, scroll).
 class Renderer {
 public:
-    void Attach(const D2DContext& context, HWND hwnd) noexcept;
+    void Attach(D2DContext& context, HWND hwnd) noexcept;
     void SetDocument(const ccl::doc::Document* document) noexcept;
 
     void Resize(UINT width, UINT height) noexcept;
@@ -40,6 +40,11 @@ public:
     void Draw(const ccl::view::ViewState& view,
               const ccl::doc::Stroke* active = nullptr,
               const BrushCursor* cursor = nullptr) noexcept;
+
+    // Bounding box of a piece of text in image coordinates, used to work out
+    // which one was clicked. Returns false if it could not be measured.
+    bool MeasureText(const ccl::doc::TextAnnotation& text,
+                     D2D1_RECT_F& bounds) noexcept;
 
     // Smooth interpolation looks better for photographs and text, nearest
     // neighbour is what you want when inspecting individual pixels.
@@ -54,8 +59,9 @@ private:
 
     void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
+    void DrawText(const ccl::doc::TextAnnotation& text) noexcept;
 
-    const D2DContext* context_ = nullptr;
+    D2DContext* context_ = nullptr;
     HWND hwnd_ = nullptr;
     const ccl::doc::Document* document_ = nullptr;
 

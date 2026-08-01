@@ -97,6 +97,11 @@ void Settings::Load() noexcept {
                                             path_.c_str());
     copyOnCapture = ReadBool(L"Capture", L"CopyOnCapture", copyOnCapture, path_);
 
+    textFontFamily = ReadString(L"Text", L"FontFamily", textFontFamily, path_);
+    textFontSize = ReadFloat(L"Text", L"FontSize", textFontSize, path_);
+    textShadow = ReadBool(L"Text", L"Shadow", textShadow, path_);
+    textOutline = ReadBool(L"Text", L"Outline", textOutline, path_);
+
     usePenPressure = ReadBool(L"Drawing", L"UsePenPressure", usePenPressure, path_);
     pressureMinScale =
         ReadFloat(L"Drawing", L"PressureMinScale", pressureMinScale, path_);
@@ -128,6 +133,9 @@ void Settings::Load() noexcept {
     if (paletteScalePercent > 300) paletteScalePercent = 300;
     if (pressureMinScale < 0.0f) pressureMinScale = 0.0f;
     if (pressureMinScale > 1.0f) pressureMinScale = 1.0f;
+    if (textFontSize < 4.0f) textFontSize = 4.0f;
+    if (textFontSize > 400.0f) textFontSize = 400.0f;
+    if (textFontFamily.empty()) textFontFamily = L"Meiryo";
 }
 
 void Settings::Save() const noexcept {
@@ -154,6 +162,16 @@ void Settings::Save() const noexcept {
                L"PreparationMs=%u\n"
                L"; Copy every capture to the clipboard automatically.\n"
                L"CopyOnCapture=%d\n"
+               L"\n"
+               L"[Text]\n"
+               L"; Font used for text annotations.\n"
+               L"FontFamily=%s\n"
+               L"; Size in image pixels.\n"
+               L"FontSize=%g\n"
+               L"; A shadow or an outline keeps text readable over a busy\n"
+               L"; screenshot. Both can be on at once.\n"
+               L"Shadow=%d\n"
+               L"Outline=%d\n"
                L"\n"
                L"[Drawing]\n"
                L"; Vary stroke width with pen pressure. Needs a pressure-\n"
@@ -189,7 +207,9 @@ void Settings::Save() const noexcept {
                L"; Days to keep automatically saved files. 0 keeps them forever.\n"
                L"; Expired files go to the Recycle Bin rather than being deleted.\n"
                L"HistoryDays=%d\n",
-               preparationMs, copyOnCapture ? 1 : 0, usePenPressure ? 1 : 0,
+               preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
+               textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
+               usePenPressure ? 1 : 0,
                pressureMinScale, titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
                FormatName(defaultFormat),

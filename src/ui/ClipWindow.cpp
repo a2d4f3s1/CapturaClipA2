@@ -1,6 +1,7 @@
 #include "ui/ClipWindow.h"
 
 #include <commdlg.h>
+#include <imm.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -60,6 +61,78 @@ enum MenuId : UINT {
 ccl::doc::Color FromColorRef(COLORREF value) noexcept {
     return ccl::doc::Color{GetRValue(value) / 255.0f, GetGValue(value) / 255.0f,
                            GetBValue(value) / 255.0f, 1.0f};
+}
+
+COLORREF ToColorRef(const ccl::doc::Color& color) noexcept {
+    const auto channel = [](float value) {
+        return static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+    };
+    return RGB(channel(color.r), channel(color.g), channel(color.b));
+}
+
+// Posted to the window to finish text entry. The edit control handles these
+// keys itself, and the commit has to happen after the control has finished
+// with the message, so it is deferred rather than done inline.
+//
+// wParam carries the control being committed: clicking away starts a new entry
+// before the posted message arrives, and without the check that message would
+// immediately close the entry that just opened.
+constexpr UINT kCommitTextMessage = WM_APP + 1;
+
+// Edit controls separate lines with CRLF; text layout wants a bare LF. The two
+// conversions are kept next to each other so they cannot drift apart -- getting
+// only one of them right leaves text that looks fine until it is reopened.
+std::wstring ToStoredLineEndings(const std::wstring& text) {
+    std::wstring result;
+    result.reserve(text.size());
+    for (const wchar_t character : text) {
+        if (character != L'\r') {
+            result.push_back(character);
+        }
+    }
+    return result;
+}
+
+std::wstring ToEditorLineEndings(const std::wstring& text) {
+    std::wstring result;
+    result.reserve(text.size() + 8);
+    for (const wchar_t character : text) {
+        if (character == L'\n') {
+            result.push_back(L'\r');
+        }
+        result.push_back(character);
+    }
+    return result;
+}
+
+WNDPROC g_originalEditProc = nullptr;
+
+LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                  LPARAM lParam) {
+    const auto commit = [hwnd]() {
+        ::PostMessageW(::GetParent(hwnd), kCommitTextMessage,
+                       reinterpret_cast<WPARAM>(hwnd), 0);
+    };
+
+    switch (msg) {
+        case WM_KEYDOWN:
+            // Enter inserts a line break, so committing needs its own gesture.
+            if (wParam == VK_ESCAPE ||
+                (wParam == VK_RETURN && (::GetKeyState(VK_CONTROL) & 0x8000))) {
+                commit();
+                return 0;
+            }
+            break;
+
+        case WM_KILLFOCUS:
+            // Clicking away commits, which is what most people try first.
+            commit();
+            break;
+
+        default:
+            break;
+    }
+    return ::CallWindowProcW(g_originalEditProc, hwnd, msg, wParam, lParam);
 }
 
 constexpr float kWidthPresets[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
@@ -183,6 +256,36 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return HTCLIENT;
         }
 
+        case kCommitTextMessage:
+            // Only if it is still the control that asked; see the message's
+            // definition.
+            if (reinterpret_cast<HWND>(wParam) == editor_) {
+                CommitText();
+            }
+            return 0;
+
+        case WM_COMMAND:
+            // The editor draws with a transparent background, so the image
+            // underneath has to be repainted as the text changes; otherwise
+            // deleted characters leave their pixels behind.
+            if (HIWORD(wParam) == EN_CHANGE &&
+                reinterpret_cast<HWND>(lParam) == editor_) {
+                ResizeEditor();
+                Draw();
+                return 0;
+            }
+            break;
+
+        case WM_CTLCOLOREDIT: {
+            // Drawn in the colour the text will end up, over the image rather
+            // than over a filled box, so the editor previews the result
+            // instead of covering it.
+            const auto dc = reinterpret_cast<HDC>(wParam);
+            ::SetTextColor(dc, ToColorRef(tool_.Color()));
+            ::SetBkMode(dc, TRANSPARENT);
+            return reinterpret_cast<LRESULT>(::GetStockObject(NULL_BRUSH));
+        }
+
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
                 UpdateCursor();
@@ -290,6 +393,8 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CLOSE:
+            // Text still being typed is kept rather than discarded.
+            CommitText();
             ccl::timing::ReportFrames(L"clip window draw", drawStats_);
             AutoSaveBeforeClosing();
             ::DestroyWindow(hwnd_);
@@ -344,6 +449,11 @@ void ClipWindow::UpdateCursor() noexcept {
         return;
     }
 
+    if (tool_.tool == ccl::tool::Tool::Text) {
+        ::SetCursor(::LoadCursorW(nullptr, IDC_IBEAM));
+        return;
+    }
+
     if (tool_.tool == ccl::tool::Tool::Pen ||
         tool_.tool == ccl::tool::Tool::Eraser) {
         // The size ring stands in for the pointer. A crosshair drawn on top of
@@ -363,6 +473,242 @@ D2D1_POINT_2F ClipWindow::ToImage(POINT client) const noexcept {
     return D2D1::Point2F(
         (static_cast<float>(client.x) - border + static_cast<float>(scroll.x)) / zoom,
         (static_cast<float>(client.y) - border + static_cast<float>(scroll.y)) / zoom);
+}
+
+size_t ClipWindow::FindTextAt(D2D1_POINT_2F image) noexcept {
+    if (document_ == nullptr) {
+        return static_cast<size_t>(-1);
+    }
+
+    const auto& annotations = document_->Annotations();
+    // Searched back to front so the topmost text wins, matching what is drawn.
+    for (size_t i = annotations.size(); i > 0; --i) {
+        const ccl::doc::Annotation& annotation = annotations[i - 1];
+        if (annotation.kind != ccl::doc::AnnotationKind::Text) {
+            continue;
+        }
+
+        D2D1_RECT_F bounds{};
+        if (!renderer_.MeasureText(annotation.text, bounds)) {
+            continue;
+        }
+        if (image.x >= bounds.left && image.x <= bounds.right &&
+            image.y >= bounds.top && image.y <= bounds.bottom) {
+            return i - 1;
+        }
+    }
+    return static_cast<size_t>(-1);
+}
+
+void ClipWindow::BeginTextAt(POINT client) noexcept {
+    if (settings_ == nullptr) {
+        return;
+    }
+    // Clicking elsewhere finishes the previous piece of text rather than
+    // discarding it.
+    CommitText();
+
+    const D2D1_POINT_2F image = ToImage(client);
+    editorX_ = image.x;
+    editorY_ = image.y;
+    editingExisting_ = false;
+
+    // Clicking on existing text reopens it. It is lifted out of the document
+    // for the duration, so the old copy is not drawn underneath the editor,
+    // and the state before that is what undo returns to.
+    const size_t existing = FindTextAt(image);
+    if (existing != static_cast<size_t>(-1) && document_ != nullptr) {
+        history_.Record(document_->Annotations());
+
+        editingOriginal_ = document_->Annotations()[existing].text;
+        editingExisting_ = true;
+        editorX_ = editingOriginal_.x;
+        editorY_ = editingOriginal_.y;
+
+        document_->Annotations().erase(document_->Annotations().begin() +
+                                       static_cast<std::ptrdiff_t>(existing));
+        Draw();
+
+        // The editor has to open where the text actually is, not where the
+        // click landed.
+        const float zoom = view_.Zoom();
+        const POINT scroll = view_.Scroll();
+        const auto border = static_cast<float>(ccl::render::kWindowBorder);
+        client.x = static_cast<LONG>(editorX_ * zoom + border - scroll.x);
+        client.y = static_cast<LONG>(editorY_ * zoom + border - scroll.y);
+    }
+
+    const float zoom = view_.Zoom();
+    const float fontSize =
+        editingExisting_ ? editingOriginal_.fontSize : settings_->textFontSize;
+    const int fontPixels =
+        std::max(4, static_cast<int>(std::lround(fontSize * zoom)));
+
+    // Roomy enough to type into; the text itself is what gets measured when it
+    // is committed, so this only affects the editing box.
+    const int width = std::max(80, static_cast<int>(fontPixels * 12));
+    const int height = static_cast<int>(fontPixels * 1.6f);
+
+    const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    // ES_WANTRETURN is what makes Enter insert a line break instead of being
+    // treated as a default-button press.
+    editor_ = ::CreateWindowExW(
+        0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_WANTRETURN | ES_AUTOHSCROLL |
+            ES_AUTOVSCROLL | ES_NOHIDESEL,
+        client.x, client.y, width, height, hwnd_, nullptr, instance, nullptr);
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    // Matched to how the text will actually be drawn, so the box is a preview
+    // rather than just an input field.
+    editorFont_ = ::CreateFontW(-fontPixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+                                FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE,
+                                settings_->textFontFamily.c_str());
+    if (editorFont_ != nullptr) {
+        ::SendMessageW(editor_, WM_SETFONT,
+                       reinterpret_cast<WPARAM>(editorFont_), TRUE);
+    }
+
+    // Edit controls inset their text by a few pixels. Text layout draws from
+    // the origin it is given, so without clearing the margins the preview sits
+    // slightly off from where the text will land.
+    ::SendMessageW(editor_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                   MAKELPARAM(0, 0));
+
+    if (editorBackground_ == nullptr) {
+        editorBackground_ = ::CreateSolidBrush(RGB(24, 24, 24));
+    }
+
+    g_originalEditProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
+        editor_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditSubclassProc)));
+
+    if (editingExisting_) {
+        ::SetWindowTextW(editor_,
+                         ToEditorLineEndings(editingOriginal_.text).c_str());
+        // Caret at the end, which is where editing usually continues.
+        ::SendMessageW(editor_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
+    }
+
+    ResizeEditor();
+    ::SetFocus(editor_);
+}
+
+void ClipWindow::ResizeEditor() noexcept {
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    const int lines = std::max(
+        1, static_cast<int>(::SendMessageW(editor_, EM_GETLINECOUNT, 0, 0)));
+
+    // Line height comes from the font actually in use rather than a guess, so
+    // the box tracks the text at any size.
+    int lineHeight = 16;
+    const HDC dc = ::GetDC(editor_);
+    if (dc != nullptr) {
+        const HGDIOBJ previous =
+            editorFont_ != nullptr ? ::SelectObject(dc, editorFont_) : nullptr;
+
+        TEXTMETRICW metrics{};
+        if (::GetTextMetricsW(dc, &metrics)) {
+            lineHeight = metrics.tmHeight;
+        }
+        if (previous != nullptr) {
+            ::SelectObject(dc, previous);
+        }
+        ::ReleaseDC(editor_, dc);
+    }
+
+    RECT current{};
+    ::GetWindowRect(editor_, &current);
+
+    ::SetWindowPos(editor_, nullptr, 0, 0, current.right - current.left,
+                   lineHeight * lines + lineHeight / 4,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void ClipWindow::TurnOffIme() noexcept {
+    // Leaving the IME composing after text entry would swallow the single-key
+    // shortcuts -- B, E, V and the rest -- so it is switched back to direct
+    // input whenever text entry ends.
+    const HIMC context = ::ImmGetContext(hwnd_);
+    if (context != nullptr) {
+        ::ImmSetOpenStatus(context, FALSE);
+        ::ImmReleaseContext(hwnd_, context);
+    }
+}
+
+void ClipWindow::DestroyEditor() noexcept {
+    if (editor_ != nullptr) {
+        ::DestroyWindow(editor_);
+        editor_ = nullptr;
+    }
+    if (editorFont_ != nullptr) {
+        ::DeleteObject(editorFont_);
+        editorFont_ = nullptr;
+    }
+    ::SetFocus(hwnd_);
+    TurnOffIme();
+}
+
+void ClipWindow::CommitText() noexcept {
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    const int length = ::GetWindowTextLengthW(editor_);
+    std::wstring text;
+    if (length > 0) {
+        std::wstring raw(static_cast<size_t>(length), L'\0');
+        ::GetWindowTextW(editor_, raw.data(), length + 1);
+        text = ToStoredLineEndings(raw);
+    }
+
+    const bool wasEditing = editingExisting_;
+    editingExisting_ = false;
+    DestroyEditor();
+
+    if (text.empty() || document_ == nullptr || settings_ == nullptr) {
+        // Emptying existing text is how it gets deleted; the removal was
+        // already recorded when editing began.
+        Draw();
+        return;
+    }
+
+    // Editing an existing piece already recorded the state it started from.
+    if (!wasEditing) {
+        history_.Record(document_->Annotations());
+    }
+
+    ccl::doc::Annotation annotation;
+    annotation.kind = ccl::doc::AnnotationKind::Text;
+
+    // Re-edited text keeps the properties it was created with, so reopening it
+    // does not silently restyle it with whatever is currently selected.
+    annotation.text = wasEditing ? editingOriginal_ : ccl::doc::TextAnnotation{};
+    annotation.text.text = std::move(text);
+    annotation.text.x = editorX_;
+    annotation.text.y = editorY_;
+
+    if (!wasEditing) {
+        annotation.text.fontSize = settings_->textFontSize;
+        annotation.text.fontFamily = settings_->textFontFamily;
+        annotation.text.color = tool_.Color();
+        annotation.text.shadow = settings_->textShadow;
+        annotation.text.outline = settings_->textOutline;
+    }
+
+    document_->Annotations().push_back(std::move(annotation));
+    Draw();
+}
+
+void ClipWindow::CancelText() noexcept {
+    DestroyEditor();
+    Draw();
 }
 
 float ClipWindow::WidthForPressure(float pressure) const noexcept {
@@ -600,6 +946,10 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             ::SetCapture(hwnd_);
             sampling_ = true;
             return;
+
+        case ccl::tool::Tool::Text:
+            BeginTextAt(client);
+            return;
         default:
             return;
     }
@@ -753,6 +1103,9 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case 'E':
             SelectTool(ccl::tool::Tool::Eraser);
             return;
+        case 'T':
+            SelectTool(ccl::tool::Tool::Text);
+            return;
 
         case 'I':
             ChooseColorFromPicker();
@@ -888,6 +1241,10 @@ void ClipWindow::UpdateTitle() noexcept {
         case ccl::tool::Tool::Eyedropper:
             ::swprintf_s(title, L"%s  %d%%  Eyedropper", name.c_str(), zoom);
             break;
+        case ccl::tool::Tool::Text:
+            ::swprintf_s(title, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
+                         settings_ != nullptr ? settings_->textFontSize : 0.0f);
+            break;
         default:
             ::swprintf_s(title, L"%s  %d%%", name.c_str(), zoom);
             break;
@@ -953,6 +1310,13 @@ bool ClipWindow::PickColorAt(POINT client) noexcept {
 }
 
 void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
+    if (tool != ccl::tool::Tool::Text) {
+        // Leaving text entry keeps what was typed and returns the keyboard to
+        // direct input, so the shortcuts work again.
+        CommitText();
+        TurnOffIme();
+    }
+
     if (tool == ccl::tool::Tool::Eyedropper &&
         tool_.tool != ccl::tool::Tool::Eyedropper) {
         toolBeforeEyedropper_ = tool_.tool;
@@ -990,6 +1354,7 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     toolEntry(ccl::tool::Tool::View, L"ビュー\tV");
     toolEntry(ccl::tool::Tool::Pen, L"ペン\tB");
     toolEntry(ccl::tool::Tool::Eraser, L"消しゴム\tE");
+    toolEntry(ccl::tool::Tool::Text, L"テキスト\tT");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"ツール");
 
     ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...\tI");
@@ -1188,6 +1553,12 @@ void ClipWindow::Draw() noexcept {
 
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr);
+
+    // Direct2D paints the whole window including the area the edit control
+    // occupies, so the control has to be told to put itself back on top.
+    if (editor_ != nullptr) {
+        ::RedrawWindow(editor_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.

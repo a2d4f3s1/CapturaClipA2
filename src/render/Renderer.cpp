@@ -1,6 +1,7 @@
 #include "render/Renderer.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 #include "doc/Document.h"
@@ -16,7 +17,7 @@ D2D1_COLOR_F ToD2D(const ccl::doc::Color& color) noexcept {
 
 }  // namespace
 
-void Renderer::Attach(const D2DContext& context, HWND hwnd) noexcept {
+void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
     context_ = &context;
     hwnd_ = hwnd;
     DiscardDeviceResources();
@@ -182,6 +183,108 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
                           stroke.points.front().width, strokeStyle_.Get());
 }
 
+namespace {
+
+// Builds the layout used for both drawing and measuring, so the two can never
+// disagree about where the text sits.
+Microsoft::WRL::ComPtr<IDWriteTextLayout> BuildLayout(
+    IDWriteFactory* writer, const ccl::doc::TextAnnotation& text) noexcept {
+    Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+    if (writer == nullptr || text.text.empty()) {
+        return layout;
+    }
+
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> format;
+    if (FAILED(writer->CreateTextFormat(
+            text.fontFamily.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            text.fontSize, L"", &format))) {
+        return layout;
+    }
+
+    // Wrapping is left to the line breaks that were actually typed.
+    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    // A large but finite box. FLT_MAX invites overflow in the layout maths;
+    // this is far beyond any capture yet still arithmetic-safe.
+    constexpr float kUnbounded = 1.0e6f;
+
+    if (FAILED(writer->CreateTextLayout(
+            text.text.c_str(), static_cast<UINT32>(text.text.size()),
+            format.Get(), kUnbounded, kUnbounded, &layout))) {
+        layout.Reset();
+    }
+    return layout;
+}
+
+}  // namespace
+
+bool Renderer::MeasureText(const ccl::doc::TextAnnotation& text,
+                           D2D1_RECT_F& bounds) noexcept {
+    if (context_ == nullptr) {
+        return false;
+    }
+
+    const auto layout = BuildLayout(context_->Text(), text);
+    if (!layout) {
+        return false;
+    }
+
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics))) {
+        return false;
+    }
+
+    bounds = D2D1::RectF(text.x, text.y, text.x + metrics.width,
+                         text.y + metrics.height);
+    return true;
+}
+
+void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
+    if (text.text.empty() || !brush_ || context_ == nullptr) {
+        return;
+    }
+
+    const auto layout = BuildLayout(context_->Text(), text);
+    if (!layout) {
+        return;
+    }
+
+    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    const D2D1_POINT_2F origin = D2D1::Point2F(text.x, text.y);
+
+    // Screenshots are busy backgrounds, so the shadow and outline exist to keep
+    // text readable rather than for decoration. Both are drawn by offsetting
+    // the same layout, which costs a few extra draws but needs no geometry.
+    if (text.shadow) {
+        const float offset = std::max(1.0f, text.fontSize * 0.06f);
+        brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.55f));
+        target_->DrawTextLayout(
+            D2D1::Point2F(origin.x + offset, origin.y + offset), layout.Get(),
+            brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+
+    if (text.outline) {
+        const float offset = std::max(1.0f, text.fontSize * 0.05f);
+        brush_->SetColor(ToD2D(text.outlineColor));
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                target_->DrawTextLayout(
+                    D2D1::Point2F(origin.x + static_cast<float>(dx) * offset,
+                                  origin.y + static_cast<float>(dy) * offset),
+                    layout.Get(), brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+        }
+    }
+
+    brush_->SetColor(ToD2D(text.color));
+    target_->DrawTextLayout(origin, layout.Get(), brush_.Get(),
+                            D2D1_DRAW_TEXT_OPTIONS_NONE);
+}
+
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active,
                     const BrushCursor* cursor) noexcept {
@@ -229,8 +332,13 @@ void Renderer::Draw(const ccl::view::ViewState& view,
 
     if (document_ != nullptr) {
         for (const auto& annotation : document_->Annotations()) {
-            if (annotation.kind == ccl::doc::AnnotationKind::Stroke) {
-                DrawStroke(annotation.stroke);
+            switch (annotation.kind) {
+                case ccl::doc::AnnotationKind::Stroke:
+                    DrawStroke(annotation.stroke);
+                    break;
+                case ccl::doc::AnnotationKind::Text:
+                    DrawText(annotation.text);
+                    break;
             }
         }
     }

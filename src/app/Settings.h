@@ -23,6 +23,12 @@ public:
     UINT preparationMs = 0;
     bool copyOnCapture = false;
 
+    // Text
+    std::wstring textFontFamily = L"Meiryo";
+    float textFontSize = 30.0f;
+    bool textShadow = true;
+    bool textOutline = false;
+
     // Drawing
     bool usePenPressure = true;
     // Width at zero pressure, as a fraction of the nominal brush width. Keeps a

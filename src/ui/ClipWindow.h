@@ -72,6 +72,23 @@ private:
     // Client pixels to image coordinates, undoing zoom and scroll.
     D2D1_POINT_2F ToImage(POINT client) const noexcept;
 
+    // Text is typed into a real edit control positioned over the image rather
+    // than handled key by key. Composing Japanese means driving an IME, and the
+    // edit control already does that correctly.
+    void BeginTextAt(POINT client) noexcept;
+    void CommitText() noexcept;
+    void CancelText() noexcept;
+    void DestroyEditor() noexcept;
+    // Grows the edit box to fit what has been typed, so added lines are not
+    // scrolled out of sight.
+    void ResizeEditor() noexcept;
+    void TurnOffIme() noexcept;
+    bool EditingText() const noexcept { return editor_ != nullptr; }
+
+    // Index of the text annotation under a point, or npos. Clicking existing
+    // text reopens it for editing rather than starting a second one on top.
+    size_t FindTextAt(D2D1_POINT_2F image) noexcept;
+
     float WidthForPressure(float pressure) const noexcept;
     void BeginStroke(POINT client, float pressure) noexcept;
     void ContinueStroke(POINT client, float pressure) noexcept;
@@ -139,6 +156,17 @@ private:
     POINT lastCursor_{};
     bool cursorInside_ = false;
     bool trackingLeave_ = false;
+
+    HWND editor_ = nullptr;
+    HFONT editorFont_ = nullptr;
+    HBRUSH editorBackground_ = nullptr;
+    // Where the text will sit, in image coordinates.
+    float editorX_ = 0.0f;
+    float editorY_ = 0.0f;
+    // Set while re-editing existing text, so that committing restores its
+    // properties rather than applying the current ones.
+    bool editingExisting_ = false;
+    ccl::doc::TextAnnotation editingOriginal_;
 
     LONGLONG releasedAt_ = 0;
     bool reportedFirstFrame_ = false;

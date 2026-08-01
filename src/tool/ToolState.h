@@ -13,6 +13,7 @@ enum class Tool {
     Pen,
     Eraser,
     Eyedropper,
+    Text,
 };
 
 // Quick colours, reachable with Shift+1..8.
