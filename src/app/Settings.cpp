@@ -101,6 +101,8 @@ void Settings::Load() noexcept {
     smoothScaling = ReadBool(L"Appearance", L"SmoothScaling", smoothScaling, path_);
     zoomStepPercent =
         ReadFloat(L"Appearance", L"ZoomStepPercent", zoomStepPercent, path_);
+    paletteScalePercent = ::GetPrivateProfileIntW(
+        L"Appearance", L"PaletteScalePercent", paletteScalePercent, path_.c_str());
 
     defaultFormat = ParseFormat(
         ReadString(L"Save", L"DefaultFormat", FormatName(defaultFormat), path_),
@@ -118,6 +120,8 @@ void Settings::Load() noexcept {
     if (autoSaveHistoryDays < 0) autoSaveHistoryDays = 0;
     if (zoomStepPercent < 1.0f) zoomStepPercent = 1.0f;
     if (zoomStepPercent > 100.0f) zoomStepPercent = 100.0f;
+    if (paletteScalePercent < 50) paletteScalePercent = 50;
+    if (paletteScalePercent > 300) paletteScalePercent = 300;
 }
 
 void Settings::Save() const noexcept {
@@ -154,6 +158,8 @@ void Settings::Save() const noexcept {
                L"SmoothScaling=%d\n"
                L"; Zoom change per wheel notch, in percent.\n"
                L"ZoomStepPercent=%g\n"
+               L"; Size of the colour palette popup, in percent. 50-300.\n"
+               L"PaletteScalePercent=%d\n"
                L"\n"
                L"[Save]\n"
                L"; PNG, JPEG or BMP\n"
@@ -170,7 +176,8 @@ void Settings::Save() const noexcept {
                L"; Expired files go to the Recycle Bin rather than being deleted.\n"
                L"HistoryDays=%d\n",
                preparationMs, copyOnCapture ? 1 : 0, titleFormat.c_str(),
-               smoothScaling ? 1 : 0, zoomStepPercent, FormatName(defaultFormat),
+               smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
+               FormatName(defaultFormat),
                jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays);
 
     ::fclose(file);

@@ -27,6 +27,8 @@ public:
     std::wstring titleFormat = L"%t";
     bool smoothScaling = true;
     float zoomStepPercent = 10.0f;
+    // Size of the colour palette popup, as a percentage of its normal size.
+    int paletteScalePercent = 100;
 
     // Saving
     ImageFormat defaultFormat = ImageFormat::Png;

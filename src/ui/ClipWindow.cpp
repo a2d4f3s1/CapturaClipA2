@@ -13,6 +13,8 @@
 #include "io/Clipboard.h"
 #include "io/ImageCodec.h"
 #include "render/D2DContext.h"
+#include "ui/ColorPopup.h"
+#include "util/Dpi.h"
 #include "util/NameFormat.h"
 #include "util/Timing.h"
 
@@ -45,19 +47,21 @@ enum MenuId : UINT {
     kMenuRedo,
     kMenuFit,
     kMenuAntialias,
+    kMenuEyedropper,
+    kMenuColorPicker,
     kMenuExit,
 
     kMenuToolBase = 200,   // + Tool
-    kMenuColorBase = 300,  // + index into kQuickColors
     kMenuWidthBase = 400,  // + index into kWidthPresets
     kMenuZoomBase = 500,   // + zoom in hundreds of percent
 };
 
-constexpr float kWidthPresets[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
+ccl::doc::Color FromColorRef(COLORREF value) noexcept {
+    return ccl::doc::Color{GetRValue(value) / 255.0f, GetGValue(value) / 255.0f,
+                           GetBValue(value) / 255.0f, 1.0f};
+}
 
-constexpr const wchar_t* kColorNames[] = {
-    L"赤", L"緑", L"青", L"黄", L"マゼンタ", L"シアン", L"白", L"黒",
-};
+constexpr float kWidthPresets[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
 float DistanceToSegmentSquared(float px, float py, float ax, float ay, float bx,
                                float by) noexcept {
@@ -250,6 +254,7 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CAPTURECHANGED:
             moving_ = false;
             scrolling_ = false;
+            sampling_ = false;
             if (drawing_) {
                 EndStroke();
             }
@@ -313,6 +318,11 @@ void ClipWindow::UpdateCursor() noexcept {
         return;
     }
 
+    if (tool_.tool == ccl::tool::Tool::Eyedropper) {
+        ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+        return;
+    }
+
     if (tool_.tool == ccl::tool::Tool::Pen ||
         tool_.tool == ccl::tool::Tool::Eraser) {
         // The size ring stands in for the pointer. A crosshair drawn on top of
@@ -336,7 +346,7 @@ D2D1_POINT_2F ClipWindow::ToImage(POINT client) const noexcept {
 
 void ClipWindow::BeginStroke(POINT client) noexcept {
     activeStroke_ = ccl::doc::Stroke{};
-    activeStroke_.color = tool_.color;
+    activeStroke_.color = tool_.Color();
     activeStroke_.width = tool_.Width();
     activeStroke_.antialias = tool_.antialias;
 
@@ -421,6 +431,15 @@ void ClipWindow::EraseAt(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftDown(POINT client) noexcept {
+    // Alt+click samples a colour without leaving the current tool, matching
+    // the shortcut image editors use.
+    if (IsKeyDown(VK_MENU) && tool_.tool != ccl::tool::Tool::Eyedropper) {
+        if (PickColorAt(client)) {
+            Draw();
+        }
+        return;
+    }
+
     if (ScrollingWithLeftButton()) {
         scrolling_ = true;
         ::GetCursorPos(&scrollOrigin_);
@@ -439,6 +458,13 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             ::SetCapture(hwnd_);
             EraseAt(client);
             Draw();
+            return;
+
+        case ccl::tool::Tool::Eyedropper:
+            // Captured so the sample can be taken from anywhere on screen,
+            // not just from inside this window.
+            ::SetCapture(hwnd_);
+            sampling_ = true;
             return;
         default:
             return;
@@ -471,6 +497,13 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         return;
     }
 
+    if (sampling_) {
+        if (PickColorAt(client)) {
+            Draw();
+        }
+        return;
+    }
+
     if (drawing_) {
         ContinueStroke(client);
         return;
@@ -490,6 +523,14 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftUp() noexcept {
+    if (sampling_) {
+        sampling_ = false;
+        ::ReleaseCapture();
+        // One sample, then back to whatever tool was in use before.
+        SelectTool(toolBeforeEyedropper_);
+        return;
+    }
+
     if (drawing_) {
         EndStroke();
         return;
@@ -564,28 +605,23 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
 
     // Shift+digit picks a quick colour; the digits alone are zoom presets.
     if (IsKeyDown(VK_SHIFT) && key >= '1' && key <= '8') {
-        tool_.color = ccl::tool::kQuickColors[key - '1'];
+        tool_.UseColor(ccl::tool::kQuickColors[key - '1']);
         return;
     }
 
     switch (key) {
         case 'V':
-            tool_.tool = ccl::tool::Tool::View;
-            UpdateCursor();
-            UpdateTitle();
-            Draw();
+            SelectTool(ccl::tool::Tool::View);
             return;
         case 'B':
-            tool_.tool = ccl::tool::Tool::Pen;
-            UpdateCursor();
-            UpdateTitle();
-            Draw();
+            SelectTool(ccl::tool::Tool::Pen);
             return;
         case 'E':
-            tool_.tool = ccl::tool::Tool::Eraser;
-            UpdateCursor();
-            UpdateTitle();
-            Draw();
+            SelectTool(ccl::tool::Tool::Eraser);
+            return;
+
+        case 'I':
+            ChooseColorFromPicker();
             return;
 
         case VK_OEM_4:  // [
@@ -693,6 +729,9 @@ void ClipWindow::UpdateTitle() noexcept {
             ::swprintf_s(title, L"%s  %d%%  Eraser %.0fpx", name.c_str(), zoom,
                          tool_.Width());
             break;
+        case ccl::tool::Tool::Eyedropper:
+            ::swprintf_s(title, L"%s  %d%%  Eyedropper", name.c_str(), zoom);
+            break;
         default:
             ::swprintf_s(title, L"%s  %d%%", name.c_str(), zoom);
             break;
@@ -707,6 +746,65 @@ void ClipWindow::ApplyOpacity() noexcept {
 void ClipWindow::FitToImage() noexcept {
     view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
     ApplyZoom();
+}
+
+void ClipWindow::ChooseColorFromPicker() noexcept {
+    POINT screen = lastCursor_;
+    ::ClientToScreen(hwnd_, &screen);
+
+    const ccl::doc::Color original = tool_.Color();
+
+    ColorPopup popup;
+    const auto chosen = popup.Show(
+        hwnd_, screen, original, tool_.RecentColors(),
+        settings_ != nullptr ? settings_->paletteScalePercent : 100,
+        [this](const ccl::doc::Color& colour) {
+            // Applied without recording it: dragging across a gradient would
+            // otherwise fill the recent list with every shade passed over.
+            tool_.SetColor(colour);
+            Draw();
+        });
+
+    if (chosen.has_value()) {
+        tool_.UseColor(*chosen);
+    } else {
+        tool_.SetColor(original);
+    }
+    Draw();
+}
+
+bool ClipWindow::PickColorAt(POINT client) noexcept {
+    // Read straight off the screen rather than out of the captured image, so
+    // the eyedropper works anywhere -- over the capture, over its annotations,
+    // or over another application entirely.
+    POINT screen = client;
+    ::ClientToScreen(hwnd_, &screen);
+
+    const HDC screenDc = ::GetDC(nullptr);
+    if (screenDc == nullptr) {
+        return false;
+    }
+
+    const COLORREF sample = ::GetPixel(screenDc, screen.x, screen.y);
+    ::ReleaseDC(nullptr, screenDc);
+
+    if (sample == CLR_INVALID) {
+        return false;
+    }
+
+    tool_.UseColor(FromColorRef(sample));
+    return true;
+}
+
+void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
+    if (tool == ccl::tool::Tool::Eyedropper &&
+        tool_.tool != ccl::tool::Tool::Eyedropper) {
+        toolBeforeEyedropper_ = tool_.tool;
+    }
+    tool_.tool = tool;
+    UpdateCursor();
+    UpdateTitle();
+    Draw();
 }
 
 void ClipWindow::ShowContextMenu(POINT screen) noexcept {
@@ -738,17 +836,8 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     toolEntry(ccl::tool::Tool::Eraser, L"消しゴム\tE");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"ツール");
 
-    const HMENU colors = ::CreatePopupMenu();
-    for (size_t i = 0; i < ccl::tool::kQuickColors.size(); ++i) {
-        const auto& entry = ccl::tool::kQuickColors[i];
-        const bool active = entry.r == tool_.color.r && entry.g == tool_.color.g &&
-                            entry.b == tool_.color.b;
-        wchar_t label[64];
-        ::swprintf_s(label, L"%s\tShift+%zu", kColorNames[i], i + 1);
-        ::AppendMenuW(colors, active ? checked : plain,
-                      kMenuColorBase + static_cast<UINT>(i), label);
-    }
-    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(colors), L"色");
+    ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...\tI");
+    ::AppendMenuW(menu, plain, kMenuEyedropper, L"画面から色を拾う");
 
     const HMENU widths = ::CreatePopupMenu();
     for (size_t i = 0; i < ARRAYSIZE(kWidthPresets); ++i) {
@@ -807,16 +896,8 @@ void ClipWindow::OnCommand(int command) noexcept {
         Draw();
         return;
     }
-    if (id >= kMenuColorBase) {
-        tool_.color = ccl::tool::kQuickColors[id - kMenuColorBase];
-        Draw();
-        return;
-    }
     if (id >= kMenuToolBase) {
-        tool_.tool = static_cast<ccl::tool::Tool>(id - kMenuToolBase);
-        UpdateCursor();
-        UpdateTitle();
-        Draw();
+        SelectTool(static_cast<ccl::tool::Tool>(id - kMenuToolBase));
         return;
     }
 
@@ -844,6 +925,12 @@ void ClipWindow::OnCommand(int command) noexcept {
             tool_.antialias = !tool_.antialias;
             UpdateTitle();
             Draw();
+            return;
+        case kMenuEyedropper:
+            SelectTool(ccl::tool::Tool::Eyedropper);
+            return;
+        case kMenuColorPicker:
+            ChooseColorFromPicker();
             return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);

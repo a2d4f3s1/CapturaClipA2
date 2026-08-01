@@ -58,6 +58,11 @@ private:
     void ShowContextMenu(POINT screen) noexcept;
     void OnCommand(int command) noexcept;
 
+    void ChooseColorFromPicker() noexcept;
+    // Reads the colour out of the captured image at that point.
+    bool PickColorAt(POINT client) noexcept;
+    void SelectTool(ccl::tool::Tool tool) noexcept;
+
     void SaveAs() noexcept;
     void CopyImage() noexcept;
     // Saves automatically before the capture is discarded, unless the image has
@@ -110,7 +115,13 @@ private:
     bool erasing_ = false;
     bool erasedAny_ = false;
 
+    // Eyedropper drag: the pointer is captured so the sample can come from
+    // anywhere on screen, including other applications.
+    bool sampling_ = false;
+
     bool spaceHeld_ = false;
+    // Tool to return to once the eyedropper has taken a sample.
+    ccl::tool::Tool toolBeforeEyedropper_ = ccl::tool::Tool::Pen;
 
     POINT lastCursor_{};
     bool cursorInside_ = false;

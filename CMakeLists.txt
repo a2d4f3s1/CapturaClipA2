@@ -31,6 +31,7 @@ set(APP_SOURCES
     src/render/D2DContext.cpp
     src/render/Renderer.cpp
     src/ui/ClipWindow.cpp
+    src/ui/ColorPopup.cpp
     src/util/Dpi.cpp
     src/util/NameFormat.cpp
 )
@@ -50,6 +51,7 @@ set(APP_HEADERS
     src/render/D2DContext.h
     src/render/Renderer.h
     src/ui/ClipWindow.h
+    src/ui/ColorPopup.h
     src/tool/ToolState.h
     src/util/Dpi.h
     src/util/NameFormat.h
