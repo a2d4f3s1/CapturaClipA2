@@ -46,6 +46,28 @@ struct Stroke {
     }
 };
 
+// Styling applied to a stretch of characters, so that part of a line can be
+// coloured or emphasised without splitting it into separate annotations.
+struct TextRun {
+    unsigned int start = 0;
+    unsigned int length = 0;
+    Color color;
+    float fontSize = 0.0f;       // 0 means the annotation's own size
+    std::wstring fontFamily;     // empty means the annotation's own font
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+    bool strikethrough = false;
+
+    bool SameStyle(const TextRun& other) const noexcept {
+        return color.r == other.color.r && color.g == other.color.g &&
+               color.b == other.color.b && fontSize == other.fontSize &&
+               fontFamily == other.fontFamily && bold == other.bold &&
+               italic == other.italic && underline == other.underline &&
+               strikethrough == other.strikethrough;
+    }
+};
+
 // A piece of text placed on the image, kept as text rather than as pixels so
 // that the wording, size and colour stay editable after the fact.
 struct TextAnnotation {
@@ -56,6 +78,19 @@ struct TextAnnotation {
     float fontSize = 30.0f;  // image pixels
     std::wstring fontFamily = L"Meiryo";
     Color color;
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+    bool strikethrough = false;
+
+    // Per-character styling. When empty the fields above apply to the whole
+    // string; when present they override it for the ranges they cover.
+    std::vector<TextRun> runs;
+
+    // Width the text wraps at, in image pixels. Zero means no wrapping. Stored
+    // so the drawn result breaks in the same places it did while being typed.
+    float wrapWidth = 0.0f;
+
     // A drop shadow or an outline keeps text legible over a busy screenshot,
     // which is most of what gets captured.
     bool shadow = true;

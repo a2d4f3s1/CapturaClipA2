@@ -187,6 +187,10 @@ namespace {
 
 // Builds the layout used for both drawing and measuring, so the two can never
 // disagree about where the text sits.
+//
+// Range styling that affects metrics -- weight, slant, decorations -- is
+// applied here. Per-range colour needs a render target to make brushes from,
+// so it is applied separately by the caller that draws.
 Microsoft::WRL::ComPtr<IDWriteTextLayout> BuildLayout(
     IDWriteFactory* writer, const ccl::doc::TextAnnotation& text) noexcept {
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
@@ -196,23 +200,57 @@ Microsoft::WRL::ComPtr<IDWriteTextLayout> BuildLayout(
 
     Microsoft::WRL::ComPtr<IDWriteTextFormat> format;
     if (FAILED(writer->CreateTextFormat(
-            text.fontFamily.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            text.fontSize, L"", &format))) {
+            text.fontFamily.c_str(), nullptr,
+            text.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+            text.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, text.fontSize, L"", &format))) {
         return layout;
     }
-
-    // Wrapping is left to the line breaks that were actually typed.
-    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
     // A large but finite box. FLT_MAX invites overflow in the layout maths;
     // this is far beyond any capture yet still arithmetic-safe.
     constexpr float kUnbounded = 1.0e6f;
 
+    // Wrapped at the width it was typed at, so the drawn result breaks in the
+    // same places the editor did.
+    const bool wraps = text.wrapWidth > 0.0f;
+    format->SetWordWrapping(wraps ? DWRITE_WORD_WRAPPING_WRAP
+                                  : DWRITE_WORD_WRAPPING_NO_WRAP);
+
     if (FAILED(writer->CreateTextLayout(
             text.text.c_str(), static_cast<UINT32>(text.text.size()),
-            format.Get(), kUnbounded, kUnbounded, &layout))) {
+            format.Get(), wraps ? text.wrapWidth : kUnbounded, kUnbounded,
+            &layout))) {
         layout.Reset();
+        return layout;
+    }
+
+    // Underline and strikethrough are properties of a range rather than of the
+    // format, so they are applied after the fact.
+    const DWRITE_TEXT_RANGE all{0, static_cast<UINT32>(text.text.size())};
+    if (text.underline) {
+        layout->SetUnderline(TRUE, all);
+    }
+    if (text.strikethrough) {
+        layout->SetStrikethrough(TRUE, all);
+    }
+
+    for (const ccl::doc::TextRun& run : text.runs) {
+        const DWRITE_TEXT_RANGE range{run.start, run.length};
+        layout->SetFontWeight(
+            run.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+            range);
+        layout->SetFontStyle(
+            run.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            range);
+        layout->SetUnderline(run.underline ? TRUE : FALSE, range);
+        layout->SetStrikethrough(run.strikethrough ? TRUE : FALSE, range);
+        if (run.fontSize > 0.0f) {
+            layout->SetFontSize(run.fontSize, range);
+        }
+        if (!run.fontFamily.empty()) {
+            layout->SetFontFamilyName(run.fontFamily.c_str(), range);
+        }
     }
     return layout;
 }
@@ -237,6 +275,35 @@ bool Renderer::MeasureText(const ccl::doc::TextAnnotation& text,
 
     bounds = D2D1::RectF(text.x, text.y, text.x + metrics.width,
                          text.y + metrics.height);
+    return true;
+}
+
+bool Renderer::MeasureLine(const ccl::doc::TextAnnotation& text,
+                           float& lineHeight, float& baseline) noexcept {
+    if (context_ == nullptr) {
+        return false;
+    }
+
+    ccl::doc::TextAnnotation probe = text;
+    // Needs some content to report metrics for; the styling is what matters.
+    if (probe.text.empty()) {
+        probe.text = L"A";
+        probe.runs.clear();
+    }
+
+    const auto layout = BuildLayout(context_->Text(), probe);
+    if (!layout) {
+        return false;
+    }
+
+    DWRITE_LINE_METRICS metrics{};
+    UINT32 count = 0;
+    if (FAILED(layout->GetLineMetrics(&metrics, 1, &count)) || count == 0) {
+        return false;
+    }
+
+    lineHeight = metrics.height;
+    baseline = metrics.baseline;
     return true;
 }
 
@@ -280,14 +347,26 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
         }
     }
 
+    // Per-range colour is attached only for the final pass. The shadow and
+    // outline underneath are deliberately flat -- picking up the text colours
+    // would turn them into a blurred copy rather than a backing.
+    for (const ccl::doc::TextRun& run : text.runs) {
+        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> runBrush;
+        if (SUCCEEDED(target_->CreateSolidColorBrush(ToD2D(run.color),
+                                                     &runBrush))) {
+            layout->SetDrawingEffect(runBrush.Get(),
+                                     DWRITE_TEXT_RANGE{run.start, run.length});
+        }
+    }
+
     brush_->SetColor(ToD2D(text.color));
     target_->DrawTextLayout(origin, layout.Get(), brush_.Get(),
                             D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
 void Renderer::Draw(const ccl::view::ViewState& view,
-                    const ccl::doc::Stroke* active,
-                    const BrushCursor* cursor) noexcept {
+                    const ccl::doc::Stroke* active, const BrushCursor* cursor,
+                    const D2D1_RECT_F* highlight) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -344,6 +423,20 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     }
     if (active != nullptr) {
         DrawStroke(*active);
+    }
+
+    if (highlight != nullptr && brush_) {
+        // Marks what a click would pick up. Drawn slightly outside the text so
+        // it frames it rather than striking through it.
+        const float lineWidth = 1.0f / zoom;
+        const float margin = 2.0f * lineWidth;
+
+        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        brush_->SetColor(D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
+        target_->DrawRectangle(
+            D2D1::RectF(highlight->left - margin, highlight->top - margin,
+                        highlight->right + margin, highlight->bottom + margin),
+            brush_.Get(), lineWidth);
     }
 
     if (cursor != nullptr && brush_ && cursor->radius > 0.0f) {

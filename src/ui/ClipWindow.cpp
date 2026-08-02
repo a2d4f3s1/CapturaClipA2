@@ -2,6 +2,7 @@
 
 #include <commdlg.h>
 #include <imm.h>
+#include <richedit.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -35,6 +36,97 @@ constexpr LONG kResizeGrip = 6;
 // stroke geometry small without any visible difference.
 constexpr float kMinPointSpacing = 0.75f;
 
+// Movement below this counts as a click rather than a drag, so that a slight
+// tremor while clicking text does not nudge it.
+constexpr int kClickThreshold = 3;
+
+
+// The rich edit control lives in its own library, which has to be loaded
+// before the class can be used.
+bool EnsureRichEditLoaded() noexcept {
+    static const HMODULE library = ::LoadLibraryW(L"Msftedit.dll");
+    return library != nullptr;
+}
+
+// Twips are twentieths of a point, which is what character formatting uses.
+LONG PixelsToTwips(float pixels, UINT dpi) noexcept {
+    return static_cast<LONG>(std::lround(pixels * 1440.0f /
+                                         static_cast<float>(dpi)));
+}
+
+float TwipsToPixels(LONG twips, UINT dpi) noexcept {
+    return static_cast<float>(twips) * static_cast<float>(dpi) / 1440.0f;
+}
+
+// Font size steps, in image pixels.
+constexpr float kMinFontSize = 6.0f;
+constexpr float kMaxFontSize = 400.0f;
+
+// Menu entries per column before starting a new one, so a long font list stays
+// on screen instead of running off the bottom.
+constexpr int kMenuColumnLength = 30;
+
+// Installed font families, in the user's locale, sorted for browsing.
+const std::vector<std::wstring>& InstalledFonts(IDWriteFactory* writer) {
+    static std::vector<std::wstring> fonts = [writer] {
+        std::vector<std::wstring> names;
+        if (writer == nullptr) {
+            return names;
+        }
+
+        Microsoft::WRL::ComPtr<IDWriteFontCollection> collection;
+        if (FAILED(writer->GetSystemFontCollection(&collection))) {
+            return names;
+        }
+
+        wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
+        if (::GetUserDefaultLocaleName(locale, ARRAYSIZE(locale)) == 0) {
+            ::wcscpy_s(locale, L"en-us");
+        }
+
+        const UINT32 count = collection->GetFontFamilyCount();
+        names.reserve(count);
+
+        for (UINT32 i = 0; i < count; ++i) {
+            Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+            if (FAILED(collection->GetFontFamily(i, &family))) {
+                continue;
+            }
+
+            Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> familyNames;
+            if (FAILED(family->GetFamilyNames(&familyNames))) {
+                continue;
+            }
+
+            // Prefer the name in the user's language, falling back to the
+            // first one the font offers.
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            if (FAILED(familyNames->FindLocaleName(locale, &index, &exists)) ||
+                !exists) {
+                index = 0;
+            }
+
+            UINT32 length = 0;
+            if (FAILED(familyNames->GetStringLength(index, &length)) ||
+                length == 0) {
+                continue;
+            }
+
+            std::wstring name(length + 1, L'\0');
+            if (SUCCEEDED(familyNames->GetString(index, name.data(),
+                                                 length + 1))) {
+                name.resize(length);
+                names.push_back(std::move(name));
+            }
+        }
+
+        std::sort(names.begin(), names.end());
+        return names;
+    }();
+    return fonts;
+}
+
 bool IsKeyDown(int key) noexcept {
     return (::GetKeyState(key) & 0x8000) != 0;
 }
@@ -49,13 +141,24 @@ enum MenuId : UINT {
     kMenuFit,
     kMenuAntialias,
     kMenuPressure,
+    kMenuBold,
+    kMenuItalic,
+    kMenuUnderline,
+    kMenuStrikethrough,
+    kMenuTextOutline,
+    kMenuTextShadow,
+    kMenuCommitText,
     kMenuEyedropper,
     kMenuColorPicker,
     kMenuExit,
 
-    kMenuToolBase = 200,   // + Tool
-    kMenuWidthBase = 400,  // + index into kWidthPresets
-    kMenuZoomBase = 500,   // + zoom in hundreds of percent
+    // Range bases, kept together at the end. Putting one in the middle renumbers
+    // everything after it into that range, which is how the colour entry ended
+    // up being treated as a font choice.
+    kMenuToolBase = 200,    // + Tool
+    kMenuWidthBase = 400,   // + index into kWidthPresets
+    kMenuZoomBase = 500,    // + zoom in hundreds of percent
+    kMenuFontBase = 1000,   // + index into the installed font list
 };
 
 ccl::doc::Color FromColorRef(COLORREF value) noexcept {
@@ -79,15 +182,37 @@ COLORREF ToColorRef(const ccl::doc::Color& color) noexcept {
 // immediately close the entry that just opened.
 constexpr UINT kCommitTextMessage = WM_APP + 1;
 
+// Styling shortcut pressed inside the editor; wParam is the key.
+constexpr UINT kStyleTextMessage = WM_APP + 2;
+
+// The editor's content may have changed and its box needs re-measuring. Driven
+// from the messages that can change it rather than from a change notification,
+// which rich edit does not deliver the way a plain edit control does.
+constexpr UINT kResizeEditorMessage = WM_APP + 3;
+
+// Right click inside the editor. The styling menu has to be reachable from
+// there: while typing, the keys that would open it are just characters.
+constexpr UINT kEditorMenuMessage = WM_APP + 4;
+
 // Edit controls separate lines with CRLF; text layout wants a bare LF. The two
 // conversions are kept next to each other so they cannot drift apart -- getting
 // only one of them right leaves text that looks fine until it is reopened.
 std::wstring ToStoredLineEndings(const std::wstring& text) {
     std::wstring result;
     result.reserve(text.size());
-    for (const wchar_t character : text) {
-        if (character != L'\r') {
-            result.push_back(character);
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != L'\r') {
+            result.push_back(text[i]);
+            continue;
+        }
+
+        // A carriage return is a line break in its own right -- rich edit
+        // returns bare CR where a plain edit control returns CRLF. Dropping it
+        // instead of translating it silently deleted every line break.
+        result.push_back(L'\n');
+        if (i + 1 < text.size() && text[i + 1] == L'\n') {
+            ++i;
         }
     }
     return result;
@@ -115,24 +240,61 @@ LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
     };
 
     switch (msg) {
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
             // Enter inserts a line break, so committing needs its own gesture.
             if (wParam == VK_ESCAPE ||
                 (wParam == VK_RETURN && (::GetKeyState(VK_CONTROL) & 0x8000))) {
                 commit();
                 return 0;
             }
+
+            // Styling shortcuts have to be intercepted here: the edit control
+            // would otherwise swallow them without acting on them.
+            if ((::GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+                (wParam == 'B' || wParam == 'I' || wParam == 'U' ||
+                 wParam == VK_OEM_4 || wParam == VK_OEM_6)) {
+                ::PostMessageW(::GetParent(hwnd), kStyleTextMessage, wParam, 0);
+                return 0;
+            }
             break;
+        }
 
         case WM_KILLFOCUS:
             // Clicking away commits, which is what most people try first.
             commit();
             break;
 
+        case WM_CONTEXTMENU:
+            ::PostMessageW(::GetParent(hwnd), kEditorMenuMessage,
+                           reinterpret_cast<WPARAM>(hwnd), lParam);
+            return 0;
+
         default:
             break;
     }
-    return ::CallWindowProcW(g_originalEditProc, hwnd, msg, wParam, lParam);
+
+    const LRESULT result =
+        ::CallWindowProcW(g_originalEditProc, hwnd, msg, wParam, lParam);
+
+    // Re-measure after anything that can change the content. Driven from the
+    // messages themselves because the change notification does not arrive.
+    switch (msg) {
+        case WM_CHAR:
+        case WM_KEYDOWN:
+        case WM_PASTE:
+        case WM_CUT:
+        case WM_CLEAR:
+        case WM_IME_COMPOSITION:
+        case WM_IME_ENDCOMPOSITION:
+        case WM_IME_CHAR:
+            ::PostMessageW(::GetParent(hwnd), kResizeEditorMessage,
+                           reinterpret_cast<WPARAM>(hwnd), 0);
+            break;
+
+        default:
+            break;
+    }
+    return result;
 }
 
 constexpr float kWidthPresets[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
@@ -257,10 +419,102 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case kCommitTextMessage:
-            // Only if it is still the control that asked; see the message's
-            // definition.
-            if (reinterpret_cast<HWND>(wParam) == editor_) {
+            // Only if it is still the control that asked, and not while a menu
+            // or the palette has taken focus; see the message's definition and
+            // suppressCommitDepth_.
+            if (reinterpret_cast<HWND>(wParam) == editor_ &&
+                suppressCommitDepth_ == 0) {
                 CommitText();
+            }
+            return 0;
+
+        case WM_NOTIFY: {
+            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header != nullptr && header->hwndFrom == editor_ &&
+                header->code == EN_REQUESTRESIZE) {
+                // The control reports the rectangle its content needs; growing
+                // to match is what keeps every line visible.
+                const auto* request = reinterpret_cast<const REQRESIZE*>(lParam);
+                const int margin = std::max(
+                    4, static_cast<int>(std::lround(
+                           (settings_ != nullptr ? settings_->textFontSize
+                                                 : 16.0f) *
+                           view_.Zoom() * 0.35f)));
+
+                const int width = std::max(
+                    40, static_cast<int>(request->rc.right - request->rc.left) +
+                            margin);
+                const int height = std::max(
+                    12, static_cast<int>(request->rc.bottom - request->rc.top) +
+                            margin);
+
+                RECT current{};
+                ::GetWindowRect(editor_, &current);
+                const int currentWidth = current.right - current.left;
+                const int currentHeight = current.bottom - current.top;
+
+                // Only when it actually changes. The control asks to be
+                // resized on every keystroke, and resizing it regardless made
+                // it flicker.
+                if (width == currentWidth && height == currentHeight) {
+                    return 0;
+                }
+
+                ::SetWindowPos(editor_, nullptr, 0, 0, width, height,
+                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                // Only a shrink exposes image that the parent has to repaint;
+                // growing is covered by the control itself.
+                if (width < currentWidth || height < currentHeight) {
+                    Draw();
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case kResizeEditorMessage:
+            // No repaint here: the resize notification repaints only if the box
+            // actually shrank. Redrawing on every keystroke made the editor
+            // flicker.
+            if (reinterpret_cast<HWND>(wParam) == editor_) {
+                ResizeEditor();
+            }
+            return 0;
+
+        case kEditorMenuMessage: {
+            if (reinterpret_cast<HWND>(wParam) != editor_) {
+                return 0;
+            }
+            POINT where{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            // A keyboard-invoked menu reports (-1, -1); put it on the caret.
+            if (where.x == -1 && where.y == -1) {
+                ::GetCursorPos(&where);
+            }
+            ShowTextStyleMenu(where);
+            return 0;
+        }
+
+        case kStyleTextMessage:
+            switch (wParam) {
+                case 'B':
+                    tool_.textBold = !tool_.textBold;
+                    ApplyTextEffect(CFM_BOLD, CFE_BOLD, tool_.textBold);
+                    break;
+                case 'I':
+                    tool_.textItalic = !tool_.textItalic;
+                    ApplyTextEffect(CFM_ITALIC, CFE_ITALIC, tool_.textItalic);
+                    break;
+                case 'U':
+                    tool_.textUnderline = !tool_.textUnderline;
+                    ApplyTextEffect(CFM_UNDERLINE, CFE_UNDERLINE,
+                                    tool_.textUnderline);
+                    break;
+                // Ctrl with the brush size keys, since the keys alone are
+                // characters while typing.
+                case VK_OEM_4: StepTextSize(-1); break;
+                case VK_OEM_6: StepTextSize(1); break;
+                default: break;
             }
             return 0;
 
@@ -450,7 +704,11 @@ void ClipWindow::UpdateCursor() noexcept {
     }
 
     if (tool_.tool == ccl::tool::Tool::Text) {
-        ::SetCursor(::LoadCursorW(nullptr, IDC_IBEAM));
+        // Over existing text the press could move it, so the cursor says so;
+        // elsewhere it starts new text.
+        const bool overText = hoveredTextIndex_ != static_cast<size_t>(-1) ||
+                              movingTextIndex_ != static_cast<size_t>(-1);
+        ::SetCursor(::LoadCursorW(nullptr, overText ? IDC_SIZEALL : IDC_IBEAM));
         return;
     }
 
@@ -500,10 +758,46 @@ size_t ClipWindow::FindTextAt(D2D1_POINT_2F image) noexcept {
     return static_cast<size_t>(-1);
 }
 
-void ClipWindow::BeginTextAt(POINT client) noexcept {
-    if (settings_ == nullptr) {
+void ClipWindow::EditTextAt(size_t index) noexcept {
+    if (document_ == nullptr || index >= document_->Annotations().size()) {
         return;
     }
+    CommitText();
+
+    // Lifted out of the document for the duration, so the old copy is not
+    // drawn underneath the editor, and so undo returns to the state before
+    // editing began.
+    history_.Record(document_->Annotations());
+
+    editingOriginal_ = document_->Annotations()[index].text;
+    editingExisting_ = true;
+    editorX_ = editingOriginal_.x;
+    editorY_ = editingOriginal_.y;
+
+    // The styling of the text being edited becomes the current styling, so the
+    // switches reflect it and changing one applies to this piece.
+    tool_.SetColor(editingOriginal_.color);
+    tool_.textBold = editingOriginal_.bold;
+    tool_.textItalic = editingOriginal_.italic;
+    tool_.textUnderline = editingOriginal_.underline;
+    tool_.textStrikethrough = editingOriginal_.strikethrough;
+    tool_.textShadow = editingOriginal_.shadow;
+    tool_.textOutline = editingOriginal_.outline;
+
+    document_->Annotations().erase(document_->Annotations().begin() +
+                                   static_cast<std::ptrdiff_t>(index));
+    Draw();
+
+    // The editor opens where the text is, not where the click landed.
+    const float zoom = view_.Zoom();
+    const POINT scroll = view_.Scroll();
+    const auto border = static_cast<float>(ccl::render::kWindowBorder);
+    const POINT client{static_cast<LONG>(editorX_ * zoom + border - scroll.x),
+                       static_cast<LONG>(editorY_ * zoom + border - scroll.y)};
+    OpenEditor(client);
+}
+
+void ClipWindow::BeginTextAt(POINT client) noexcept {
     // Clicking elsewhere finishes the previous piece of text rather than
     // discarding it.
     CommitText();
@@ -512,30 +806,12 @@ void ClipWindow::BeginTextAt(POINT client) noexcept {
     editorX_ = image.x;
     editorY_ = image.y;
     editingExisting_ = false;
+    OpenEditor(client);
+}
 
-    // Clicking on existing text reopens it. It is lifted out of the document
-    // for the duration, so the old copy is not drawn underneath the editor,
-    // and the state before that is what undo returns to.
-    const size_t existing = FindTextAt(image);
-    if (existing != static_cast<size_t>(-1) && document_ != nullptr) {
-        history_.Record(document_->Annotations());
-
-        editingOriginal_ = document_->Annotations()[existing].text;
-        editingExisting_ = true;
-        editorX_ = editingOriginal_.x;
-        editorY_ = editingOriginal_.y;
-
-        document_->Annotations().erase(document_->Annotations().begin() +
-                                       static_cast<std::ptrdiff_t>(existing));
-        Draw();
-
-        // The editor has to open where the text actually is, not where the
-        // click landed.
-        const float zoom = view_.Zoom();
-        const POINT scroll = view_.Scroll();
-        const auto border = static_cast<float>(ccl::render::kWindowBorder);
-        client.x = static_cast<LONG>(editorX_ * zoom + border - scroll.x);
-        client.y = static_cast<LONG>(editorY_ * zoom + border - scroll.y);
+void ClipWindow::OpenEditor(POINT client) noexcept {
+    if (settings_ == nullptr) {
+        return;
     }
 
     const float zoom = view_.Zoom();
@@ -550,28 +826,42 @@ void ClipWindow::BeginTextAt(POINT client) noexcept {
     const int height = static_cast<int>(fontPixels * 1.6f);
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    // A rich edit control rather than a plain one, because the styling has to
+    // be visible while typing: choosing which words to colour is not something
+    // that can be done blind.
+    if (!EnsureRichEditLoaded()) {
+        return;
+    }
+
     // ES_WANTRETURN is what makes Enter insert a line break instead of being
     // treated as a default-button press.
+    //
+    // No scrolling styles: the control is run "bottomless", meaning it reports
+    // the size its content needs and the parent grows it to match, so nothing
+    // ever scrolls out of view.
     editor_ = ::CreateWindowExW(
-        0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_WANTRETURN | ES_AUTOHSCROLL |
-            ES_AUTOVSCROLL | ES_NOHIDESEL,
+        0, MSFTEDIT_CLASS, L"",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_WANTRETURN | ES_NOHIDESEL,
         client.x, client.y, width, height, hwnd_, nullptr, instance, nullptr);
     if (editor_ == nullptr) {
         return;
     }
 
-    // Matched to how the text will actually be drawn, so the box is a preview
-    // rather than just an input field.
-    editorFont_ = ::CreateFontW(-fontPixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
-                                FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                DEFAULT_PITCH | FF_DONTCARE,
-                                settings_->textFontFamily.c_str());
-    if (editorFont_ != nullptr) {
-        ::SendMessageW(editor_, WM_SETFONT,
-                       reinterpret_cast<WPARAM>(editorFont_), TRUE);
-    }
+
+    // System default background. Rich edit cannot be made transparent -- keying
+    // a colour out was tried and destroyed the glyph edges -- and this at least
+    // stays legible whatever colour the text is. It shows only while typing;
+    // committed text is drawn straight onto the image.
+    ::SendMessageW(editor_, EM_SETBKGNDCOLOR, 1, 0);
+
+    // Word wrap off: the box has no fixed width to wrap against, so it grows
+    // with the text and breaks only where a line break was typed.
+    ::SendMessageW(editor_, EM_SETTARGETDEVICE, 0, 0);
+
+    // ENM_REQUESTRESIZE is what makes the control report the size its content
+    // needs, which is the supported way to keep it fitted to the text.
+    ::SendMessageW(editor_, EM_SETEVENTMASK, 0,
+                   ENM_CHANGE | ENM_REQUESTRESIZE);
 
     // Edit controls inset their text by a few pixels. Text layout draws from
     // the origin it is given, so without clearing the margins the preview sits
@@ -589,46 +879,287 @@ void ClipWindow::BeginTextAt(POINT client) noexcept {
     if (editingExisting_) {
         ::SetWindowTextW(editor_,
                          ToEditorLineEndings(editingOriginal_.text).c_str());
+
+        // Baseline styling first, then the ranges that differ from it, so that
+        // reopening text shows exactly what was committed.
+        ::SendMessageW(editor_, EM_SETSEL, 0, -1);
+        ApplyCharFormat(true);
+
+        for (const ccl::doc::TextRun& run : editingOriginal_.runs) {
+            const CHARRANGE range{static_cast<LONG>(run.start),
+                                  static_cast<LONG>(run.start + run.length)};
+            ::SendMessageW(editor_, EM_EXSETSEL, 0,
+                           reinterpret_cast<LPARAM>(&range));
+
+            CHARFORMAT2W format{};
+            format.cbSize = sizeof(format);
+            format.dwMask = CFM_COLOR | CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE |
+                            CFM_STRIKEOUT;
+            format.crTextColor = ToColorRef(run.color);
+            format.dwEffects = (run.bold ? CFE_BOLD : 0) |
+                               (run.italic ? CFE_ITALIC : 0) |
+                               (run.underline ? CFE_UNDERLINE : 0) |
+                               (run.strikethrough ? CFE_STRIKEOUT : 0);
+            ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                           reinterpret_cast<LPARAM>(&format));
+        }
+
         // Caret at the end, which is where editing usually continues.
         ::SendMessageW(editor_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
+    } else {
+        ApplyCharFormat(true);
     }
 
+    ApplyParagraphFormat();
     ResizeEditor();
     ::SetFocus(editor_);
 }
 
-void ClipWindow::ResizeEditor() noexcept {
+void ClipWindow::SetTextFont(const std::wstring& family) noexcept {
     if (editor_ == nullptr) {
         return;
     }
 
-    const int lines = std::max(
-        1, static_cast<int>(::SendMessageW(editor_, EM_GETLINECOUNT, 0, 0)));
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_FACE;
+    ::wcsncpy_s(format.szFaceName, family.c_str(), _TRUNCATE);
 
-    // Line height comes from the font actually in use rather than a guess, so
-    // the box tracks the text at any size.
-    int lineHeight = 16;
-    const HDC dc = ::GetDC(editor_);
-    if (dc != nullptr) {
-        const HGDIOBJ previous =
-            editorFont_ != nullptr ? ::SelectObject(dc, editorFont_) : nullptr;
+    ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&format));
 
-        TEXTMETRICW metrics{};
-        if (::GetTextMetricsW(dc, &metrics)) {
-            lineHeight = metrics.tmHeight;
-        }
-        if (previous != nullptr) {
-            ::SelectObject(dc, previous);
-        }
-        ::ReleaseDC(editor_, dc);
+    ResizeEditor();
+    Draw();
+}
+
+void ClipWindow::StepTextSize(int steps) noexcept {
+    if (editor_ == nullptr) {
+        return;
     }
 
-    RECT current{};
-    ::GetWindowRect(editor_, &current);
+    // Reads the size of the selection and scales it, so the step is relative to
+    // what is there rather than to a global setting. With a mixed selection the
+    // control reports the first run's size, which becomes the new size for all
+    // of it -- the same thing word processors do.
+    CHARFORMAT2W current{};
+    current.cbSize = sizeof(current);
+    current.dwMask = CFM_SIZE;
+    ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&current));
 
-    ::SetWindowPos(editor_, nullptr, 0, 0, current.right - current.left,
-                   lineHeight * lines + lineHeight / 4,
-                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const UINT dpi = ccl::dpi::ForWindow(hwnd_);
+    const float zoom = std::max(0.01f, view_.Zoom());
+    float size = TwipsToPixels(current.yHeight, dpi) / zoom;
+    if (size <= 0.0f) {
+        size = settings_ != nullptr ? settings_->textFontSize : 30.0f;
+    }
+
+    for (int i = 0; i < steps; ++i) {
+        size = std::min(kMaxFontSize, size * 1.15f + 0.5f);
+    }
+    for (int i = 0; i > steps; --i) {
+        size = std::max(kMinFontSize, (size - 0.5f) / 1.15f);
+    }
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_SIZE;
+    format.yHeight = PixelsToTwips(size * zoom, dpi);
+    ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&format));
+
+    ResizeEditor();
+    Draw();
+}
+
+void ClipWindow::ApplyTextEffect(DWORD mask, DWORD effect, bool enabled) noexcept {
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    // Only the attribute being changed is written. Sending the full format
+    // instead would reset the font and size along with it, undoing any
+    // per-range changes -- and with nothing selected, it would also stop the
+    // control carrying the previous character's formatting forward.
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = mask;
+    format.dwEffects = enabled ? effect : 0;
+
+    ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&format));
+
+    ResizeEditor();
+    Draw();
+}
+
+void ClipWindow::ApplyTextColor() noexcept {
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_COLOR;
+    format.crTextColor = ToColorRef(tool_.Color());
+
+    ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&format));
+    Draw();
+}
+
+void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
+    if (editor_ == nullptr || settings_ == nullptr) {
+        return;
+    }
+
+    const float fontSize =
+        editingExisting_ ? editingOriginal_.fontSize : settings_->textFontSize;
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD | CFM_ITALIC |
+                    CFM_UNDERLINE | CFM_STRIKEOUT;
+    format.yHeight =
+        PixelsToTwips(fontSize * view_.Zoom(), ccl::dpi::ForWindow(hwnd_));
+    format.crTextColor = ToColorRef(tool_.Color());
+    format.dwEffects = (tool_.textBold ? CFE_BOLD : 0) |
+                       (tool_.textItalic ? CFE_ITALIC : 0) |
+                       (tool_.textUnderline ? CFE_UNDERLINE : 0) |
+                       (tool_.textStrikethrough ? CFE_STRIKEOUT : 0);
+    ::wcsncpy_s(format.szFaceName, settings_->textFontFamily.c_str(), _TRUNCATE);
+
+    // Applied to the selection so that styling affects the chosen characters,
+    // or -- with nothing selected -- whatever is typed next.
+    ::SendMessageW(editor_, EM_SETCHARFORMAT,
+                   wholeText ? SCF_ALL : SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&format));
+}
+
+std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
+    std::vector<ccl::doc::TextRun> runs;
+    if (editor_ == nullptr || length <= 0) {
+        return runs;
+    }
+
+    CHARRANGE saved{};
+    ::SendMessageW(editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+
+    // Walked character by character, collapsing neighbours that share a style.
+    // Annotations are short enough that the simple approach is fine.
+    ccl::doc::TextRun current{};
+    bool open = false;
+
+    for (int i = 0; i < length; ++i) {
+        const CHARRANGE single{i, i + 1};
+        ::SendMessageW(editor_, EM_EXSETSEL, 0,
+                       reinterpret_cast<LPARAM>(&single));
+
+        CHARFORMAT2W format{};
+        format.cbSize = sizeof(format);
+        format.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD |
+                        CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
+        ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
+                       reinterpret_cast<LPARAM>(&format));
+
+        ccl::doc::TextRun style{};
+        style.color = FromColorRef(format.crTextColor);
+        style.fontFamily = format.szFaceName;
+        // Back out of twips and out of the zoom the editor is displayed at, to
+        // the size the text will be drawn at.
+        style.fontSize =
+            TwipsToPixels(format.yHeight, ccl::dpi::ForWindow(hwnd_)) /
+            std::max(0.01f, view_.Zoom());
+        style.bold = (format.dwEffects & CFE_BOLD) != 0;
+        style.italic = (format.dwEffects & CFE_ITALIC) != 0;
+        style.underline = (format.dwEffects & CFE_UNDERLINE) != 0;
+        style.strikethrough = (format.dwEffects & CFE_STRIKEOUT) != 0;
+
+        if (open && current.SameStyle(style)) {
+            ++current.length;
+            continue;
+        }
+        if (open) {
+            runs.push_back(current);
+        }
+        current = style;
+        current.start = static_cast<unsigned int>(i);
+        current.length = 1;
+        open = true;
+    }
+    if (open) {
+        runs.push_back(current);
+    }
+
+    ::SendMessageW(editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    return runs;
+}
+
+void ClipWindow::ApplyParagraphFormat() noexcept {
+    if (editor_ == nullptr) {
+        return;
+    }
+
+    // Rich edit indents paragraphs and spaces them apart. Both have to be
+    // cleared, or the typed text sits at a different place and a different
+    // line pitch from where it will be drawn. Applied to the whole text,
+    // because setting it before the text exists has no lasting effect.
+    CHARRANGE saved{};
+    ::SendMessageW(editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    ::SendMessageW(editor_, EM_SETSEL, 0, -1);
+
+    PARAFORMAT2 paragraph{};
+    paragraph.cbSize = sizeof(paragraph);
+    paragraph.dwMask = PFM_LINESPACING | PFM_SPACEBEFORE | PFM_SPACEAFTER |
+                       PFM_STARTINDENT | PFM_RIGHTINDENT | PFM_OFFSET;
+    paragraph.bLineSpacingRule = 0;  // single
+    paragraph.dyLineSpacing = 0;
+    paragraph.dySpaceBefore = 0;
+    paragraph.dySpaceAfter = 0;
+    paragraph.dxStartIndent = 0;
+    paragraph.dxRightIndent = 0;
+    paragraph.dxOffset = 0;
+
+    // Pinned to the line height the drawing will use. Left to its own devices
+    // the control spaces lines differently, so typed and committed text did
+    // not line up once there was more than one line.
+    if (settings_ != nullptr) {
+        ccl::doc::TextAnnotation probe;
+        probe.fontSize = editingExisting_ ? editingOriginal_.fontSize
+                                          : settings_->textFontSize;
+        probe.fontFamily = settings_->textFontFamily;
+        probe.bold = tool_.textBold;
+        probe.italic = tool_.textItalic;
+
+        float lineHeight = 0.0f;
+        float baseline = 0.0f;
+        if (renderer_.MeasureLine(probe, lineHeight, baseline) &&
+            lineHeight > 0.0f) {
+            paragraph.bLineSpacingRule = 4;  // exactly dyLineSpacing
+            paragraph.dyLineSpacing = PixelsToTwips(
+                lineHeight * view_.Zoom(), ccl::dpi::ForWindow(hwnd_));
+        }
+    }
+
+    ::SendMessageW(editor_, EM_SETPARAFORMAT, 0,
+                   reinterpret_cast<LPARAM>(&paragraph));
+
+    ::SendMessageW(editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+}
+
+void ClipWindow::ResizeEditor() noexcept {
+    if (editor_ == nullptr || settings_ == nullptr) {
+        return;
+    }
+
+    // Asks the control what size its content needs. The answer arrives as an
+    // EN_REQUESTRESIZE notification, which is where the resize happens.
+    //
+    // Measuring it here instead was the mistake behind several attempts: the
+    // positions the control reports are in its own scrolled coordinates, so
+    // once the box was too short the measurement came back short as well and
+    // it could never catch up.
+    ::SendMessageW(editor_, EM_REQUESTRESIZE, 0, 0);
 }
 
 void ClipWindow::TurnOffIme() noexcept {
@@ -660,11 +1191,43 @@ void ClipWindow::CommitText() noexcept {
         return;
     }
 
+    // Committed at the position the text is actually sitting at, measured from
+    // the control, rather than at the point that was clicked. The two differ by
+    // however the control chooses to place its first line, and taking the
+    // clicked point made the text jump on commit.
+    {
+        // Scrolled back first: positions come back in the control's scrolled
+        // coordinates, so measuring while scrolled placed the text too high by
+        // however far it had scrolled.
+        ::SendMessageW(editor_, EM_SETSEL, 0, 0);
+        ::SendMessageW(editor_, EM_SCROLLCARET, 0, 0);
+
+        POINTL textOrigin{};
+        ::SendMessageW(editor_, EM_POSFROMCHAR,
+                       reinterpret_cast<WPARAM>(&textOrigin), 0);
+
+        RECT editorRect{};
+        ::GetWindowRect(editor_, &editorRect);
+        POINT topLeft{editorRect.left, editorRect.top};
+        ::ScreenToClient(hwnd_, &topLeft);
+
+        const D2D1_POINT_2F origin =
+            ToImage(POINT{topLeft.x + textOrigin.x, topLeft.y + textOrigin.y});
+        editorX_ = origin.x;
+        editorY_ = origin.y;
+    }
+
+
     const int length = ::GetWindowTextLengthW(editor_);
     std::wstring text;
+    std::vector<ccl::doc::TextRun> runs;
     if (length > 0) {
         std::wstring raw(static_cast<size_t>(length), L'\0');
         ::GetWindowTextW(editor_, raw.data(), length + 1);
+
+        // Read before the text is normalised, because the styling positions
+        // refer to the control's own character indices.
+        runs = ReadRuns(static_cast<int>(::wcslen(raw.c_str())));
         text = ToStoredLineEndings(raw);
     }
 
@@ -687,8 +1250,9 @@ void ClipWindow::CommitText() noexcept {
     ccl::doc::Annotation annotation;
     annotation.kind = ccl::doc::AnnotationKind::Text;
 
-    // Re-edited text keeps the properties it was created with, so reopening it
-    // does not silently restyle it with whatever is currently selected.
+    // Re-edited text keeps the size and decoration it was created with; only
+    // what the style switches cover is taken from the current state, which is
+    // what was loaded from this text when editing began.
     annotation.text = wasEditing ? editingOriginal_ : ccl::doc::TextAnnotation{};
     annotation.text.text = std::move(text);
     annotation.text.x = editorX_;
@@ -697,10 +1261,16 @@ void ClipWindow::CommitText() noexcept {
     if (!wasEditing) {
         annotation.text.fontSize = settings_->textFontSize;
         annotation.text.fontFamily = settings_->textFontFamily;
-        annotation.text.color = tool_.Color();
-        annotation.text.shadow = settings_->textShadow;
-        annotation.text.outline = settings_->textOutline;
     }
+
+    annotation.text.color = tool_.Color();
+    annotation.text.bold = tool_.textBold;
+    annotation.text.italic = tool_.textItalic;
+    annotation.text.underline = tool_.textUnderline;
+    annotation.text.strikethrough = tool_.textStrikethrough;
+    annotation.text.shadow = tool_.textShadow;
+    annotation.text.outline = tool_.textOutline;
+    annotation.text.runs = std::move(runs);
 
     document_->Annotations().push_back(std::move(annotation));
     Draw();
@@ -947,9 +1517,22 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             sampling_ = true;
             return;
 
-        case ccl::tool::Tool::Text:
+        case ccl::tool::Tool::Text: {
+            // Pressing on existing text starts a drag. Whether that turns out
+            // to be a move or a click to edit is decided on release.
+            const size_t existing = FindTextAt(ToImage(client));
+            if (existing != static_cast<size_t>(-1) && document_ != nullptr) {
+                movingTextIndex_ = existing;
+                textDragStart_ = client;
+                textDragOriginX_ = document_->Annotations()[existing].text.x;
+                textDragOriginY_ = document_->Annotations()[existing].text.y;
+                textDragMoved_ = false;
+                ::SetCapture(hwnd_);
+                return;
+            }
             BeginTextAt(client);
             return;
+        }
         default:
             return;
     }
@@ -981,6 +1564,30 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         return;
     }
 
+    if (movingTextIndex_ != static_cast<size_t>(-1)) {
+        const int dx = client.x - textDragStart_.x;
+        const int dy = client.y - textDragStart_.y;
+
+        if (!textDragMoved_ && std::abs(dx) <= kClickThreshold &&
+            std::abs(dy) <= kClickThreshold) {
+            return;
+        }
+        if (!textDragMoved_ && document_ != nullptr) {
+            textDragMoved_ = true;
+            history_.Record(document_->Annotations());
+        }
+
+        if (document_ != nullptr &&
+            movingTextIndex_ < document_->Annotations().size()) {
+            const float zoom = view_.Zoom();
+            auto& text = document_->Annotations()[movingTextIndex_].text;
+            text.x = textDragOriginX_ + static_cast<float>(dx) / zoom;
+            text.y = textDragOriginY_ + static_cast<float>(dy) / zoom;
+            Draw();
+        }
+        return;
+    }
+
     if (sampling_) {
         if (PickColorAt(client)) {
             Draw();
@@ -997,6 +1604,18 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         EraseAt(client);
     }
 
+    // With the text tool, outline whatever is under the pointer so it is
+    // obvious what clicking would open.
+    if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr) {
+        const size_t hovered = FindTextAt(ToImage(client));
+        if (hovered != hoveredTextIndex_) {
+            hoveredTextIndex_ = hovered;
+            UpdateCursor();
+            Draw();
+        }
+        return;
+    }
+
     if (ShowsBrushCursor() || erasing_) {
         // Only ask for a repaint rather than drawing here. Moving the pointer
         // generates far more messages than the screen can show, and letting
@@ -1007,6 +1626,20 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftUp() noexcept {
+    if (movingTextIndex_ != static_cast<size_t>(-1)) {
+        const size_t index = movingTextIndex_;
+        const bool moved = textDragMoved_;
+        movingTextIndex_ = static_cast<size_t>(-1);
+        textDragMoved_ = false;
+        ::ReleaseCapture();
+
+        // A press that never moved was a click, which opens the text.
+        if (!moved) {
+            EditTextAt(index);
+        }
+        return;
+    }
+
     if (sampling_) {
         sampling_ = false;
         ::ReleaseCapture();
@@ -1267,6 +1900,10 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
 
     const ccl::doc::Color original = tool_.Color();
 
+    // Same reason as the styling menu: the palette takes focus, and that must
+    // not end the edit in progress.
+    ++suppressCommitDepth_;
+
     ColorPopup popup;
     const auto chosen = popup.Show(
         hwnd_, screen, original, tool_.RecentColors(),
@@ -1275,13 +1912,26 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
             // Applied without recording it: dragging across a gradient would
             // otherwise fill the recent list with every shade passed over.
             tool_.SetColor(colour);
-            Draw();
+
+            // While text is being edited the palette's own swatch is the
+            // preview. Pushing every intermediate colour into the control and
+            // repainting behind it made dragging crawl and the palette flicker;
+            // the colour is applied once, on commit.
+            if (editor_ == nullptr) {
+                Draw();
+            }
         });
 
     if (chosen.has_value()) {
         tool_.UseColor(*chosen);
+        ApplyTextColor();
     } else {
         tool_.SetColor(original);
+    }
+
+    --suppressCommitDepth_;
+    if (editor_ != nullptr) {
+        ::SetFocus(editor_);
     }
     Draw();
 }
@@ -1325,6 +1975,92 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     UpdateCursor();
     UpdateTitle();
     Draw();
+}
+
+HMENU ClipWindow::BuildFontMenu() noexcept {
+    const HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr || context_ == nullptr) {
+        return menu;
+    }
+
+    // Which font the selection currently uses, so it can be ticked.
+    std::wstring current;
+    if (editor_ != nullptr) {
+        CHARFORMAT2W format{};
+        format.cbSize = sizeof(format);
+        format.dwMask = CFM_FACE;
+        ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
+                       reinterpret_cast<LPARAM>(&format));
+        current = format.szFaceName;
+    } else if (settings_ != nullptr) {
+        current = settings_->textFontFamily;
+    }
+
+    const auto& fonts = InstalledFonts(context_->Text());
+    for (size_t i = 0; i < fonts.size(); ++i) {
+        UINT flags = MF_STRING;
+        if (fonts[i] == current) {
+            flags |= MF_CHECKED;
+        }
+        // Wrapped into columns; the list is long enough to run off screen.
+        if (i > 0 && i % kMenuColumnLength == 0) {
+            flags |= MF_MENUBARBREAK;
+        }
+        ::AppendMenuW(menu, flags, kMenuFontBase + static_cast<UINT>(i),
+                      fonts[i].c_str());
+    }
+    return menu;
+}
+
+void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
+    const HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+
+    const UINT checked = MF_STRING | MF_CHECKED;
+    const UINT plain = MF_STRING;
+
+    // Reached by right-clicking inside the editor, because while typing the
+    // shortcut keys are ordinary characters.
+    ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...");
+    ::AppendMenuW(menu, MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(BuildFontMenu()), L"フォント");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, tool_.textBold ? checked : plain, kMenuBold,
+                  L"太字\tCtrl+B");
+    ::AppendMenuW(menu, tool_.textItalic ? checked : plain, kMenuItalic,
+                  L"斜体\tCtrl+I");
+    ::AppendMenuW(menu, tool_.textUnderline ? checked : plain, kMenuUnderline,
+                  L"下線\tCtrl+U");
+    ::AppendMenuW(menu, tool_.textStrikethrough ? checked : plain,
+                  kMenuStrikethrough, L"打ち消し線");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, tool_.textOutline ? checked : plain, kMenuTextOutline,
+                  L"縁取り");
+    ::AppendMenuW(menu, tool_.textShadow ? checked : plain, kMenuTextShadow,
+                  L"影");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, plain, kMenuCommitText, L"確定\tEsc");
+
+    // The menu takes focus off the editor, which must not be mistaken for
+    // clicking away and end the edit.
+    ++suppressCommitDepth_;
+
+    const int command = ::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+        screen.x, screen.y, 0, hwnd_, nullptr);
+
+    ::DestroyMenu(menu);
+
+    if (command != 0) {
+        OnCommand(command);
+    }
+
+    --suppressCommitDepth_;
+    if (editor_ != nullptr && command != kMenuCommitText) {
+        ::SetFocus(editor_);
+    }
 }
 
 void ClipWindow::ShowContextMenu(POINT screen) noexcept {
@@ -1375,6 +2111,23 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                   L"筆圧を使う");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(widths), L"線");
 
+    const HMENU textStyle = ::CreatePopupMenu();
+    ::AppendMenuW(textStyle, tool_.textBold ? checked : plain, kMenuBold,
+                  L"太字\tCtrl+B");
+    ::AppendMenuW(textStyle, tool_.textItalic ? checked : plain, kMenuItalic,
+                  L"斜体\tCtrl+I");
+    ::AppendMenuW(textStyle, tool_.textUnderline ? checked : plain,
+                  kMenuUnderline, L"下線\tCtrl+U");
+    ::AppendMenuW(textStyle, tool_.textStrikethrough ? checked : plain,
+                  kMenuStrikethrough, L"打ち消し線");
+    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(textStyle, tool_.textOutline ? checked : plain,
+                  kMenuTextOutline, L"縁取り");
+    ::AppendMenuW(textStyle, tool_.textShadow ? checked : plain,
+                  kMenuTextShadow, L"影");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
+                  L"文字");
+
     const HMENU zoom = ::CreatePopupMenu();
     for (int percent = 100; percent <= 500; percent += 100) {
         wchar_t label[32];
@@ -1407,6 +2160,15 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
 
 void ClipWindow::OnCommand(int command) noexcept {
     const auto id = static_cast<UINT>(command);
+
+    if (id >= kMenuFontBase && context_ != nullptr) {
+        const auto& fonts = InstalledFonts(context_->Text());
+        const size_t index = id - kMenuFontBase;
+        if (index < fonts.size()) {
+            SetTextFont(fonts[index]);
+        }
+        return;
+    }
 
     if (id >= kMenuZoomBase) {
         view_.SetZoom(static_cast<float>(id - kMenuZoomBase) / 100.0f);
@@ -1451,6 +2213,35 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuPressure:
             tool_.usePressure = !tool_.usePressure;
+            return;
+
+        case kMenuBold:
+            tool_.textBold = !tool_.textBold;
+            ApplyTextEffect(CFM_BOLD, CFE_BOLD, tool_.textBold);
+            return;
+        case kMenuItalic:
+            tool_.textItalic = !tool_.textItalic;
+            ApplyTextEffect(CFM_ITALIC, CFE_ITALIC, tool_.textItalic);
+            return;
+        case kMenuUnderline:
+            tool_.textUnderline = !tool_.textUnderline;
+            ApplyTextEffect(CFM_UNDERLINE, CFE_UNDERLINE, tool_.textUnderline);
+            return;
+        case kMenuStrikethrough:
+            tool_.textStrikethrough = !tool_.textStrikethrough;
+            ApplyTextEffect(CFM_STRIKEOUT, CFE_STRIKEOUT,
+                            tool_.textStrikethrough);
+            return;
+        case kMenuTextOutline:
+            tool_.textOutline = !tool_.textOutline;
+            Draw();
+            return;
+        case kMenuTextShadow:
+            tool_.textShadow = !tool_.textShadow;
+            Draw();
+            return;
+        case kMenuCommitText:
+            CommitText();
             return;
         case kMenuEyedropper:
             SelectTool(ccl::tool::Tool::Eyedropper);
@@ -1551,14 +2342,20 @@ void ClipWindow::Draw() noexcept {
         cursor.antialias = tool_.antialias;
     }
 
-    renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
-                   showCursor ? &cursor : nullptr);
-
-    // Direct2D paints the whole window including the area the edit control
-    // occupies, so the control has to be told to put itself back on top.
-    if (editor_ != nullptr) {
-        ::RedrawWindow(editor_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    D2D1_RECT_F highlight{};
+    bool hasHighlight = false;
+    if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr &&
+        document_ != nullptr &&
+        hoveredTextIndex_ < document_->Annotations().size()) {
+        const auto& annotation = document_->Annotations()[hoveredTextIndex_];
+        if (annotation.kind == ccl::doc::AnnotationKind::Text) {
+            hasHighlight = renderer_.MeasureText(annotation.text, highlight);
+        }
     }
+
+    renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
+                   showCursor ? &cursor : nullptr,
+                   hasHighlight ? &highlight : nullptr);
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.
@@ -1583,6 +2380,8 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     view_.SetZoomStepPercent(settings.zoomStepPercent);
     renderer_.SetSmoothScaling(settings.smoothScaling);
     tool_.usePressure = settings.usePenPressure;
+    tool_.textShadow = settings.textShadow;
+    tool_.textOutline = settings.textOutline;
     ccl::timing::Stopwatch watch;
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);
@@ -1610,9 +2409,12 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     // The window is the image plus the outline on each side, and it is placed
     // so that the image itself lands exactly where the selection was.
     const int frame = 2 * ccl::render::kWindowBorder;
+    // WS_CLIPCHILDREN keeps this window's own drawing out of the area the text
+    // editor occupies. Without it the editor had to be told to repaint after
+    // every frame, which is what made it flicker.
     hwnd_ = ::CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_LAYERED, kClipWindowClass,
-        L"CapturaClipA2", WS_POPUP | WS_THICKFRAME,
+        L"CapturaClipA2", WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
         position.x - ccl::render::kWindowBorder,
         position.y - ccl::render::kWindowBorder, document.Width() + frame,
         document.Height() + frame, nullptr, nullptr, instance, this);

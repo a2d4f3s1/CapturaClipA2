@@ -76,6 +76,9 @@ private:
     bool draggingField_ = false;
     bool draggingHue_ = false;
 
+    // Focus changes before the popup has settled are part of opening it, not
+    // the user clicking away, and must not close it again immediately.
+    bool ready_ = false;
     bool finished_ = false;
     bool accepted_ = false;
 };

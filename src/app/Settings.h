@@ -26,8 +26,10 @@ public:
     // Text
     std::wstring textFontFamily = L"Meiryo";
     float textFontSize = 30.0f;
-    bool textShadow = true;
-    bool textOutline = false;
+    // An outline reads better than a shadow over a screenshot, and does not
+    // shift the text's apparent position the way a shadow does.
+    bool textShadow = false;
+    bool textOutline = true;
 
     // Drawing
     bool usePenPressure = true;

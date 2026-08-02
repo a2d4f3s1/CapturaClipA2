@@ -56,6 +56,8 @@ private:
     void UpdateCursor() noexcept;
 
     void ShowContextMenu(POINT screen) noexcept;
+    // Styling menu for text being edited, reached by right-clicking the editor.
+    void ShowTextStyleMenu(POINT screen) noexcept;
     void OnCommand(int command) noexcept;
 
     void ChooseColorFromPicker() noexcept;
@@ -76,6 +78,9 @@ private:
     // than handled key by key. Composing Japanese means driving an IME, and the
     // edit control already does that correctly.
     void BeginTextAt(POINT client) noexcept;
+    // Creates the edit control itself; the position and the state around it are
+    // set up by whichever of the two entry points called in.
+    void OpenEditor(POINT client) noexcept;
     void CommitText() noexcept;
     void CancelText() noexcept;
     void DestroyEditor() noexcept;
@@ -88,6 +93,24 @@ private:
     // Index of the text annotation under a point, or npos. Clicking existing
     // text reopens it for editing rather than starting a second one on top.
     size_t FindTextAt(D2D1_POINT_2F image) noexcept;
+    // Reopens the text at an index, as opposed to starting a new one.
+    void EditTextAt(size_t index) noexcept;
+    // Applies the current styling to the selection, or to the whole text when
+    // asked. With nothing selected the control applies it to what is typed
+    // next, which is how styling ahead of typing works.
+    void ApplyCharFormat(bool wholeText) noexcept;
+    // Writes a single attribute, leaving everything else about the run alone.
+    void ApplyTextEffect(DWORD mask, DWORD effect, bool enabled) noexcept;
+    void ApplyTextColor() noexcept;
+    // Scales the font size of the selection, or of what is typed next.
+    void StepTextSize(int steps) noexcept;
+    void SetTextFont(const std::wstring& family) noexcept;
+    HMENU BuildFontMenu() noexcept;
+    // Clears the indentation and paragraph spacing rich edit applies by
+    // default, which do not exist in the drawn result.
+    void ApplyParagraphFormat() noexcept;
+    // Reads back the per-character styling as ranges.
+    std::vector<ccl::doc::TextRun> ReadRuns(int length) noexcept;
 
     float WidthForPressure(float pressure) const noexcept;
     void BeginStroke(POINT client, float pressure) noexcept;
@@ -167,6 +190,22 @@ private:
     // properties rather than applying the current ones.
     bool editingExisting_ = false;
     ccl::doc::TextAnnotation editingOriginal_;
+
+    // Non-zero while a menu or the palette is up. Those take focus away from
+    // the editor, which would otherwise be read as clicking away and commit
+    // the text out from under the user.
+    int suppressCommitDepth_ = 0;
+
+    // Dragging existing text to reposition it. A press that does not move far
+    // enough is treated as a click and opens the text for editing instead.
+    // Text under the pointer, outlined so it is clear what a click would edit.
+    size_t hoveredTextIndex_ = static_cast<size_t>(-1);
+
+    size_t movingTextIndex_ = static_cast<size_t>(-1);
+    POINT textDragStart_{};
+    float textDragOriginX_ = 0.0f;
+    float textDragOriginY_ = 0.0f;
+    bool textDragMoved_ = false;
 
     LONGLONG releasedAt_ = 0;
     bool reportedFirstFrame_ = false;

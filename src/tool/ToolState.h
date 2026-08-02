@@ -41,6 +41,19 @@ public:
 
     Tool tool = Tool::View;
     bool antialias = true;
+
+    // Text styling. Held here rather than only on each annotation so that the
+    // same switches serve both new text and text being re-edited: opening an
+    // existing piece loads its styling in, and committing writes back whatever
+    // is set now.
+    bool textBold = false;
+    bool textItalic = false;
+    bool textUnderline = false;
+    bool textStrikethrough = false;
+    // Backing that keeps text readable over a screenshot. Seeded from the
+    // settings file and toggleable per piece of text.
+    bool textShadow = false;
+    bool textOutline = true;
     // Runtime state, seeded from the settings file but toggleable from the
     // menu; editing the file to try it out is too much friction.
     bool usePressure = true;

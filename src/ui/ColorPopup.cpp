@@ -177,7 +177,34 @@ LRESULT ColorPopup::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             const HDC dc = ::BeginPaint(hwnd_, &ps);
-            Paint(dc);
+
+            // Drawn into an off-screen bitmap and blitted in one go. Painting
+            // straight to the window made the swatches flicker, since dragging
+            // repaints the whole popup on every mouse move.
+            RECT client{};
+            ::GetClientRect(hwnd_, &client);
+
+            const HDC memory = ::CreateCompatibleDC(dc);
+            const HBITMAP buffer =
+                ::CreateCompatibleBitmap(dc, client.right, client.bottom);
+
+            if (memory != nullptr && buffer != nullptr) {
+                const HGDIOBJ previous = ::SelectObject(memory, buffer);
+                Paint(memory);
+                ::BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0,
+                         SRCCOPY);
+                ::SelectObject(memory, previous);
+            } else {
+                Paint(dc);
+            }
+
+            if (buffer != nullptr) {
+                ::DeleteObject(buffer);
+            }
+            if (memory != nullptr) {
+                ::DeleteDC(memory);
+            }
+
             ::EndPaint(hwnd_, &ps);
             return 0;
         }
@@ -219,8 +246,10 @@ LRESULT ColorPopup::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_KILLFOCUS:
             // Clicking away is how the choice is confirmed; the popup has no
-            // button to press.
-            if (!finished_) {
+            // button to press. Ignored until the popup has settled, since
+            // taking focus during opening also reports a loss and closed it
+            // before it was ever seen.
+            if (ready_ && !finished_) {
                 Close(true);
             }
             return 0;
@@ -447,6 +476,7 @@ std::optional<ccl::doc::Color> ColorPopup::Show(
     ::ShowWindow(hwnd_, SW_SHOW);
     ::SetForegroundWindow(hwnd_);
     ::SetFocus(hwnd_);
+    ready_ = true;
 
     MSG msg{};
     while (!finished_ && ::GetMessageW(&msg, nullptr, 0, 0) > 0) {

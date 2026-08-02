@@ -37,14 +37,22 @@ public:
 
     // `active` is the stroke currently being drawn, which is not yet part of
     // the document. `cursor` draws the brush size outline when set.
+    // `highlight` outlines an annotation, marking what a click would act on.
     void Draw(const ccl::view::ViewState& view,
               const ccl::doc::Stroke* active = nullptr,
-              const BrushCursor* cursor = nullptr) noexcept;
+              const BrushCursor* cursor = nullptr,
+              const D2D1_RECT_F* highlight = nullptr) noexcept;
 
     // Bounding box of a piece of text in image coordinates, used to work out
     // which one was clicked. Returns false if it could not be measured.
     bool MeasureText(const ccl::doc::TextAnnotation& text,
                      D2D1_RECT_F& bounds) noexcept;
+
+    // Height of one line and the distance from its top to the baseline, in
+    // image pixels. The editor is told to use these so that typed and drawn
+    // text sit on the same lines.
+    bool MeasureLine(const ccl::doc::TextAnnotation& text, float& lineHeight,
+                     float& baseline) noexcept;
 
     // Smooth interpolation looks better for photographs and text, nearest
     // neighbour is what you want when inspecting individual pixels.
