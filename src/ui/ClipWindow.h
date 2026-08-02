@@ -5,6 +5,7 @@
 #include <string>
 
 #include "app/Settings.h"
+#include "capture/DibBuffer.h"
 #include "doc/History.h"
 #include "render/Renderer.h"
 #include "tool/ToolState.h"
@@ -34,6 +35,11 @@ public:
                 const std::wstring& sourceTitle, LONGLONG releasedAt) noexcept;
 
     void Run() noexcept;
+
+    // Sizes the window to the image without letting it grow past the work
+    // area. A capture always fits by construction, but a picture opened from a
+    // file can be any size at all.
+    void ResizeToImage() noexcept;
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
@@ -67,6 +73,12 @@ private:
 
     void SaveAs() noexcept;
     void CopyImage() noexcept;
+    void OpenFile() noexcept;
+    void PasteImage() noexcept;
+    // Replaces the picture being shown, resetting everything tied to the old
+    // one: annotations, history, zoom and the window size.
+    void ReplaceImage(ccl::capture::DibBuffer image,
+                      const std::wstring& title) noexcept;
     // Saves automatically before the capture is discarded, unless the image has
     // already been saved or Shift is held to skip it.
     void AutoSaveBeforeClosing() noexcept;

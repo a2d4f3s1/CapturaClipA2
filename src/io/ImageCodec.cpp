@@ -20,6 +20,66 @@ GUID ContainerFor(ccl::app::ImageFormat format) noexcept {
 
 }  // namespace
 
+// Everything the imaging component decodes out of the box, so the list is not
+// limited to the formats this program writes.
+const wchar_t* const kOpenFilter =
+    L"画像ファイル\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.ico\0"
+    L"すべてのファイル\0*.*\0\0";
+
+ccl::capture::DibBuffer LoadImageFile(ccl::render::D2DContext& context,
+                                      const std::wstring& path) noexcept {
+    ccl::capture::DibBuffer result;
+    if (path.empty()) {
+        return result;
+    }
+
+    IWICImagingFactory* factory = context.Imaging();
+    if (factory == nullptr) {
+        return result;
+    }
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(factory->CreateDecoderFromFilename(
+            path.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand, &decoder))) {
+        return result;
+    }
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, &frame))) {
+        return result;
+    }
+
+    // Converted to the layout the rest of the program works in, which also
+    // flattens any transparency onto the background rather than leaving it to
+    // be interpreted later.
+    ComPtr<IWICFormatConverter> converter;
+    if (FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGR,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeMedianCut))) {
+        return result;
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(converter->GetSize(&width, &height)) || width == 0 ||
+        height == 0) {
+        return result;
+    }
+
+    if (!result.Create(static_cast<int>(width), static_cast<int>(height))) {
+        return result;
+    }
+
+    if (FAILED(converter->CopyPixels(
+            nullptr, result.Stride(), result.Stride() * height,
+            static_cast<BYTE*>(result.Pixels())))) {
+        result.Reset();
+    }
+    return result;
+}
+
 const wchar_t* ExtensionFor(ccl::app::ImageFormat format) noexcept {
     switch (format) {
         case ccl::app::ImageFormat::Jpeg: return L"jpg";

@@ -1,8 +1,79 @@
 #include "io/Clipboard.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace ccl::io {
+
+bool ClipboardHasImage() noexcept {
+    return ::IsClipboardFormatAvailable(CF_DIB) ||
+           ::IsClipboardFormatAvailable(CF_BITMAP);
+}
+
+ccl::capture::DibBuffer PasteFromClipboard(HWND owner) noexcept {
+    ccl::capture::DibBuffer result;
+    if (!ClipboardHasImage() || !::OpenClipboard(owner)) {
+        return result;
+    }
+
+    const HANDLE handle = ::GetClipboardData(CF_DIB);
+    const auto* header =
+        handle != nullptr
+            ? static_cast<const BITMAPINFOHEADER*>(::GlobalLock(handle))
+            : nullptr;
+
+    if (header != nullptr) {
+        const int width = header->biWidth;
+        // A negative height means the rows already run top-down.
+        const bool topDown = header->biHeight < 0;
+        const int height = std::abs(header->biHeight);
+
+        if (width > 0 && height > 0 && result.Create(width, height)) {
+            // Colour tables sit between the header and the pixels, so the
+            // offset cannot be assumed.
+            const auto* info = reinterpret_cast<const BITMAPINFO*>(header);
+            const auto* bits = reinterpret_cast<const BYTE*>(header) +
+                               header->biSize +
+                               header->biClrUsed * sizeof(RGBQUAD);
+
+            const HDC screen = ::GetDC(nullptr);
+            const HDC memory = ::CreateCompatibleDC(screen);
+            const HGDIOBJ previous = ::SelectObject(memory, result.Handle());
+
+            // Let GDI do the conversion; clipboard bitmaps arrive at any depth
+            // and compression the source application felt like using.
+            if (::StretchDIBits(memory, 0, 0, width, height, 0, 0, width, height,
+                                bits, info, DIB_RGB_COLORS, SRCCOPY) == 0) {
+                result.Reset();
+            }
+
+            ::SelectObject(memory, previous);
+            ::DeleteDC(memory);
+            ::ReleaseDC(nullptr, screen);
+
+            // StretchDIBits works bottom-up unless told otherwise, so a
+            // top-down source comes out inverted and has to be flipped back.
+            if (result.IsValid() && topDown) {
+                const size_t stride = result.Stride();
+                std::vector<unsigned char> row(stride);
+                auto* pixels = static_cast<unsigned char*>(result.Pixels());
+                for (int y = 0; y < height / 2; ++y) {
+                    auto* upper = pixels + static_cast<size_t>(y) * stride;
+                    auto* lower =
+                        pixels + static_cast<size_t>(height - 1 - y) * stride;
+                    std::memcpy(row.data(), upper, stride);
+                    std::memcpy(upper, lower, stride);
+                    std::memcpy(lower, row.data(), stride);
+                }
+            }
+        }
+        ::GlobalUnlock(handle);
+    }
+
+    ::CloseClipboard();
+    return result;
+}
 
 bool CopyToClipboard(HWND owner, const ccl::capture::DibBuffer& image) noexcept {
     if (!image.IsValid()) {

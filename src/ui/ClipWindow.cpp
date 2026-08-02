@@ -3,6 +3,7 @@
 #include <commdlg.h>
 #include <imm.h>
 #include <richedit.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -135,7 +136,9 @@ bool IsKeyDown(int key) noexcept {
 // follow each base value.
 enum MenuId : UINT {
     kMenuSave = 100,
+    kMenuOpen,
     kMenuCopy,
+    kMenuPaste,
     kMenuUndo,
     kMenuRedo,
     kMenuFit,
@@ -646,6 +649,23 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ::ClientToScreen(hwnd_, &screen);
             ShowContextMenu(screen);
+            return 0;
+        }
+
+        case WM_DROPFILES: {
+            const auto drop = reinterpret_cast<HDROP>(wParam);
+            wchar_t path[MAX_PATH]{};
+            if (::DragQueryFileW(drop, 0, path, ARRAYSIZE(path)) > 0 &&
+                context_ != nullptr) {
+                ccl::capture::DibBuffer image =
+                    ccl::io::LoadImageFile(*context_, path);
+                if (image.IsValid()) {
+                    const wchar_t* name = ::wcsrchr(path, L'\\');
+                    ReplaceImage(std::move(image),
+                                 name != nullptr ? name + 1 : path);
+                }
+            }
+            ::DragFinish(drop);
             return 0;
         }
 
@@ -1865,6 +1885,12 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             case 'C':
                 CopyImage();
                 return;
+            case 'O':
+                OpenFile();
+                return;
+            case 'V':
+                PasteImage();
+                return;
             case 'Z':
                 if (document_ != nullptr &&
                     history_.Undo(document_->Annotations())) {
@@ -2276,8 +2302,12 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     const UINT checked = MF_STRING | MF_CHECKED;
     const UINT plain = MF_STRING;
 
+    ::AppendMenuW(menu, plain, kMenuOpen, L"開く...\tCtrl+O");
     ::AppendMenuW(menu, plain, kMenuSave, L"保存...\tCtrl+S");
     ::AppendMenuW(menu, plain, kMenuCopy, L"クリップボードにコピー\tCtrl+C");
+    ::AppendMenuW(menu,
+                  ccl::io::ClipboardHasImage() ? plain : (plain | MF_GRAYED),
+                  kMenuPaste, L"貼り付け\tCtrl+V");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     ::AppendMenuW(menu, plain | (history_.CanUndo() ? 0u : MF_GRAYED), kMenuUndo,
@@ -2409,6 +2439,12 @@ void ClipWindow::OnCommand(int command) noexcept {
         case kMenuCopy:
             CopyImage();
             return;
+        case kMenuOpen:
+            OpenFile();
+            return;
+        case kMenuPaste:
+            PasteImage();
+            return;
         case kMenuUndo:
             if (document_ != nullptr && history_.Undo(document_->Annotations())) {
                 Draw();
@@ -2537,6 +2573,103 @@ void ClipWindow::SaveAs() noexcept {
     }
 }
 
+void ClipWindow::ResizeToImage() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+
+    const SIZE content = ContentSize();
+    const LONG frame = 2 * ccl::render::kWindowBorder;
+
+    RECT work{};
+    const HMONITOR monitor = ::MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (::GetMonitorInfoW(monitor, &info)) {
+        work = info.rcWork;
+    }
+    const LONG maxWidth =
+        work.right > work.left ? work.right - work.left : content.cx;
+    const LONG maxHeight =
+        work.bottom > work.top ? work.bottom - work.top : content.cy;
+
+    ::SetWindowPos(hwnd_, nullptr, 0, 0, std::min(content.cx, maxWidth) + frame,
+                   std::min(content.cy, maxHeight) + frame,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
+                              const std::wstring& title) noexcept {
+    if (!image.IsValid() || document_ == nullptr) {
+        return;
+    }
+
+    // The capture on screen is written out first if auto-saving is on, since
+    // replacing it discards it.
+    AutoSaveBeforeClosing();
+
+    *document_ = ccl::doc::Document(std::move(image));
+
+    // Everything tied to the old picture goes with it: its annotations are
+    // gone, so its history would restore edits onto a different image.
+    history_ = ccl::doc::History{};
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    hasSelection_ = false;
+    saved_ = false;
+    sourceTitle_ = title;
+
+    view_.SetZoom(1.0f);
+    view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
+
+    renderer_.SetDocument(document_);
+    ResizeToImage();
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::OpenFile() noexcept {
+    if (context_ == nullptr) {
+        return;
+    }
+
+    wchar_t path[MAX_PATH]{};
+
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter = ccl::io::kOpenFilter;
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = ARRAYSIZE(path);
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+
+    ++suppressCommitDepth_;
+    const BOOL chosen = ::GetOpenFileNameW(&dialog);
+    --suppressCommitDepth_;
+
+    if (!chosen) {
+        return;
+    }
+
+    ccl::capture::DibBuffer image = ccl::io::LoadImageFile(*context_, path);
+    if (!image.IsValid()) {
+        ::MessageBoxW(hwnd_, L"画像を読み込めませんでした。", L"CapturaClipA2",
+                      MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    // Named after the file, which is more useful than the window it came from.
+    const wchar_t* name = ::wcsrchr(path, L'\\');
+    ReplaceImage(std::move(image), name != nullptr ? name + 1 : path);
+}
+
+void ClipWindow::PasteImage() noexcept {
+    ccl::capture::DibBuffer image = ccl::io::PasteFromClipboard(hwnd_);
+    if (!image.IsValid()) {
+        return;
+    }
+    ReplaceImage(std::move(image), L"");
+}
+
 void ClipWindow::CopyImage() noexcept {
     if (document_ == nullptr) {
         return;
@@ -2663,6 +2796,8 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     // is briefly visible as an undrawn white rectangle between being shown and
     // being painted.
     ::SetLayeredWindowAttributes(hwnd_, 0, 0, LWA_ALPHA);
+    // Dropping a picture on the window opens it, the same as the open command.
+    ::DragAcceptFiles(hwnd_, TRUE);
     UpdateTitle();
     renderer_.Attach(context, hwnd_);
     renderer_.SetDocument(&document);

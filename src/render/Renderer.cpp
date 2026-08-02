@@ -28,6 +28,10 @@ void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
 void Renderer::SetDocument(const ccl::doc::Document* document) noexcept {
     document_ = document;
     image_.Reset();
+    // Effect bitmaps are keyed by annotation id, and a different document
+    // numbers its annotations from the start again -- keeping them would show
+    // the old picture's blur under the new one's rectangle.
+    effectCache_.clear();
 }
 
 void Renderer::Resize(UINT width, UINT height) noexcept {
