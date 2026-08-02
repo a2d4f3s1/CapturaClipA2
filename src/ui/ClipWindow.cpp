@@ -2525,6 +2525,12 @@ void ClipWindow::SaveAs() noexcept {
         return;
     }
 
+    // Text still in the editor is not part of the document yet, so it would be
+    // missing from the file. The same applies to copying and auto-saving.
+    if (EditingText()) {
+        CommitText();
+    }
+
     // Filter order has to match the format picked from nFilterIndex below.
     static constexpr wchar_t kFilter[] =
         L"PNG (*.png)\0*.png\0JPEG (*.jpg)\0*.jpg\0Bitmap (*.bmp)\0*.bmp\0\0";
@@ -2564,8 +2570,10 @@ void ClipWindow::SaveAs() noexcept {
         default: format = ccl::app::ImageFormat::Png; break;
     }
 
-    if (ccl::io::SaveImage(*context_, document_->Image(), path, format,
-                           settings_->jpegQuality)) {
+    const ccl::capture::DibBuffer flat = renderer_.Flatten();
+    if (ccl::io::SaveImage(*context_,
+                           flat.IsValid() ? flat : document_->Image(), path,
+                           format, settings_->jpegQuality)) {
         saved_ = true;
     } else {
         ::MessageBoxW(hwnd_, L"Failed to save the image.", L"CapturaClipA2",
@@ -2674,7 +2682,11 @@ void ClipWindow::CopyImage() noexcept {
     if (document_ == nullptr) {
         return;
     }
-    ccl::io::CopyToClipboard(hwnd_, document_->Image());
+    if (EditingText()) {
+        CommitText();
+    }
+    const ccl::capture::DibBuffer flat = renderer_.Flatten();
+    ccl::io::CopyToClipboard(hwnd_, flat.IsValid() ? flat : document_->Image());
 }
 
 void ClipWindow::AutoSaveBeforeClosing() noexcept {
@@ -2687,8 +2699,14 @@ void ClipWindow::AutoSaveBeforeClosing() noexcept {
         return;
     }
 
-    ccl::io::AutoSaveImage(*context_, document_->Image(), *settings_,
-                           sourceTitle_);
+    if (EditingText()) {
+        CommitText();
+    }
+
+    const ccl::capture::DibBuffer flat = renderer_.Flatten();
+    ccl::io::AutoSaveImage(*context_,
+                           flat.IsValid() ? flat : document_->Image(),
+                           *settings_, sourceTitle_);
 }
 
 void ClipWindow::Draw() noexcept {

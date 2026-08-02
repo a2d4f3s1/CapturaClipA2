@@ -5,6 +5,7 @@
 
 #include <unordered_map>
 
+#include "capture/DibBuffer.h"
 #include "doc/Annotation.h"
 #include "view/ViewState.h"
 
@@ -48,6 +49,13 @@ public:
               const BrushCursor* cursor = nullptr,
               const D2D1_RECT_F* highlight = nullptr) noexcept;
 
+    // Draws the picture and its annotations into a new buffer at full size,
+    // producing the image as it is actually seen. Everything that leaves the
+    // program -- saving, copying, printing -- goes through this, and so does
+    // any operation that reshapes the picture, since a rotated or cropped
+    // image and annotations placed against the old one cannot both be kept.
+    ccl::capture::DibBuffer Flatten() noexcept;
+
     // Bounding box of a piece of text in image coordinates, used to work out
     // which one was clicked. Returns false if it could not be measured.
     bool MeasureText(const ccl::doc::TextAnnotation& text,
@@ -82,7 +90,10 @@ private:
     HWND hwnd_ = nullptr;
     const ccl::doc::Document* document_ = nullptr;
 
-    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> target_;
+    // Drawing goes through target_, which is normally the window's target but
+    // is swapped for an off-screen one while flattening.
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> target_;
+    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> windowTarget_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> image_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle_;

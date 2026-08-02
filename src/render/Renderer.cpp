@@ -35,8 +35,8 @@ void Renderer::SetDocument(const ccl::doc::Document* document) noexcept {
 }
 
 void Renderer::Resize(UINT width, UINT height) noexcept {
-    if (target_ && width > 0 && height > 0) {
-        target_->Resize(D2D1::SizeU(width, height));
+    if (windowTarget_ && width > 0 && height > 0) {
+        windowTarget_->Resize(D2D1::SizeU(width, height));
     }
 }
 
@@ -49,6 +49,7 @@ void Renderer::DiscardDeviceResources() noexcept {
     brush_.Reset();
     image_.Reset();
     target_.Reset();
+    windowTarget_.Reset();
 }
 
 bool Renderer::EnsureTarget() noexcept {
@@ -64,12 +65,13 @@ bool Renderer::EnsureTarget() noexcept {
         return false;
     }
 
-    target_ = context_->CreateHwndTarget(
+    windowTarget_ = context_->CreateHwndTarget(
         hwnd_, static_cast<UINT>(client.right - client.left),
         static_cast<UINT>(client.bottom - client.top));
-    if (!target_) {
+    if (!windowTarget_) {
         return false;
     }
+    target_ = windowTarget_;
 
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White),
                                               &brush_))) {
@@ -663,6 +665,105 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         watch.Lap(L"  d2d present");
         measuredFirstDraw_ = true;
     }
+}
+
+ccl::capture::DibBuffer Renderer::Flatten() noexcept {
+    ccl::capture::DibBuffer result;
+    if (context_ == nullptr || document_ == nullptr || !document_->IsValid()) {
+        return result;
+    }
+
+    IWICImagingFactory* imaging = context_->Imaging();
+    if (imaging == nullptr || context_->Factory() == nullptr) {
+        return result;
+    }
+
+    const auto width = static_cast<UINT>(document_->Width());
+    const auto height = static_cast<UINT>(document_->Height());
+
+    Microsoft::WRL::ComPtr<IWICBitmap> surface;
+    if (FAILED(imaging->CreateBitmap(width, height,
+                                     GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, &surface))) {
+        return result;
+    }
+
+    // Software rendering, because the result has to be read back on the CPU and
+    // a window's target cannot be. Speed does not matter here: this runs when
+    // the user saves or transforms, not while drawing.
+    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> offscreen;
+    if (FAILED(context_->Factory()->CreateWicBitmapRenderTarget(
+            surface.Get(), properties, &offscreen))) {
+        return result;
+    }
+
+    // The drawing helpers all work through the members, so the off-screen
+    // target takes their place for the duration. Bitmaps and brushes belong to
+    // the target that made them and cannot be shared, so the window's are set
+    // aside rather than reused.
+    auto savedTarget = target_;
+    auto savedBrush = brush_;
+    auto savedImage = image_;
+    auto savedCache = std::move(effectCache_);
+    effectCache_.clear();
+
+    target_ = offscreen;
+    brush_.Reset();
+    image_.Reset();
+
+    bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
+                  D2D1::ColorF(D2D1::ColorF::White), &brush_)) &&
+              EnsureImageBitmap();
+
+    if (ok) {
+        target_->BeginDraw();
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        target_->DrawBitmap(
+            image_.Get(),
+            D2D1::RectF(0.0f, 0.0f, static_cast<float>(width),
+                        static_cast<float>(height)),
+            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+
+        for (const auto& annotation : document_->Annotations()) {
+            switch (annotation.kind) {
+                case ccl::doc::AnnotationKind::Stroke:
+                    DrawStroke(annotation.stroke);
+                    break;
+                case ccl::doc::AnnotationKind::Text:
+                    DrawText(annotation.text);
+                    break;
+                case ccl::doc::AnnotationKind::Effect:
+                    DrawEffect(annotation.effect);
+                    break;
+            }
+        }
+
+        ok = SUCCEEDED(target_->EndDraw());
+    }
+
+    target_ = savedTarget;
+    brush_ = savedBrush;
+    image_ = savedImage;
+    effectCache_ = std::move(savedCache);
+
+    if (!ok || !result.Create(static_cast<int>(width), static_cast<int>(height))) {
+        result.Reset();
+        return result;
+    }
+
+    // Both are 32-bit top-down BGRA, so the rows transfer straight across.
+    if (FAILED(surface->CopyPixels(nullptr, result.Stride(),
+                                   result.Stride() * height,
+                                   static_cast<BYTE*>(result.Pixels())))) {
+        result.Reset();
+    }
+    return result;
 }
 
 }  // namespace ccl::render
