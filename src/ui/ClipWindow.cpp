@@ -147,6 +147,9 @@ enum MenuId : UINT {
     kMenuStrikethrough,
     kMenuTextOutline,
     kMenuTextShadow,
+    kMenuMosaic,
+    kMenuBlur,
+    kMenuClearSelection,
     kMenuCommitText,
     kMenuEyedropper,
     kMenuColorPicker,
@@ -668,6 +671,128 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     return ::DefWindowProcW(hwnd_, msg, wParam, lParam);
 }
 
+bool ClipWindow::HasSelection() const noexcept {
+    if (!hasSelection_) {
+        return false;
+    }
+    const D2D1_RECT_F area = SelectionRect();
+    return area.right - area.left >= 1.0f && area.bottom - area.top >= 1.0f;
+}
+
+D2D1_RECT_F ClipWindow::SelectionRect() const noexcept {
+    return D2D1::RectF(std::min(selectionAnchor_.x, selectionCursor_.x),
+                       std::min(selectionAnchor_.y, selectionCursor_.y),
+                       std::max(selectionAnchor_.x, selectionCursor_.x),
+                       std::max(selectionAnchor_.y, selectionCursor_.y));
+}
+
+void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
+    if (!HasSelection() || document_ == nullptr) {
+        return;
+    }
+
+    history_.Record(document_->Annotations());
+
+    // Identifies the processed pixels for caching. A counter is enough: it only
+    // has to be unique within the run.
+    static unsigned int nextEffectId = 1;
+
+    const D2D1_RECT_F area = SelectionRect();
+
+    ccl::doc::Annotation annotation;
+    annotation.kind = ccl::doc::AnnotationKind::Effect;
+    annotation.effect.kind = kind;
+    annotation.effect.left = area.left;
+    annotation.effect.top = area.top;
+    annotation.effect.right = area.right;
+    annotation.effect.bottom = area.bottom;
+    annotation.effect.id = nextEffectId++;
+
+    // Reuses the strength last chosen for this effect. The first time round
+    // there is none, so it is scaled to the area instead -- a small region
+    // must not collapse into a single block.
+    const bool mosaic = kind == ccl::doc::EffectKind::Mosaic;
+    const float remembered = mosaic ? tool_.mosaicStrength : tool_.blurStrength;
+
+    if (remembered >= 0.0f) {
+        annotation.effect.strength = remembered;
+    } else {
+        const float span =
+            std::min(area.right - area.left, area.bottom - area.top);
+        annotation.effect.strength = mosaic
+                                         ? std::clamp(span / 12.0f, 3.0f, 48.0f)
+                                         : std::clamp(span / 16.0f, 2.0f, 24.0f);
+    }
+
+    if (mosaic) {
+        tool_.mosaicStrength = annotation.effect.strength;
+    } else {
+        tool_.blurStrength = annotation.effect.strength;
+    }
+
+    document_->Annotations().push_back(std::move(annotation));
+
+    // Stays adjustable so the strength can be dialled in against the result
+    // rather than guessed at beforehand.
+    adjustingEffectIndex_ = document_->Annotations().size() - 1;
+
+    hasSelection_ = false;
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::StepEffectStrength(int steps) noexcept {
+    if (document_ == nullptr ||
+        adjustingEffectIndex_ >= document_->Annotations().size()) {
+        return;
+    }
+
+    auto& annotation = document_->Annotations()[adjustingEffectIndex_];
+    if (annotation.kind != ccl::doc::AnnotationKind::Effect) {
+        adjustingEffectIndex_ = static_cast<size_t>(-1);
+        return;
+    }
+
+    auto& effect = annotation.effect;
+    const bool mosaic = effect.kind == ccl::doc::EffectKind::Mosaic;
+    const float maximum = mosaic ? 64.0f : 32.0f;
+
+    // Zero is a valid strength meaning "leave the area alone", so an effect
+    // placed by mistake can be turned off with [ instead of undone -- undo
+    // would also take the selection with it.
+    constexpr float kWeakest = 2.0f;
+
+    float strength = effect.strength;
+    for (int i = 0; i < steps; ++i) {
+        strength = strength <= 0.0f ? kWeakest
+                                    : std::min(maximum, strength * 1.3f + 0.5f);
+    }
+    for (int i = 0; i > steps; --i) {
+        strength = (strength - 0.5f) / 1.3f;
+        if (strength < kWeakest) {
+            strength = 0.0f;
+            break;
+        }
+    }
+
+    if (strength == effect.strength) {
+        return;
+    }
+    effect.strength = strength;
+
+    // The cached pixels were produced at the old strength.
+    renderer_.InvalidateEffect(effect.id);
+
+    if (mosaic) {
+        tool_.mosaicStrength = strength;
+    } else {
+        tool_.blurStrength = strength;
+    }
+
+    UpdateTitle();
+    Draw();
+}
+
 bool ClipWindow::ScrollingWithLeftButton() const noexcept {
     return spaceHeld_ || tool_.tool == ccl::tool::Tool::View;
 }
@@ -699,6 +824,11 @@ void ClipWindow::UpdateCursor() noexcept {
     }
 
     if (tool_.tool == ccl::tool::Tool::Eyedropper) {
+        ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+        return;
+    }
+
+    if (tool_.tool == ccl::tool::Tool::Select) {
         ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
         return;
     }
@@ -1517,6 +1647,17 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             sampling_ = true;
             return;
 
+        case ccl::tool::Tool::Select:
+            // Placing a new selection ends adjustment of the previous effect.
+            adjustingEffectIndex_ = static_cast<size_t>(-1);
+            selecting_ = true;
+            hasSelection_ = true;
+            selectionAnchor_ = ToImage(client);
+            selectionCursor_ = selectionAnchor_;
+            ::SetCapture(hwnd_);
+            Draw();
+            return;
+
         case ccl::tool::Tool::Text: {
             // Pressing on existing text starts a drag. Whether that turns out
             // to be a move or a click to edit is decided on release.
@@ -1560,6 +1701,12 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         view_.SetScroll(POINT{scrollStart_.x - (now.x - scrollOrigin_.x),
                               scrollStart_.y - (now.y - scrollOrigin_.y)},
                         ContentSize(), ViewportSize());
+        Draw();
+        return;
+    }
+
+    if (selecting_) {
+        selectionCursor_ = ToImage(client);
         Draw();
         return;
     }
@@ -1626,6 +1773,21 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftUp() noexcept {
+    if (selecting_) {
+        selecting_ = false;
+        ::ReleaseCapture();
+
+        // A click without a drag clears the selection rather than leaving a
+        // zero-sized one behind.
+        const D2D1_RECT_F area = SelectionRect();
+        if (area.right - area.left < 1.0f || area.bottom - area.top < 1.0f) {
+            hasSelection_ = false;
+        }
+        UpdateTitle();
+        Draw();
+        return;
+    }
+
     if (movingTextIndex_ != static_cast<size_t>(-1)) {
         const size_t index = movingTextIndex_;
         const bool moved = textDragMoved_;
@@ -1706,12 +1868,14 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             case 'Z':
                 if (document_ != nullptr &&
                     history_.Undo(document_->Annotations())) {
+                    adjustingEffectIndex_ = static_cast<size_t>(-1);
                     Draw();
                 }
                 return;
             case 'Y':
                 if (document_ != nullptr &&
                     history_.Redo(document_->Annotations())) {
+                    adjustingEffectIndex_ = static_cast<size_t>(-1);
                     Draw();
                 }
                 return;
@@ -1739,6 +1903,9 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case 'T':
             SelectTool(ccl::tool::Tool::Text);
             return;
+        case 'W':
+            SelectTool(ccl::tool::Tool::Select);
+            return;
 
         case 'I':
             ChooseColorFromPicker();
@@ -1747,6 +1914,13 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case VK_OEM_4:  // [
         case VK_OEM_6: {  // ]
             const int steps = key == VK_OEM_6 ? 1 : -1;
+
+            // An effect that was just placed takes the size keys, so its
+            // strength can be tuned while looking at it.
+            if (adjustingEffectIndex_ != static_cast<size_t>(-1)) {
+                StepEffectStrength(steps);
+                return;
+            }
 
             // While a straight line is being previewed, the size keys retarget
             // one of its ends -- the far end normally, the starting end with
@@ -1878,6 +2052,34 @@ void ClipWindow::UpdateTitle() noexcept {
             ::swprintf_s(title, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
                          settings_ != nullptr ? settings_->textFontSize : 0.0f);
             break;
+        case ccl::tool::Tool::Select:
+            // While an effect is adjustable its strength is what the size keys
+            // act on, so that is what gets reported.
+            if (document_ != nullptr &&
+                adjustingEffectIndex_ < document_->Annotations().size()) {
+                const auto& annotation =
+                    document_->Annotations()[adjustingEffectIndex_];
+                const wchar_t* effectName =
+                    annotation.effect.kind == ccl::doc::EffectKind::Mosaic
+                        ? L"モザイク"
+                        : L"ぼかし";
+                if (annotation.effect.strength <= 0.0f) {
+                    ::swprintf_s(title, L"%s  %d%%  %s なし  ([ ] で調整)",
+                                 name.c_str(), zoom, effectName);
+                } else {
+                    ::swprintf_s(title, L"%s  %d%%  %s %.0f  ([ ] で調整)",
+                                 name.c_str(), zoom, effectName,
+                                 annotation.effect.strength);
+                }
+            } else if (HasSelection()) {
+                const D2D1_RECT_F area = SelectionRect();
+                ::swprintf_s(title, L"%s  %d%%  Select %.0f x %.0f",
+                             name.c_str(), zoom, area.right - area.left,
+                             area.bottom - area.top);
+            } else {
+                ::swprintf_s(title, L"%s  %d%%  Select", name.c_str(), zoom);
+            }
+            break;
         default:
             ::swprintf_s(title, L"%s  %d%%", name.c_str(), zoom);
             break;
@@ -1960,6 +2162,8 @@ bool ClipWindow::PickColorAt(POINT client) noexcept {
 }
 
 void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+
     if (tool != ccl::tool::Tool::Text) {
         // Leaving text entry keeps what was typed and returns the keyboard to
         // direct input, so the shortcuts work again.
@@ -2091,6 +2295,7 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     toolEntry(ccl::tool::Tool::Pen, L"ペン\tB");
     toolEntry(ccl::tool::Tool::Eraser, L"消しゴム\tE");
     toolEntry(ccl::tool::Tool::Text, L"テキスト\tT");
+    toolEntry(ccl::tool::Tool::Select, L"範囲選択\tW");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"ツール");
 
     ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...\tI");
@@ -2127,6 +2332,17 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                   kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
                   L"文字");
+
+    // Only offered when there is something selected to obscure.
+    const HMENU selection = ::CreatePopupMenu();
+    const UINT selectionState = HasSelection() ? plain : (plain | MF_GRAYED);
+    ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
+    ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
+    ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(selection, selectionState, kMenuClearSelection,
+                  L"選択を解除");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(selection),
+                  L"選択範囲");
 
     const HMENU zoom = ::CreatePopupMenu();
     for (int percent = 100; percent <= 500; percent += 100) {
@@ -2243,6 +2459,17 @@ void ClipWindow::OnCommand(int command) noexcept {
         case kMenuCommitText:
             CommitText();
             return;
+        case kMenuMosaic:
+            ApplyEffectToSelection(ccl::doc::EffectKind::Mosaic);
+            return;
+        case kMenuBlur:
+            ApplyEffectToSelection(ccl::doc::EffectKind::Blur);
+            return;
+        case kMenuClearSelection:
+            hasSelection_ = false;
+            UpdateTitle();
+            Draw();
+            return;
         case kMenuEyedropper:
             SelectTool(ccl::tool::Tool::Eyedropper);
             return;
@@ -2344,7 +2571,16 @@ void ClipWindow::Draw() noexcept {
 
     D2D1_RECT_F highlight{};
     bool hasHighlight = false;
-    if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr &&
+
+    // The selection uses the same outline as the "what would this click act
+    // on" marker, which is the same thing it means here.
+    if (tool_.tool == ccl::tool::Tool::Select && HasSelection()) {
+        highlight = SelectionRect();
+        hasHighlight = true;
+    }
+
+    if (!hasHighlight && tool_.tool == ccl::tool::Tool::Text &&
+        editor_ == nullptr &&
         document_ != nullptr &&
         hoveredTextIndex_ < document_->Annotations().size()) {
         const auto& annotation = document_->Annotations()[hoveredTextIndex_];

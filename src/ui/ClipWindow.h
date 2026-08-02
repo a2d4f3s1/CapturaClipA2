@@ -127,6 +127,14 @@ private:
     SIZE ViewportSize() const noexcept;
     void ClampScroll() noexcept;
 
+    // Obscures the selected area. Kept as an annotation so it can be undone.
+    void ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept;
+    // Adjusts the effect just placed, so its strength can be judged against the
+    // result rather than guessed at in advance.
+    void StepEffectStrength(int steps) noexcept;
+    bool HasSelection() const noexcept;
+    D2D1_RECT_F SelectionRect() const noexcept;
+
     // True when the left button should scroll rather than use the active tool.
     bool ScrollingWithLeftButton() const noexcept;
     // True when the brush size outline should follow the cursor.
@@ -171,6 +179,16 @@ private:
     // Eyedropper drag: the pointer is captured so the sample can come from
     // anywhere on screen, including other applications.
     bool sampling_ = false;
+
+    // Effect whose strength the size keys currently adjust: the one just
+    // placed, until something else is done.
+    size_t adjustingEffectIndex_ = static_cast<size_t>(-1);
+
+    // Rectangular selection, in image coordinates.
+    bool selecting_ = false;
+    bool hasSelection_ = false;
+    D2D1_POINT_2F selectionAnchor_{};
+    D2D1_POINT_2F selectionCursor_{};
 
     bool spaceHeld_ = false;
     // Tool to return to once the eyedropper has taken a sample.

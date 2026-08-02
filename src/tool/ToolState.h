@@ -14,6 +14,7 @@ enum class Tool {
     Eraser,
     Eyedropper,
     Text,
+    Select,
 };
 
 // Quick colours, reachable with Shift+1..8.
@@ -54,6 +55,13 @@ public:
     // settings file and toggleable per piece of text.
     bool textShadow = false;
     bool textOutline = true;
+
+    // Strength last used for each obscuring effect, so the next one starts
+    // where the last was left. Negative means "not chosen yet", in which case
+    // the strength is derived from the size of the area. Zero is a real value:
+    // it leaves the area untouched.
+    float mosaicStrength = -1.0f;
+    float blurStrength = -1.0f;
     // Runtime state, seeded from the settings file but toggleable from the
     // menu; editing the file to try it out is too much friction.
     bool usePressure = true;

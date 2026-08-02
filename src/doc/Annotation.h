@@ -98,6 +98,30 @@ struct TextAnnotation {
     Color outlineColor{0.0f, 0.0f, 0.0f, 1.0f};
 };
 
+enum class EffectKind {
+    Mosaic,
+    Blur,
+};
+
+// An area of the image obscured to hide what it shows.
+//
+// Kept as an annotation rather than painted into the image so that it can be
+// undone and moved like anything else, and so the original pixels survive
+// until the capture is saved.
+struct EffectAnnotation {
+    EffectKind kind = EffectKind::Mosaic;
+    // Image coordinates at 100% zoom.
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    // Mosaic block size, or blur radius, in image pixels.
+    float strength = 12.0f;
+    // Identifies the processed pixels in the renderer's cache. Reprocessing
+    // the area on every frame would be wasteful; the result never changes.
+    unsigned int id = 0;
+};
+
 // Annotations are kept as objects instead of being burned into the image.
 //
 // This is the structural difference the whole tool hinges on: erasing a
@@ -109,12 +133,14 @@ struct TextAnnotation {
 enum class AnnotationKind {
     Stroke,
     Text,
+    Effect,
 };
 
 struct Annotation {
     AnnotationKind kind = AnnotationKind::Stroke;
     Stroke stroke;
     TextAnnotation text;
+    EffectAnnotation effect;
 };
 
 using AnnotationList = std::vector<Annotation>;

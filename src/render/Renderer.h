@@ -3,6 +3,8 @@
 #include <d2d1_1.h>
 #include <wrl/client.h>
 
+#include <unordered_map>
+
 #include "doc/Annotation.h"
 #include "view/ViewState.h"
 
@@ -34,6 +36,9 @@ public:
     void SetDocument(const ccl::doc::Document* document) noexcept;
 
     void Resize(UINT width, UINT height) noexcept;
+
+    // Drops the cached pixels for an effect whose strength has changed.
+    void InvalidateEffect(unsigned int id) noexcept;
 
     // `active` is the stroke currently being drawn, which is not yet part of
     // the document. `cursor` draws the brush size outline when set.
@@ -68,6 +73,10 @@ private:
     void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
     void DrawText(const ccl::doc::TextAnnotation& text) noexcept;
+    void DrawEffect(const ccl::doc::EffectAnnotation& effect) noexcept;
+    // Processes the covered pixels once and keeps the result; the obscured
+    // area never changes after it is placed.
+    ID2D1Bitmap* EffectBitmap(const ccl::doc::EffectAnnotation& effect) noexcept;
 
     D2DContext* context_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -77,6 +86,8 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Bitmap> image_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle_;
+    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Bitmap>>
+        effectCache_;
 
     bool smoothScaling_ = true;
     bool measuredFirstDraw_ = false;

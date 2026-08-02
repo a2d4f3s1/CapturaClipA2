@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 #include "doc/Document.h"
 #include "render/D2DContext.h"
@@ -34,7 +36,12 @@ void Renderer::Resize(UINT width, UINT height) noexcept {
     }
 }
 
+void Renderer::InvalidateEffect(unsigned int id) noexcept {
+    effectCache_.erase(id);
+}
+
 void Renderer::DiscardDeviceResources() noexcept {
+    effectCache_.clear();
     brush_.Reset();
     image_.Reset();
     target_.Reset();
@@ -278,6 +285,180 @@ bool Renderer::MeasureText(const ccl::doc::TextAnnotation& text,
     return true;
 }
 
+namespace {
+
+// Averages each block down to one colour. Cheap, and the result is obviously
+// deliberate rather than looking like a rendering fault.
+void ApplyMosaic(std::vector<unsigned char>& pixels, int width, int height,
+                 int block) noexcept {
+    block = std::max(2, block);
+
+    for (int blockTop = 0; blockTop < height; blockTop += block) {
+        for (int blockLeft = 0; blockLeft < width; blockLeft += block) {
+            const int right = std::min(blockLeft + block, width);
+            const int bottom = std::min(blockTop + block, height);
+
+            unsigned int totals[3] = {0, 0, 0};
+            unsigned int count = 0;
+            for (int y = blockTop; y < bottom; ++y) {
+                for (int x = blockLeft; x < right; ++x) {
+                    const size_t at = (static_cast<size_t>(y) * width + x) * 4u;
+                    totals[0] += pixels[at + 0];
+                    totals[1] += pixels[at + 1];
+                    totals[2] += pixels[at + 2];
+                    ++count;
+                }
+            }
+            if (count == 0) {
+                continue;
+            }
+
+            const unsigned char average[3] = {
+                static_cast<unsigned char>(totals[0] / count),
+                static_cast<unsigned char>(totals[1] / count),
+                static_cast<unsigned char>(totals[2] / count)};
+
+            for (int y = blockTop; y < bottom; ++y) {
+                for (int x = blockLeft; x < right; ++x) {
+                    const size_t at = (static_cast<size_t>(y) * width + x) * 4u;
+                    pixels[at + 0] = average[0];
+                    pixels[at + 1] = average[1];
+                    pixels[at + 2] = average[2];
+                }
+            }
+        }
+    }
+}
+
+// Three box passes, which approximates a Gaussian closely enough and stays
+// linear in the radius rather than quadratic.
+void ApplyBlur(std::vector<unsigned char>& pixels, int width, int height,
+               int radius) noexcept {
+    radius = std::clamp(radius, 1, 64);
+    std::vector<unsigned char> scratch(pixels.size());
+
+    for (int pass = 0; pass < 3; ++pass) {
+        // Horizontal.
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                unsigned int totals[3] = {0, 0, 0};
+                int count = 0;
+                for (int offset = -radius; offset <= radius; ++offset) {
+                    const int sample = std::clamp(x + offset, 0, width - 1);
+                    const size_t at =
+                        (static_cast<size_t>(y) * width + sample) * 4u;
+                    totals[0] += pixels[at + 0];
+                    totals[1] += pixels[at + 1];
+                    totals[2] += pixels[at + 2];
+                    ++count;
+                }
+                const size_t at = (static_cast<size_t>(y) * width + x) * 4u;
+                scratch[at + 0] = static_cast<unsigned char>(totals[0] / count);
+                scratch[at + 1] = static_cast<unsigned char>(totals[1] / count);
+                scratch[at + 2] = static_cast<unsigned char>(totals[2] / count);
+                scratch[at + 3] = 255;
+            }
+        }
+
+        // Vertical.
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                unsigned int totals[3] = {0, 0, 0};
+                int count = 0;
+                for (int offset = -radius; offset <= radius; ++offset) {
+                    const int sample = std::clamp(y + offset, 0, height - 1);
+                    const size_t at =
+                        (static_cast<size_t>(sample) * width + x) * 4u;
+                    totals[0] += scratch[at + 0];
+                    totals[1] += scratch[at + 1];
+                    totals[2] += scratch[at + 2];
+                    ++count;
+                }
+                const size_t at = (static_cast<size_t>(y) * width + x) * 4u;
+                pixels[at + 0] = static_cast<unsigned char>(totals[0] / count);
+                pixels[at + 1] = static_cast<unsigned char>(totals[1] / count);
+                pixels[at + 2] = static_cast<unsigned char>(totals[2] / count);
+                pixels[at + 3] = 255;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+ID2D1Bitmap* Renderer::EffectBitmap(
+    const ccl::doc::EffectAnnotation& effect) noexcept {
+    const auto cached = effectCache_.find(effect.id);
+    if (cached != effectCache_.end()) {
+        return cached->second.Get();
+    }
+
+    if (!target_ || document_ == nullptr || !document_->IsValid()) {
+        return nullptr;
+    }
+
+    const auto& source = document_->Image();
+    const int left = std::clamp(static_cast<int>(effect.left), 0, source.Width());
+    const int top = std::clamp(static_cast<int>(effect.top), 0, source.Height());
+    const int right =
+        std::clamp(static_cast<int>(effect.right), left, source.Width());
+    const int bottom =
+        std::clamp(static_cast<int>(effect.bottom), top, source.Height());
+
+    const int width = right - left;
+    const int height = bottom - top;
+    if (width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4u);
+    const auto* origin = static_cast<const unsigned char*>(source.Pixels());
+    for (int y = 0; y < height; ++y) {
+        std::memcpy(pixels.data() + static_cast<size_t>(y) * width * 4u,
+                    origin + static_cast<size_t>(top + y) * source.Stride() +
+                        static_cast<size_t>(left) * 4u,
+                    static_cast<size_t>(width) * 4u);
+    }
+
+    if (effect.kind == ccl::doc::EffectKind::Mosaic) {
+        ApplyMosaic(pixels, width, height, static_cast<int>(effect.strength));
+    } else {
+        ApplyBlur(pixels, width, height, static_cast<int>(effect.strength));
+    }
+
+    const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        96.0f, 96.0f);
+
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+    if (FAILED(target_->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT>(width), static_cast<UINT>(height)),
+            pixels.data(), static_cast<UINT>(width) * 4u, properties,
+            &bitmap))) {
+        return nullptr;
+    }
+
+    return (effectCache_[effect.id] = bitmap).Get();
+}
+
+void Renderer::DrawEffect(const ccl::doc::EffectAnnotation& effect) noexcept {
+    // Zero strength means the area is left as it is; the annotation stays so
+    // the effect can be turned back up.
+    if (effect.strength <= 0.0f) {
+        return;
+    }
+
+    ID2D1Bitmap* bitmap = EffectBitmap(effect);
+    if (bitmap == nullptr) {
+        return;
+    }
+
+    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    target_->DrawBitmap(
+        bitmap, D2D1::RectF(effect.left, effect.top, effect.right, effect.bottom),
+        1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+}
+
 bool Renderer::MeasureLine(const ccl::doc::TextAnnotation& text,
                            float& lineHeight, float& baseline) noexcept {
     if (context_ == nullptr) {
@@ -417,6 +598,9 @@ void Renderer::Draw(const ccl::view::ViewState& view,
                     break;
                 case ccl::doc::AnnotationKind::Text:
                     DrawText(annotation.text);
+                    break;
+                case ccl::doc::AnnotationKind::Effect:
+                    DrawEffect(annotation.effect);
                     break;
             }
         }
