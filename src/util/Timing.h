@@ -15,7 +15,10 @@ namespace ccl::timing {
 // Lines are buffered in memory and written once at exit. Writing each line
 // straight to disk costs milliseconds and lands inside the very intervals being
 // measured, which made the log distort its own numbers.
-inline bool g_enabled = true;
+//
+// Off unless asked for: this is a development aid, and leaving it on drops a
+// log file beside the executable on every run of a copy someone was given.
+inline bool g_enabled = false;
 inline std::wstring g_buffer;
 
 inline LONGLONG Now() noexcept {

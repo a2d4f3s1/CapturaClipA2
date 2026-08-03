@@ -151,8 +151,8 @@ int RunWithFile(const std::wstring& path, ccl::app::Settings& settings,
 int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
                       _In_ int) {
     const LONGLONG launchStart = ccl::timing::Now();
-    if (HasFlag(::GetCommandLineW(), L"--no-timing")) {
-        ccl::timing::g_enabled = false;
+    if (HasFlag(::GetCommandLineW(), L"--timing")) {
+        ccl::timing::g_enabled = true;
     }
     const ccl::timing::ScopedFlush flushLogOnExit;
     ccl::timing::Stopwatch watch;
