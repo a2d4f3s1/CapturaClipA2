@@ -6,6 +6,7 @@
 
 # Explicitly track these
 !/.gitignore
+!/CLAUDE.md
 !/README.md
 !/CHANGELOG.md
 !/LICENSE
