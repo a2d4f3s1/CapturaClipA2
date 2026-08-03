@@ -19,6 +19,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(APP_SOURCES
     src/main.cpp
     src/app/Settings.cpp
+    src/app/Shortcuts.cpp
     src/capture/DibBuffer.cpp
     src/capture/ScreenSnapshot.cpp
     src/capture/WindowPicker.cpp
@@ -33,12 +34,15 @@ set(APP_SOURCES
     src/render/Renderer.cpp
     src/ui/ClipWindow.cpp
     src/ui/ColorPopup.cpp
+    src/ui/ColorPreview.cpp
+    src/ui/SettingsDialog.cpp
     src/util/Dpi.cpp
     src/util/NameFormat.cpp
 )
 
 set(APP_HEADERS
     src/app/Settings.h
+    src/app/Shortcuts.h
     src/capture/DibBuffer.h
     src/capture/ScreenSnapshot.h
     src/capture/WindowPicker.h
@@ -54,6 +58,9 @@ set(APP_HEADERS
     src/render/Renderer.h
     src/ui/ClipWindow.h
     src/ui/ColorPopup.h
+    src/ui/ColorPreview.h
+    src/res/Resources.h
+    src/ui/SettingsDialog.h
     src/tool/ToolState.h
     src/util/Dpi.h
     src/util/NameFormat.h
@@ -65,6 +72,7 @@ add_executable(CapturaClipA2 WIN32
     ${APP_SOURCES}
     ${APP_HEADERS}
     src/app.manifest
+    src/app.rc
 )
 
 target_include_directories(CapturaClipA2 PRIVATE src)
@@ -94,6 +102,7 @@ target_link_libraries(CapturaClipA2 PRIVATE
     oleaut32
     shell32
     comdlg32
+    comctl32
     user32
     gdi32
     msimg32

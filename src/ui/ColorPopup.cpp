@@ -163,7 +163,7 @@ void ColorPopup::HandlePress(POINT point) noexcept {
         return true;
     };
 
-    if (swatchAt(templateRect_, ccl::tool::kQuickColors)) {
+    if (swatchAt(templateRect_, templates_)) {
         return;
     }
     swatchAt(recentRect_, RecentRow());
@@ -372,7 +372,7 @@ void ColorPopup::Paint(HDC dc) noexcept {
             FrameWith(dc, cell, ::GetSysColor(COLOR_WINDOWFRAME));
         }
     };
-    drawSwatches(templateRect_, ccl::tool::kQuickColors);
+    drawSwatches(templateRect_, templates_);
     drawSwatches(recentRect_, RecentRow());
 }
 
@@ -400,8 +400,10 @@ std::vector<ccl::doc::Color> ColorPopup::RecentRow() const {
 
 std::optional<ccl::doc::Color> ColorPopup::Show(
     HWND owner, POINT screen, const ccl::doc::Color& current,
+    const ccl::tool::QuickColors& templates,
     const std::vector<ccl::doc::Color>& recent, int scalePercent,
     ColorChanged onChange) noexcept {
+    templates_ = templates;
     recent_ = recent;
     onChange_ = std::move(onChange);
 

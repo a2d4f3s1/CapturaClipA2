@@ -2,7 +2,11 @@
 
 #include <windows.h>
 
+#include <array>
 #include <string>
+
+#include "app/Shortcuts.h"
+#include "doc/Annotation.h"
 
 namespace ccl::app {
 
@@ -11,6 +15,16 @@ enum class ImageFormat {
     Jpeg,
     Bmp,
 };
+
+// How much of a window frame the capture gets. Applied when the window is
+// created, so a change takes effect on the next capture rather than this one.
+enum class WindowFrame {
+    Normal,        // ordinary caption and resizing frame
+    ThinTitleBar,  // narrow caption with only a close button, no taskbar button
+    NoTitleBar,    // outline only, which is what suits a capture pinned on top
+    NoFrame,       // nothing at all, so the capture floats without an edge
+};
+
 
 // User settings, stored in an ini file next to the executable so the whole
 // thing stays portable.
@@ -36,6 +50,17 @@ public:
     // Width at zero pressure, as a fraction of the nominal brush width. Keeps a
     // light touch from thinning to nothing.
     float pressureMinScale = 0.15f;
+    float penWidth = 4.0f;
+    ccl::doc::Color penColor = ccl::doc::kDefaultQuickColors[1];  // green
+    // The eraser keeps its own size: it is usually wanted much wider than the
+    // line it is rubbing out.
+    float eraserWidth = 24.0f;
+
+    // Colours
+    ccl::doc::QuickColors quickColors = ccl::doc::kDefaultQuickColors;
+
+    // Keys
+    Shortcuts shortcuts;
 
     // Appearance
     std::wstring titleFormat = L"%t";
@@ -43,6 +68,7 @@ public:
     float zoomStepPercent = 10.0f;
     // Size of the colour palette popup, as a percentage of its normal size.
     int paletteScalePercent = 100;
+    WindowFrame windowFrame = WindowFrame::NoTitleBar;
 
     // Saving
     ImageFormat defaultFormat = ImageFormat::Png;
@@ -59,6 +85,14 @@ public:
     // Loads from disk, writing a commented default file if none exists.
     void Load() noexcept;
     void Save() const noexcept;
+
+    // Pulls every value back into its valid range. Applied after loading, since
+    // the file can be edited by hand, and after the settings window, since a
+    // typed number can be anything at all.
+    void Clamp() noexcept;
+
+    // Back to the shipped defaults, keeping the file this was loaded from.
+    void ResetToDefaults() noexcept;
 
     const std::wstring& FilePath() const noexcept { return path_; }
 

@@ -153,6 +153,32 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
         return;
     }
 
+    if (!stroke.highlighter) {
+        DrawStrokeShape(stroke);
+        return;
+    }
+
+    // Drawn opaque into a layer and composited once, so the wash comes out even
+    // wherever the stroke crosses itself. Drawing the segments translucent
+    // instead would darken every overlap, which is exactly what a highlighter
+    // does not do.
+    Microsoft::WRL::ComPtr<ID2D1Layer> layer;
+    if (FAILED(target_->CreateLayer(nullptr, &layer))) {
+        DrawStrokeShape(stroke);
+        return;
+    }
+
+    target_->PushLayer(
+        D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr,
+                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                              D2D1::IdentityMatrix(),
+                              ccl::doc::kHighlighterOpacity),
+        layer.Get());
+    DrawStrokeShape(stroke);
+    target_->PopLayer();
+}
+
+void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke) noexcept {
     brush_->SetColor(ToD2D(stroke.color));
     target_->SetAntialiasMode(stroke.antialias
                                   ? D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
@@ -579,7 +605,7 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     // image coordinates and stay locked to the picture at any zoom level.
     const float zoom = view.Zoom();
     const POINT scroll = view.Scroll();
-    const auto inset = static_cast<float>(kWindowBorder);
+    const auto inset = static_cast<float>(border_);
 
     target_->SetTransform(
         D2D1::Matrix3x2F::Scale(zoom, zoom) *

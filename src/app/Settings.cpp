@@ -35,6 +35,60 @@ bool ReadBool(const wchar_t* section, const wchar_t* key, bool fallback,
                                    path.c_str()) != 0;
 }
 
+// Colours are stored as #RRGGBB, which is the form anyone editing the file by
+// hand will already know.
+std::wstring ColorText(const ccl::doc::Color& color) noexcept {
+    const auto channel = [](float value) -> int {
+        const float scaled = (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value);
+        return static_cast<int>(scaled * 255.0f + 0.5f);
+    };
+    wchar_t text[16];
+    ::swprintf_s(text, L"#%02X%02X%02X", channel(color.r), channel(color.g),
+                 channel(color.b));
+    return text;
+}
+
+ccl::doc::Color ParseColor(const std::wstring& text,
+                           const ccl::doc::Color& fallback) noexcept {
+    const wchar_t* digits = text.c_str();
+    if (*digits == L'#') {
+        ++digits;
+    }
+
+    wchar_t* end = nullptr;
+    const unsigned long packed = ::wcstoul(digits, &end, 16);
+    if (end == digits || (end - digits) != 6) {
+        return fallback;
+    }
+
+    return ccl::doc::Color{
+        static_cast<float>((packed >> 16) & 0xFF) / 255.0f,
+        static_cast<float>((packed >> 8) & 0xFF) / 255.0f,
+        static_cast<float>(packed & 0xFF) / 255.0f, 1.0f};
+}
+
+const wchar_t* FrameName(WindowFrame frame) noexcept {
+    switch (frame) {
+        case WindowFrame::Normal: return L"Normal";
+        case WindowFrame::ThinTitleBar: return L"ThinTitleBar";
+        case WindowFrame::NoFrame: return L"NoFrame";
+        case WindowFrame::NoTitleBar:
+        default: return L"NoTitleBar";
+    }
+}
+
+WindowFrame ParseFrame(const std::wstring& name, WindowFrame fallback) noexcept {
+    if (::_wcsicmp(name.c_str(), L"Normal") == 0) return WindowFrame::Normal;
+    if (::_wcsicmp(name.c_str(), L"ThinTitleBar") == 0) {
+        return WindowFrame::ThinTitleBar;
+    }
+    if (::_wcsicmp(name.c_str(), L"NoTitleBar") == 0) {
+        return WindowFrame::NoTitleBar;
+    }
+    if (::_wcsicmp(name.c_str(), L"NoFrame") == 0) return WindowFrame::NoFrame;
+    return fallback;
+}
+
 const wchar_t* FormatName(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::Jpeg: return L"JPEG";
@@ -105,6 +159,18 @@ void Settings::Load() noexcept {
     usePenPressure = ReadBool(L"Drawing", L"UsePenPressure", usePenPressure, path_);
     pressureMinScale =
         ReadFloat(L"Drawing", L"PressureMinScale", pressureMinScale, path_);
+    penWidth = ReadFloat(L"Drawing", L"PenWidth", penWidth, path_);
+    penColor = ParseColor(
+        ReadString(L"Drawing", L"PenColor", ColorText(penColor), path_), penColor);
+    eraserWidth = ReadFloat(L"Drawing", L"EraserWidth", eraserWidth, path_);
+
+    for (size_t i = 0; i < quickColors.size(); ++i) {
+        wchar_t key[16];
+        ::swprintf_s(key, L"Color%zu", i + 1);
+        quickColors[i] = ParseColor(
+            ReadString(L"Colors", key, ColorText(quickColors[i]), path_),
+            quickColors[i]);
+    }
 
     titleFormat = ReadString(L"Appearance", L"TitleFormat", titleFormat, path_);
     smoothScaling = ReadBool(L"Appearance", L"SmoothScaling", smoothScaling, path_);
@@ -112,6 +178,9 @@ void Settings::Load() noexcept {
         ReadFloat(L"Appearance", L"ZoomStepPercent", zoomStepPercent, path_);
     paletteScalePercent = ::GetPrivateProfileIntW(
         L"Appearance", L"PaletteScalePercent", paletteScalePercent, path_.c_str());
+    windowFrame = ParseFrame(
+        ReadString(L"Appearance", L"WindowFrame", FrameName(windowFrame), path_),
+        windowFrame);
 
     defaultFormat = ParseFormat(
         ReadString(L"Save", L"DefaultFormat", FormatName(defaultFormat), path_),
@@ -119,11 +188,23 @@ void Settings::Load() noexcept {
     jpegQuality =
         ::GetPrivateProfileIntW(L"Save", L"JpegQuality", jpegQuality, path_.c_str());
 
+    shortcuts.Load(path_);
+
     autoSaveFolder = ReadString(L"AutoSave", L"Folder", autoSaveFolder, path_);
     autoSaveHistoryDays = ::GetPrivateProfileIntW(
         L"AutoSave", L"HistoryDays", autoSaveHistoryDays, path_.c_str());
 
-    // Guard against values edited outside their valid range.
+    Clamp();
+}
+
+void Settings::ResetToDefaults() noexcept {
+    // Everything except where the file lives, which is not a setting.
+    std::wstring path = std::move(path_);
+    *this = Settings{};
+    path_ = std::move(path);
+}
+
+void Settings::Clamp() noexcept {
     if (jpegQuality < 0) jpegQuality = 0;
     if (jpegQuality > 100) jpegQuality = 100;
     if (autoSaveHistoryDays < 0) autoSaveHistoryDays = 0;
@@ -133,9 +214,21 @@ void Settings::Load() noexcept {
     if (paletteScalePercent > 300) paletteScalePercent = 300;
     if (pressureMinScale < 0.0f) pressureMinScale = 0.0f;
     if (pressureMinScale > 1.0f) pressureMinScale = 1.0f;
+
+    // Same bounds the brush enforces at runtime.
+    const auto clampWidth = [](float& width) {
+        if (width < 1.0f) width = 1.0f;
+        if (width > 200.0f) width = 200.0f;
+    };
+    clampWidth(penWidth);
+    clampWidth(eraserWidth);
+
     if (textFontSize < 4.0f) textFontSize = 4.0f;
     if (textFontSize > 400.0f) textFontSize = 400.0f;
     if (textFontFamily.empty()) textFontFamily = L"Meiryo";
+    // A capture that waits minutes before grabbing the screen is a hang, not a
+    // setting.
+    if (preparationMs > 10000) preparationMs = 10000;
 }
 
 void Settings::Save() const noexcept {
@@ -180,6 +273,24 @@ void Settings::Save() const noexcept {
                L"; Width at the lightest touch, as a fraction of the brush\n"
                L"; width. 0.15 keeps a faint line rather than nothing at all.\n"
                L"PressureMinScale=%g\n"
+               L"; Starting size and colour of the brush. The eraser keeps its\n"
+               L"; own size, since it is usually wanted much wider than the\n"
+               L"; line it is rubbing out.\n"
+               L"PenWidth=%g\n"
+               L"PenColor=%s\n"
+               L"EraserWidth=%g\n"
+               L"\n"
+               L"[Colors]\n"
+               L"; The eight colours on Shift+1..8, which are also the fixed\n"
+               L"; top row of the palette.\n"
+               L"Color1=%s\n"
+               L"Color2=%s\n"
+               L"Color3=%s\n"
+               L"Color4=%s\n"
+               L"Color5=%s\n"
+               L"Color6=%s\n"
+               L"Color7=%s\n"
+               L"Color8=%s\n"
                L"\n"
                L"[Appearance]\n"
                L"; Placeholders: %%y year, %%Y year (2 digits), %%m month, %%d day,\n"
@@ -192,6 +303,16 @@ void Settings::Save() const noexcept {
                L"ZoomStepPercent=%g\n"
                L"; Size of the colour palette popup, in percent. 50-300.\n"
                L"PaletteScalePercent=%d\n"
+               L"; How much window frame a capture gets. Takes effect on the\n"
+               L"; next capture rather than the one already on screen.\n"
+               L";   Normal        ordinary caption and resizing frame\n"
+               L";   ThinTitleBar  narrow caption, close button only, no\n"
+               L";                 taskbar button\n"
+               L";   NoTitleBar    outline only\n"
+               L";   NoFrame       nothing at all\n"
+               L"; Without a title bar there is nothing to drag, so the middle\n"
+               L"; button moves the window instead.\n"
+               L"WindowFrame=%s\n"
                L"\n"
                L"[Save]\n"
                L"; PNG, JPEG or BMP\n"
@@ -206,14 +327,28 @@ void Settings::Save() const noexcept {
                L"Folder=%s\n"
                L"; Days to keep automatically saved files. 0 keeps them forever.\n"
                L"; Expired files go to the Recycle Bin rather than being deleted.\n"
-               L"HistoryDays=%d\n",
+               L"HistoryDays=%d\n"
+               L"\n"
+               L"[Shortcuts]\n"
+               L"; Written as Ctrl+S, Shift+F1, B and so on. An empty value\n"
+               L"; leaves the command with no key at all.\n"
+               L"%s",
                preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
-               usePenPressure ? 1 : 0,
-               pressureMinScale, titleFormat.c_str(),
+               usePenPressure ? 1 : 0, pressureMinScale, penWidth,
+               ColorText(penColor).c_str(), eraserWidth,
+               ColorText(quickColors[0]).c_str(),
+               ColorText(quickColors[1]).c_str(),
+               ColorText(quickColors[2]).c_str(),
+               ColorText(quickColors[3]).c_str(),
+               ColorText(quickColors[4]).c_str(),
+               ColorText(quickColors[5]).c_str(),
+               ColorText(quickColors[6]).c_str(),
+               ColorText(quickColors[7]).c_str(), titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
-               FormatName(defaultFormat),
-               jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays);
+               FrameName(windowFrame), FormatName(defaultFormat), jpegQuality,
+               autoSaveFolder.c_str(), autoSaveHistoryDays,
+               shortcuts.ToFileText().c_str());
 
     ::fclose(file);
 }

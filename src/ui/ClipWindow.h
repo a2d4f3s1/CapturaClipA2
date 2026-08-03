@@ -9,6 +9,7 @@
 #include "doc/History.h"
 #include "render/Renderer.h"
 #include "tool/ToolState.h"
+#include "ui/ColorPreview.h"
 #include "util/Timing.h"
 #include "view/ViewState.h"
 
@@ -31,7 +32,7 @@ namespace ccl::ui {
 class ClipWindow {
 public:
     bool Create(ccl::render::D2DContext& context, ccl::doc::Document& document,
-                const ccl::app::Settings& settings, POINT position,
+                ccl::app::Settings& settings, POINT position,
                 const std::wstring& sourceTitle, LONGLONG releasedAt) noexcept;
 
     void Run() noexcept;
@@ -49,6 +50,10 @@ private:
     void Draw() noexcept;
     void OnWheel(int notches, WPARAM keys) noexcept;
     void OnKeyDown(WPARAM key) noexcept;
+    // Runs whatever the key is bound to. Returns false when it is bound to
+    // nothing, leaving the modal keys -- the size keys, the zoom digits, the
+    // arrows -- to the handling below.
+    bool RunShortcut(WPARAM key) noexcept;
     void OnLeftDown(POINT client) noexcept;
     void OnMouseMove(POINT client) noexcept;
     void OnLeftUp() noexcept;
@@ -70,6 +75,20 @@ private:
     // Reads the colour out of the captured image at that point.
     bool PickColorAt(POINT client) noexcept;
     void SelectTool(ccl::tool::Tool tool) noexcept;
+    // Puts the eyedropper away: removes the hook it holds over the whole
+    // screen, hides the magnifier and goes back to the previous tool.
+    void EndEyedropper() noexcept;
+    // The eyedropper watches the mouse everywhere, which a capture cannot do:
+    // over another process's window the system only honours a capture while a
+    // button is already down, so a click there would reach that window instead
+    // of being taken as a sample. A low-level hook sees every event and can
+    // swallow the ones it uses.
+    bool InstallEyedropperHook() noexcept;
+    void RemoveEyedropperHook() noexcept;
+    static LRESULT CALLBACK EyedropperHookProc(int code, WPARAM wParam,
+                                               LPARAM lParam);
+    void UpdateColorPreview() noexcept;
+    void SetColorPreviewActive(bool active) noexcept;
 
     void SaveAs() noexcept;
     void CopyImage() noexcept;
@@ -91,6 +110,7 @@ private:
     // including the pixels.
     void ApplyTransform(ccl::capture::DibBuffer transformed) noexcept;
     void CropToSelection() noexcept;
+    void OpenSettings() noexcept;
     // Takes the window's own contents as the new picture, at the size they are
     // being shown. Zooming in and then doing this is how a detail is enlarged
     // for real rather than just magnified on screen.
@@ -161,6 +181,16 @@ private:
     SIZE ViewportSize() const noexcept;
     void ClampScroll() noexcept;
 
+    // Which parts of a frame the chosen window style has. Without a title bar
+    // the window supplies its own outline and resize grips; without a frame at
+    // all it does not even do that.
+    bool HasTitleBar() const noexcept;
+    bool HasWindowBorder() const noexcept;
+    // Width of that outline, in pixels: one, or none when frameless.
+    int BorderWidth() const noexcept;
+    // Outer window size that shows `content` pixels of image.
+    SIZE WindowSizeFor(SIZE content) const noexcept;
+
     // Obscures the selected area. Kept as an annotation so it can be undone.
     void ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept;
     // Adjusts the effect just placed, so its strength can be judged against the
@@ -179,7 +209,9 @@ private:
     ccl::render::Renderer renderer_;
     ccl::render::D2DContext* context_ = nullptr;
     ccl::doc::Document* document_ = nullptr;
-    const ccl::app::Settings* settings_ = nullptr;
+    // Not const: the settings window edits these in place, and what can be
+    // applied without a restart is applied here.
+    ccl::app::Settings* settings_ = nullptr;
 
     ccl::view::ViewState view_;
     ccl::tool::ToolState tool_;
@@ -216,6 +248,16 @@ private:
     // Eyedropper drag: the pointer is captured so the sample can come from
     // anywhere on screen, including other applications.
     bool sampling_ = false;
+    // Magnified view of what the eyedropper is over. A single pixel cannot be
+    // aimed at without it.
+    ColorPreview colorPreview_;
+    // Keeps the magnifier honest while the cursor is still: the hook only
+    // reports movement, and what is under the cursor can change on its own.
+    UINT_PTR previewTimer_ = 0;
+    HHOOK eyedropperHook_ = nullptr;
+    // One movement message in flight at a time, so a fast mouse cannot fill
+    // the queue faster than the magnifier can redraw.
+    bool previewPending_ = false;
 
     // Effect whose strength the size keys currently adjust: the one just
     // placed, until something else is done.

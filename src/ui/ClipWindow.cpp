@@ -17,7 +17,9 @@
 #include "io/ImageCodec.h"
 #include "io/ImageOps.h"
 #include "render/D2DContext.h"
+#include "res/Resources.h"
 #include "ui/ColorPopup.h"
+#include "ui/SettingsDialog.h"
 #include "util/Dpi.h"
 #include "util/NameFormat.h"
 #include "util/Timing.h"
@@ -33,6 +35,9 @@ constexpr int kKeyScrollStep = 40;
 // How far in from the edge counts as a resize grip. The window has no visible
 // frame to grab, so the grip lives just inside the outline.
 constexpr LONG kResizeGrip = 6;
+
+// Drives the eyedropper's magnifier while nothing is being dragged.
+constexpr UINT_PTR kColorPreviewTimer = 1;
 
 // Points closer together than this are dropped while drawing, which keeps the
 // stroke geometry small without any visible difference.
@@ -144,6 +149,7 @@ enum MenuId : UINT {
     kMenuRedo,
     kMenuFit,
     kMenuAntialias,
+    kMenuHighlighter,
     kMenuPressure,
     kMenuBold,
     kMenuItalic,
@@ -164,6 +170,7 @@ enum MenuId : UINT {
     kMenuConcatBottom,
     kMenuCaptureSelf,
     kMenuRecapture,
+    kMenuSettings,
     kMenuCommitText,
     kMenuEyedropper,
     kMenuColorPicker,
@@ -198,6 +205,16 @@ COLORREF ToColorRef(const ccl::doc::Color& color) noexcept {
 // before the posted message arrives, and without the check that message would
 // immediately close the entry that just opened.
 constexpr UINT kCommitTextMessage = WM_APP + 1;
+
+// Posted by the eyedropper's hook. The hook runs on every mouse event in the
+// system, so it does as little as possible and leaves the work to the window.
+constexpr UINT kEyedropperMoveMessage = WM_APP + 5;
+constexpr UINT kEyedropperPickMessage = WM_APP + 6;
+constexpr UINT kEyedropperCancelMessage = WM_APP + 7;
+
+// The window whose eyedropper is armed, for the hook to reach. Only one can be
+// armed at a time; the hook takes the mouse for the whole screen.
+ClipWindow* g_eyedropperWindow = nullptr;
 
 // Styling shortcut pressed inside the editor; wParam is the key.
 constexpr UINT kStyleTextMessage = WM_APP + 2;
@@ -395,13 +412,14 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_NCCALCSIZE:
             // Claim the whole window as client area: the window is sizable
-            // (WS_THICKFRAME) but must not draw a system frame.
+            // (WS_THICKFRAME) but must not draw a system frame. With a title
+            // bar there is a real frame to keep, so this is left alone.
             //
             // Compared against FALSE rather than TRUE because the flag arrives
             // as any non-zero value; testing for exactly 1 let some calls fall
             // through to the default handling, which reserved the resize
             // border and made the frame visibly thicken on activation.
-            if (wParam != FALSE) {
+            if (!HasTitleBar() && wParam != FALSE) {
                 return 0;
             }
             break;
@@ -409,9 +427,15 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_NCACTIVATE:
             // Passing -1 as the region tells the default handler not to repaint
             // the non-client area, which does not exist here.
-            return ::DefWindowProcW(hwnd_, msg, wParam, -1);
+            if (!HasTitleBar()) {
+                return ::DefWindowProcW(hwnd_, msg, wParam, -1);
+            }
+            break;
 
         case WM_NCHITTEST: {
+            if (HasTitleBar()) {
+                break;  // there is a real frame for the system to hit-test
+            }
             // Supply the resize grips by hand, since there is no visible frame
             // for the system to hit-test against.
             RECT window{};
@@ -646,6 +670,35 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
+        case WM_TIMER:
+            if (wParam == kColorPreviewTimer) {
+                UpdateColorPreview();
+                return 0;
+            }
+            break;
+
+        case kEyedropperMoveMessage:
+            previewPending_ = false;
+            colorPreview_.Update(POINT{static_cast<LONG>(wParam),
+                                       static_cast<LONG>(lParam)});
+            return 0;
+
+        case kEyedropperPickMessage: {
+            POINT screen{static_cast<LONG>(wParam), static_cast<LONG>(lParam)};
+            POINT client = screen;
+            ::ScreenToClient(hwnd_, &client);
+            if (PickColorAt(client)) {
+                Draw();
+            }
+            // One sample, then back to whatever tool was in use before.
+            EndEyedropper();
+            return 0;
+        }
+
+        case kEyedropperCancelMessage:
+            EndEyedropper();
+            return 0;
+
         case WM_CAPTURECHANGED:
             moving_ = false;
             scrolling_ = false;
@@ -657,6 +710,14 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_RBUTTONUP: {
+            // The eyedropper takes over the whole screen while it is armed, so
+            // there has to be a way out that does not involve finding this
+            // window again. The menu would be the wrong thing to open here.
+            if (tool_.tool == ccl::tool::Tool::Eyedropper) {
+                EndEyedropper();
+                return 0;
+            }
+
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ::ClientToScreen(hwnd_, &screen);
             ShowContextMenu(screen);
@@ -681,6 +742,9 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CLOSE:
+            // A hook left installed would outlive the window it posts to.
+            RemoveEyedropperHook();
+            SetColorPreviewActive(false);
             // Text still being typed is kept rather than discarded.
             CommitText();
             ccl::timing::ReportFrames(L"clip window draw", drawStats_);
@@ -887,7 +951,7 @@ void ClipWindow::UpdateCursor() noexcept {
 D2D1_POINT_2F ClipWindow::ToImage(POINT client) const noexcept {
     const float zoom = view_.Zoom();
     const POINT scroll = view_.Scroll();
-    const auto border = static_cast<float>(ccl::render::kWindowBorder);
+    const auto border = static_cast<float>(BorderWidth());
 
     return D2D1::Point2F(
         (static_cast<float>(client.x) - border + static_cast<float>(scroll.x)) / zoom,
@@ -952,7 +1016,7 @@ void ClipWindow::EditTextAt(size_t index) noexcept {
     // The editor opens where the text is, not where the click landed.
     const float zoom = view_.Zoom();
     const POINT scroll = view_.Scroll();
-    const auto border = static_cast<float>(ccl::render::kWindowBorder);
+    const auto border = static_cast<float>(BorderWidth());
     const POINT client{static_cast<LONG>(editorX_ * zoom + border - scroll.x),
                        static_cast<LONG>(editorY_ * zoom + border - scroll.y)};
     OpenEditor(client);
@@ -1454,6 +1518,7 @@ void ClipWindow::BeginStroke(POINT client, float pressure) noexcept {
     activeStroke_ = ccl::doc::Stroke{};
     activeStroke_.color = tool_.Color();
     activeStroke_.antialias = tool_.antialias;
+    activeStroke_.highlighter = tool_.highlighter;
 
     const D2D1_POINT_2F point = ToImage(client);
     activeStroke_.points.push_back({point.x, point.y, WidthForPressure(pressure)});
@@ -1672,10 +1737,14 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             return;
 
         case ccl::tool::Tool::Eyedropper:
-            // Captured so the sample can be taken from anywhere on screen,
-            // not just from inside this window.
-            ::SetCapture(hwnd_);
+            // The capture is already held; arming the tool took it.
             sampling_ = true;
+            // Taken on the press as well as on every move: a click that does
+            // not move at all is the ordinary way to use an eyedropper, and it
+            // used to pick up nothing.
+            if (PickColorAt(client)) {
+                Draw();
+            }
             return;
 
         case ccl::tool::Tool::Select:
@@ -1713,6 +1782,13 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
 void ClipWindow::OnMouseMove(POINT client) noexcept {
     lastCursor_ = client;
     TrackMouseLeave();
+
+    if (tool_.tool == ccl::tool::Tool::Eyedropper) {
+        // Only while the cursor is over this window. Elsewhere the cursor
+        // belongs to whichever window is under it, and the magnifier is what
+        // says the eyedropper is armed.
+        ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+    }
 
     if (moving_) {
         POINT now{};
@@ -1834,12 +1910,18 @@ void ClipWindow::OnLeftUp() noexcept {
     }
 
     if (sampling_) {
-        sampling_ = false;
-        ::ReleaseCapture();
+        // Where the button came up is the colour that was meant, which is not
+        // necessarily where the last mouse message landed.
+        POINT cursor{};
+        if (::GetCursorPos(&cursor)) {
+            ::ScreenToClient(hwnd_, &cursor);
+            PickColorAt(cursor);
+        }
         // One sample, then back to whatever tool was in use before.
-        SelectTool(toolBeforeEyedropper_);
+        EndEyedropper();
         return;
     }
+
 
     if (drawing_) {
         EndStroke();
@@ -1864,9 +1946,43 @@ SIZE ClipWindow::ViewportSize() const noexcept {
     if (!::GetClientRect(hwnd_, &client)) {
         return SIZE{0, 0};
     }
-    const LONG border = 2 * ccl::render::kWindowBorder;
+    const LONG border = 2 * BorderWidth();
     return SIZE{std::max(0L, client.right - client.left - border),
                 std::max(0L, client.bottom - client.top - border)};
+}
+
+bool ClipWindow::HasTitleBar() const noexcept {
+    if (settings_ == nullptr) {
+        return false;
+    }
+    return settings_->windowFrame == ccl::app::WindowFrame::Normal ||
+           settings_->windowFrame == ccl::app::WindowFrame::ThinTitleBar;
+}
+
+bool ClipWindow::HasWindowBorder() const noexcept {
+    // Only the bare styles draw their own outline. With a title bar the system
+    // already draws a frame, and the frameless style is frameless on purpose.
+    return settings_ != nullptr &&
+           settings_->windowFrame == ccl::app::WindowFrame::NoTitleBar;
+}
+
+int ClipWindow::BorderWidth() const noexcept {
+    return HasWindowBorder() ? ccl::render::kWindowBorder : 0;
+}
+
+SIZE ClipWindow::WindowSizeFor(SIZE content) const noexcept {
+    RECT wanted{0, 0, content.cx, content.cy};
+    if (HasTitleBar()) {
+        // The caption and frame are the system's, so it decides how much room
+        // they need.
+        ::AdjustWindowRectEx(
+            &wanted, static_cast<DWORD>(::GetWindowLongPtrW(hwnd_, GWL_STYLE)),
+            FALSE,
+            static_cast<DWORD>(::GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)));
+    } else {
+        ::InflateRect(&wanted, BorderWidth(), BorderWidth());
+    }
+    return SIZE{wanted.right - wanted.left, wanted.bottom - wanted.top};
 }
 
 void ClipWindow::ClampScroll() noexcept {
@@ -1887,59 +2003,73 @@ void ClipWindow::OnWheel(int notches, WPARAM keys) noexcept {
     }
 }
 
+bool ClipWindow::RunShortcut(WPARAM key) noexcept {
+    if (settings_ == nullptr) {
+        return false;
+    }
+
+    const ccl::app::Binding pressed{static_cast<UINT>(key), IsKeyDown(VK_CONTROL),
+                                    IsKeyDown(VK_SHIFT), IsKeyDown(VK_MENU)};
+
+    switch (settings_->shortcuts.Lookup(pressed)) {
+        case ccl::app::Command::Undo: Undo(); return true;
+        case ccl::app::Command::Redo: Redo(); return true;
+        case ccl::app::Command::Save: SaveAs(); return true;
+        case ccl::app::Command::Copy: CopyImage(); return true;
+        case ccl::app::Command::Open: OpenFile(); return true;
+        case ccl::app::Command::Paste: PasteImage(); return true;
+        case ccl::app::Command::ToolView:
+            SelectTool(ccl::tool::Tool::View);
+            return true;
+        case ccl::app::Command::ToolPen:
+            SelectTool(ccl::tool::Tool::Pen);
+            return true;
+        case ccl::app::Command::ToolEraser:
+            SelectTool(ccl::tool::Tool::Eraser);
+            return true;
+        case ccl::app::Command::ToolText:
+            SelectTool(ccl::tool::Tool::Text);
+            return true;
+        case ccl::app::Command::ToolSelect:
+            SelectTool(ccl::tool::Tool::Select);
+            return true;
+        case ccl::app::Command::Eyedropper:
+            OnCommand(kMenuEyedropper);
+            return true;
+        case ccl::app::Command::ColorPicker:
+            ChooseColorFromPicker();
+            return true;
+        case ccl::app::Command::Highlighter:
+            // A mode of the brush, not a tool: switching it on selects the
+            // brush as well, since that is plainly what was meant.
+            tool_.highlighter = !tool_.highlighter;
+            SelectTool(ccl::tool::Tool::Pen);
+            return true;
+        case ccl::app::Command::Antialias:
+            tool_.antialias = !tool_.antialias;
+            UpdateTitle();
+            Draw();
+            return true;
+        case ccl::app::Command::FitToImage:
+            FitToImage();
+            return true;
+        default:
+            return false;
+    }
+}
+
 void ClipWindow::OnKeyDown(WPARAM key) noexcept {
-    if (IsKeyDown(VK_CONTROL)) {
-        switch (key) {
-            case 'S':
-                SaveAs();
-                return;
-            case 'C':
-                CopyImage();
-                return;
-            case 'O':
-                OpenFile();
-                return;
-            case 'V':
-                PasteImage();
-                return;
-            case 'Z':
-                Undo();
-                return;
-            case 'Y':
-                Redo();
-                return;
-            default:
-                break;
-        }
+    if (RunShortcut(key)) {
+        return;
     }
 
     // Shift+digit picks a quick colour; the digits alone are zoom presets.
     if (IsKeyDown(VK_SHIFT) && key >= '1' && key <= '8') {
-        tool_.UseColor(ccl::tool::kQuickColors[key - '1']);
+        tool_.UseColor(tool_.quickColors[key - '1']);
         return;
     }
 
     switch (key) {
-        case 'V':
-            SelectTool(ccl::tool::Tool::View);
-            return;
-        case 'B':
-            SelectTool(ccl::tool::Tool::Pen);
-            return;
-        case 'E':
-            SelectTool(ccl::tool::Tool::Eraser);
-            return;
-        case 'T':
-            SelectTool(ccl::tool::Tool::Text);
-            return;
-        case 'W':
-            SelectTool(ccl::tool::Tool::Select);
-            return;
-
-        case 'I':
-            ChooseColorFromPicker();
-            return;
-
         case VK_OEM_4:  // [
         case VK_OEM_6: {  // ]
             const int steps = key == VK_OEM_6 ? 1 : -1;
@@ -1972,12 +2102,6 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             return;
         }
 
-        case 'A':
-            tool_.antialias = !tool_.antialias;
-            UpdateTitle();
-            Draw();
-            return;
-
         case '1':
         case '2':
         case '3':
@@ -1985,10 +2109,6 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case '5':
             view_.SetZoom(static_cast<float>(key - '0'));
             ApplyZoom();
-            return;
-
-        case 'F':
-            FitToImage();
             return;
 
         case VK_LEFT:
@@ -2018,7 +2138,6 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
 
 void ClipWindow::ApplyZoom() noexcept {
     const SIZE content = ContentSize();
-    const LONG frame = 2 * ccl::render::kWindowBorder;
 
     // Keep the window on screen: past the work area the image is scrolled
     // instead of the window growing beyond the monitor.
@@ -2034,9 +2153,9 @@ void ClipWindow::ApplyZoom() noexcept {
     const LONG maxHeight =
         work.bottom > work.top ? work.bottom - work.top : content.cy;
 
-    ::SetWindowPos(hwnd_, nullptr, 0, 0,
-                   std::min(content.cx, maxWidth) + frame,
-                   std::min(content.cy, maxHeight) + frame,
+    const SIZE outer = WindowSizeFor(SIZE{std::min(content.cx, maxWidth),
+                                          std::min(content.cy, maxHeight)});
+    ::SetWindowPos(hwnd_, nullptr, 0, 0, outer.cx, outer.cy,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     ClampScroll();
@@ -2067,8 +2186,9 @@ void ClipWindow::UpdateTitle() noexcept {
                              activeStroke_.points.back().width);
                 break;
             }
-            ::swprintf_s(title, L"%s  %d%%  Pen %.0fpx%s", name.c_str(), zoom,
-                         tool_.Width(), tool_.antialias ? L"" : L" (aliased)");
+            ::swprintf_s(title, L"%s  %d%%  %s %.0fpx%s", name.c_str(), zoom,
+                         tool_.highlighter ? L"Marker" : L"Pen", tool_.Width(),
+                         tool_.antialias ? L"" : L" (aliased)");
             break;
         case ccl::tool::Tool::Eraser:
             ::swprintf_s(title, L"%s  %d%%  Eraser %.0fpx", name.c_str(), zoom,
@@ -2137,7 +2257,7 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
 
     ColorPopup popup;
     const auto chosen = popup.Show(
-        hwnd_, screen, original, tool_.RecentColors(),
+        hwnd_, screen, original, tool_.quickColors, tool_.RecentColors(),
         settings_ != nullptr ? settings_->paletteScalePercent : 100,
         [this](const ccl::doc::Color& colour) {
             // Applied without recording it: dragging across a gradient would
@@ -2205,9 +2325,119 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
         toolBeforeEyedropper_ = tool_.tool;
     }
     tool_.tool = tool;
+    if (tool == ccl::tool::Tool::Eyedropper) {
+        InstallEyedropperHook();
+    }
+    SetColorPreviewActive(tool == ccl::tool::Tool::Eyedropper);
     UpdateCursor();
     UpdateTitle();
     Draw();
+}
+
+void ClipWindow::EndEyedropper() noexcept {
+    if (tool_.tool != ccl::tool::Tool::Eyedropper) {
+        return;
+    }
+    sampling_ = false;
+    RemoveEyedropperHook();
+    SelectTool(toolBeforeEyedropper_);
+}
+
+bool ClipWindow::InstallEyedropperHook() noexcept {
+    if (eyedropperHook_ != nullptr) {
+        return true;
+    }
+    g_eyedropperWindow = this;
+    eyedropperHook_ = ::SetWindowsHookExW(WH_MOUSE_LL, &EyedropperHookProc,
+                                          ::GetModuleHandleW(nullptr), 0);
+    if (eyedropperHook_ == nullptr) {
+        g_eyedropperWindow = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void ClipWindow::RemoveEyedropperHook() noexcept {
+    if (eyedropperHook_ != nullptr) {
+        ::UnhookWindowsHookEx(eyedropperHook_);
+        eyedropperHook_ = nullptr;
+    }
+    if (g_eyedropperWindow == this) {
+        g_eyedropperWindow = nullptr;
+    }
+}
+
+LRESULT CALLBACK ClipWindow::EyedropperHookProc(int code, WPARAM wParam,
+                                                LPARAM lParam) {
+    ClipWindow* window = g_eyedropperWindow;
+    if (code != HC_ACTION || window == nullptr || window->hwnd_ == nullptr) {
+        return ::CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+    // Sent as two whole values rather than packed into one: a point on a
+    // monitor left of or above the primary one has negative coordinates.
+    const auto x = static_cast<WPARAM>(mouse->pt.x);
+    const auto y = static_cast<LPARAM>(mouse->pt.y);
+
+    switch (wParam) {
+        case WM_MOUSEMOVE:
+            // Posted rather than handled here: a low-level hook runs on every
+            // mouse event in the system and is dropped if it dawdles. Only one
+            // is in flight at a time, so a fast mouse cannot flood the queue.
+            if (!window->previewPending_) {
+                window->previewPending_ = true;
+                ::PostMessageW(window->hwnd_, kEyedropperMoveMessage, x, y);
+            }
+            return ::CallNextHookEx(nullptr, code, wParam, lParam);
+
+        case WM_LBUTTONDOWN:
+            ::PostMessageW(window->hwnd_, kEyedropperPickMessage, x, y);
+            return 1;  // swallowed, so the window underneath never sees it
+
+        case WM_RBUTTONDOWN:
+            ::PostMessageW(window->hwnd_, kEyedropperCancelMessage, 0, 0);
+            return 1;
+
+        // The presses above were taken, so their releases have to go too, or
+        // the window underneath gets a button-up it never saw the down for.
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP:
+            return 1;
+
+        default:
+            break;
+    }
+    return ::CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+void ClipWindow::UpdateColorPreview() noexcept {
+    POINT cursor{};
+    if (::GetCursorPos(&cursor)) {
+        colorPreview_.Update(cursor);
+    }
+}
+
+void ClipWindow::SetColorPreviewActive(bool active) noexcept {
+    if (!active) {
+        if (previewTimer_ != 0) {
+            ::KillTimer(hwnd_, previewTimer_);
+            previewTimer_ = 0;
+        }
+        colorPreview_.Hide();
+        return;
+    }
+
+    UpdateColorPreview();
+    if (previewTimer_ == 0) {
+        // Polled rather than driven by mouse messages: until the button goes
+        // down there is no capture, so moving the cursor outside this window
+        // sends nothing here, and outside is exactly where the eyedropper is
+        // most useful.
+        previewTimer_ = ::SetTimer(hwnd_, kColorPreviewTimer, 16, nullptr);
+    }
 }
 
 HMENU ClipWindow::BuildFontMenu() noexcept {
@@ -2307,34 +2537,73 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     const UINT checked = MF_STRING | MF_CHECKED;
     const UINT plain = MF_STRING;
 
-    ::AppendMenuW(menu, plain, kMenuOpen, L"開く...\tCtrl+O");
-    ::AppendMenuW(menu, plain, kMenuSave, L"保存...\tCtrl+S");
-    ::AppendMenuW(menu, plain, kMenuCopy, L"クリップボードにコピー\tCtrl+C");
-    ::AppendMenuW(menu,
-                  ccl::io::ClipboardHasImage() ? plain : (plain | MF_GRAYED),
-                  kMenuPaste, L"貼り付け\tCtrl+V");
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // Keys come from the bindings rather than being written into the labels, so
+    // that the menu still tells the truth after they have been reassigned.
+    const ccl::app::Shortcuts& keys = settings_->shortcuts;
+    const auto withKey = [&keys](const wchar_t* label,
+                                 ccl::app::Command command) {
+        return label + keys.MenuSuffix(command);
+    };
 
+    // A submenu shows no keys until it is opened, so the ones inside it are
+    // gathered onto the parent. Without this the shortcuts that matter most --
+    // the tools -- were the ones hardest to discover.
+    const auto keyList = [&keys](std::initializer_list<ccl::app::Command> list) {
+        std::wstring text;
+        for (ccl::app::Command command : list) {
+            const std::wstring key = ccl::app::BindingText(keys.For(command));
+            if (key.empty()) {
+                continue;
+            }
+            if (!text.empty()) {
+                text += L" ";
+            }
+            text += key;
+        }
+        return text.empty() ? std::wstring{} : L"\t" + text;
+    };
+
+    // Ordered by what the item acts on, nearest first: the last edit, then the
+    // drawing about to be done, then the picture, then getting the picture in
+    // and out, and finally the program itself.
     ::AppendMenuW(menu, plain | (history_.CanUndo() ? 0u : MF_GRAYED), kMenuUndo,
-                  L"元に戻す\tCtrl+Z");
+                  withKey(L"元に戻す", ccl::app::Command::Undo).c_str());
     ::AppendMenuW(menu, plain | (history_.CanRedo() ? 0u : MF_GRAYED), kMenuRedo,
-                  L"やり直し\tCtrl+Y");
+                  withKey(L"やり直し", ccl::app::Command::Redo).c_str());
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     const HMENU tools = ::CreatePopupMenu();
-    const auto toolEntry = [&](ccl::tool::Tool tool, const wchar_t* label) {
+    const auto toolEntry = [&](ccl::tool::Tool tool, const wchar_t* label,
+                               ccl::app::Command command) {
         ::AppendMenuW(tools, tool_.tool == tool ? checked : plain,
-                      kMenuToolBase + static_cast<UINT>(tool), label);
+                      kMenuToolBase + static_cast<UINT>(tool),
+                      withKey(label, command).c_str());
     };
-    toolEntry(ccl::tool::Tool::View, L"ビュー\tV");
-    toolEntry(ccl::tool::Tool::Pen, L"ペン\tB");
-    toolEntry(ccl::tool::Tool::Eraser, L"消しゴム\tE");
-    toolEntry(ccl::tool::Tool::Text, L"テキスト\tT");
-    toolEntry(ccl::tool::Tool::Select, L"範囲選択\tW");
-    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"ツール");
+    toolEntry(ccl::tool::Tool::View, L"ビュー", ccl::app::Command::ToolView);
+    toolEntry(ccl::tool::Tool::Pen, L"ペン", ccl::app::Command::ToolPen);
+    toolEntry(ccl::tool::Tool::Eraser, L"消しゴム",
+              ccl::app::Command::ToolEraser);
+    toolEntry(ccl::tool::Tool::Text, L"テキスト", ccl::app::Command::ToolText);
+    toolEntry(ccl::tool::Tool::Select, L"範囲選択",
+              ccl::app::Command::ToolSelect);
+    ::AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(tools, tool_.tool == ccl::tool::Tool::Eyedropper ? checked
+                                                                  : plain,
+                  kMenuEyedropper,
+                  withKey(L"スポイト", ccl::app::Command::Eyedropper).c_str());
+    ::AppendMenuW(
+        menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools),
+        (L"ツール" + keyList({ccl::app::Command::ToolView,
+                              ccl::app::Command::ToolPen,
+                              ccl::app::Command::ToolEraser,
+                              ccl::app::Command::ToolText,
+                              ccl::app::Command::ToolSelect,
+                              ccl::app::Command::Eyedropper}))
+            .c_str());
 
-    ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...\tI");
-    ::AppendMenuW(menu, plain, kMenuEyedropper, L"画面から色を拾う");
+    ::AppendMenuW(
+        menu, plain, kMenuColorPicker,
+        withKey(L"色を選ぶ...", ccl::app::Command::ColorPicker).c_str());
 
     const HMENU widths = ::CreatePopupMenu();
     for (size_t i = 0; i < ARRAYSIZE(kWidthPresets); ++i) {
@@ -2345,11 +2614,25 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                       kMenuWidthBase + static_cast<UINT>(i), label);
     }
     ::AppendMenuW(widths, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(
+        widths, tool_.highlighter ? checked : plain, kMenuHighlighter,
+        withKey(L"蛍光マーカー", ccl::app::Command::Highlighter).c_str());
     ::AppendMenuW(widths, tool_.antialias ? checked : plain, kMenuAntialias,
-                  L"なめらかにする\tA");
+                  withKey(L"なめらかにする", ccl::app::Command::Antialias).c_str());
     ::AppendMenuW(widths, tool_.usePressure ? checked : plain, kMenuPressure,
                   L"筆圧を使う");
-    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(widths), L"線");
+    // The size keys are not in the bindings: while a straight line is being
+    // drawn they retarget one of its ends instead, so they are not a command
+    // that could be pointed at something else.
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(widths),
+                  (L"線\t[ ]" +
+                   [&] {
+                       const std::wstring rest =
+                           keyList({ccl::app::Command::Highlighter,
+                                    ccl::app::Command::Antialias});
+                       return rest.empty() ? rest : L" " + rest.substr(1);
+                   }())
+                      .c_str());
 
     const HMENU textStyle = ::CreatePopupMenu();
     ::AppendMenuW(textStyle, tool_.textBold ? checked : plain, kMenuBold,
@@ -2366,7 +2649,8 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(textStyle, tool_.textShadow ? checked : plain,
                   kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
-                  L"文字");
+                  L"文字\tCtrl+B I U");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Only offered when there is something selected to obscure.
     const HMENU selection = ::CreatePopupMenu();
@@ -2413,11 +2697,39 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                       kMenuZoomBase + static_cast<UINT>(percent), label);
     }
     ::AppendMenuW(zoom, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(zoom, plain, kMenuFit, L"画像サイズに合わせる\tF");
-    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(zoom), L"表示");
-
+    ::AppendMenuW(
+        zoom, plain, kMenuFit,
+        withKey(L"画像サイズに合わせる", ccl::app::Command::FitToImage).c_str());
+    ::AppendMenuW(
+        menu, MF_POPUP, reinterpret_cast<UINT_PTR>(zoom),
+        (L"表示\t1-5" + [&] {
+            const std::wstring rest = keyList({ccl::app::Command::FitToImage});
+            return rest.empty() ? rest : L" " + rest.substr(1);
+        }()).c_str());
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    // Sending the capture somewhere.
+    ::AppendMenuW(menu, plain, kMenuSave,
+                  withKey(L"保存...", ccl::app::Command::Save).c_str());
+    ::AppendMenuW(
+        menu, plain, kMenuCopy,
+        withKey(L"クリップボードにコピー", ccl::app::Command::Copy).c_str());
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    // Replacing it with a different one. Recapturing belongs here rather than
+    // beside the program commands: it is another way of getting a picture, not
+    // a way of leaving.
+    ::AppendMenuW(menu, plain, kMenuOpen,
+                  withKey(L"開く...", ccl::app::Command::Open).c_str());
+    ::AppendMenuW(menu,
+                  ccl::io::ClipboardHasImage() ? plain : (plain | MF_GRAYED),
+                  kMenuPaste,
+                  withKey(L"貼り付け", ccl::app::Command::Paste).c_str());
     ::AppendMenuW(menu, plain, kMenuRecapture, L"撮り直す");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    ::AppendMenuW(menu, plain, kMenuSettings, L"設定...");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, plain, kMenuExit, L"終了");
 
     // TPM_RETURNCMD hands the choice back directly, which avoids routing it
@@ -2515,6 +2827,9 @@ void ClipWindow::OnCommand(int command) noexcept {
         case kMenuRecapture:
             Recapture();
             return;
+        case kMenuSettings:
+            OpenSettings();
+            return;
         case kMenuFit:
             FitToImage();
             return;
@@ -2522,6 +2837,10 @@ void ClipWindow::OnCommand(int command) noexcept {
             tool_.antialias = !tool_.antialias;
             UpdateTitle();
             Draw();
+            return;
+        case kMenuHighlighter:
+            tool_.highlighter = !tool_.highlighter;
+            SelectTool(ccl::tool::Tool::Pen);
             return;
         case kMenuPressure:
             tool_.usePressure = !tool_.usePressure;
@@ -2647,7 +2966,6 @@ void ClipWindow::ResizeToImage() noexcept {
     }
 
     const SIZE content = ContentSize();
-    const LONG frame = 2 * ccl::render::kWindowBorder;
 
     RECT work{};
     const HMONITOR monitor = ::MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
@@ -2661,8 +2979,9 @@ void ClipWindow::ResizeToImage() noexcept {
     const LONG maxHeight =
         work.bottom > work.top ? work.bottom - work.top : content.cy;
 
-    ::SetWindowPos(hwnd_, nullptr, 0, 0, std::min(content.cx, maxWidth) + frame,
-                   std::min(content.cy, maxHeight) + frame,
+    const SIZE outer = WindowSizeFor(SIZE{std::min(content.cx, maxWidth),
+                                          std::min(content.cy, maxHeight)});
+    ::SetWindowPos(hwnd_, nullptr, 0, 0, outer.cx, outer.cy,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -2784,6 +3103,36 @@ void ClipWindow::CropToSelection() noexcept {
                       static_cast<LONG>(std::lround(area.right)),
                       static_cast<LONG>(std::lround(area.bottom))};
     ApplyTransform(flat.Crop(bounds));
+}
+
+void ClipWindow::OpenSettings() noexcept {
+    if (settings_ == nullptr) {
+        return;
+    }
+    if (EditingText()) {
+        CommitText();
+    }
+
+    // The window takes focus while it is up, which the editor would otherwise
+    // read as clicking away.
+    ++suppressCommitDepth_;
+    const bool changed = ccl::ui::ShowSettingsDialog(hwnd_, *settings_);
+    --suppressCommitDepth_;
+
+    if (!changed) {
+        return;
+    }
+
+    // Applied where it costs nothing to do so. What is left -- the capture
+    // settings, and the text defaults, which only apply to text placed from
+    // here on -- takes effect the next time it is used.
+    renderer_.SetSmoothScaling(settings_->smoothScaling);
+    view_.SetZoomStepPercent(settings_->zoomStepPercent);
+    tool_.usePressure = settings_->usePenPressure;
+    tool_.quickColors = settings_->quickColors;
+
+    UpdateTitle();
+    Draw();
 }
 
 void ClipWindow::CaptureSelf() noexcept {
@@ -2987,7 +3336,7 @@ void ClipWindow::Draw() noexcept {
 
 bool ClipWindow::Create(ccl::render::D2DContext& context,
                         ccl::doc::Document& document,
-                        const ccl::app::Settings& settings, POINT position,
+                        ccl::app::Settings& settings, POINT position,
                         const std::wstring& sourceTitle,
                         LONGLONG releasedAt) noexcept {
     if (!document.IsValid()) {
@@ -3000,9 +3349,12 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     sourceTitle_ = sourceTitle;
     view_.SetZoomStepPercent(settings.zoomStepPercent);
     renderer_.SetSmoothScaling(settings.smoothScaling);
+    renderer_.SetBorderWidth(BorderWidth());
     tool_.usePressure = settings.usePenPressure;
     tool_.textShadow = settings.textShadow;
     tool_.textOutline = settings.textOutline;
+    tool_.SeedDefaults(settings.penColor, settings.penWidth,
+                       settings.eraserWidth, settings.quickColors);
     ccl::timing::Stopwatch watch;
 
     const HINSTANCE instance = ::GetModuleHandleW(nullptr);
@@ -3013,32 +3365,70 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     wc.hInstance = instance;
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kClipWindowClass;
+    // Carried into the taskbar button and Alt+Tab. Loaded at both sizes so
+    // Windows does not scale the large one down for the small slot, which on
+    // pixel art turns to mush.
+    wc.hIcon = static_cast<HICON>(
+        ::LoadImageW(instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                     ::GetSystemMetrics(SM_CXICON),
+                     ::GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(
+        ::LoadImageW(instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                     ::GetSystemMetrics(SM_CXSMICON),
+                     ::GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
 
     if (::RegisterClassExW(&wc) == 0 &&
         ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
     }
 
-    // WS_EX_APPWINDOW forces a taskbar button even though the window has no
-    // title bar, so it is obvious whether a capture is still alive. WS_EX_LAYERED
-    // is what makes the window translucent; at full opacity it costs nothing
-    // visible. Both become settings alongside the other appearance options.
+    // WS_EX_LAYERED is what makes the window translucent; at full opacity it
+    // costs nothing visible.
     //
-    // WS_THICKFRAME makes the window sizable; WM_NCCALCSIZE then hides the
-    // frame it would otherwise draw, and WM_NCHITTEST supplies the grips.
+    // WS_THICKFRAME makes the window sizable. Without a caption WM_NCCALCSIZE
+    // hides the frame it would otherwise draw and WM_NCHITTEST supplies the
+    // grips, so the window is the image plus a one pixel outline; with one the
+    // frame is left alone and Windows draws it as usual.
     //
-    // The window is the image plus the outline on each side, and it is placed
-    // so that the image itself lands exactly where the selection was.
-    const int frame = 2 * ccl::render::kWindowBorder;
     // WS_CLIPCHILDREN keeps this window's own drawing out of the area the text
     // editor occupies. Without it the editor had to be told to repaint after
     // every frame, which is what made it flicker.
-    hwnd_ = ::CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_LAYERED, kClipWindowClass,
-        L"CapturaClipA2", WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
-        position.x - ccl::render::kWindowBorder,
-        position.y - ccl::render::kWindowBorder, document.Width() + frame,
-        document.Height() + frame, nullptr, nullptr, instance, this);
+    DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
+    // WS_EX_APPWINDOW forces a taskbar button even with no title bar, so it is
+    // obvious whether a capture is still alive.
+    DWORD exStyle = WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_APPWINDOW;
+
+    switch (settings.windowFrame) {
+        case ccl::app::WindowFrame::Normal:
+            style |= WS_CAPTION | WS_SYSMENU;
+            break;
+        case ccl::app::WindowFrame::ThinTitleBar:
+            // A tool window's caption is the narrow one, and it comes with no
+            // taskbar button, so WS_EX_APPWINDOW has to go with it.
+            style |= WS_CAPTION | WS_SYSMENU;
+            exStyle = (exStyle & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
+            break;
+        case ccl::app::WindowFrame::NoTitleBar:
+        case ccl::app::WindowFrame::NoFrame:
+        default:
+            break;
+    }
+
+    // The window is the image plus whatever frame it has, placed so that the
+    // image itself lands exactly where the selection was.
+    const int inset = HasWindowBorder() ? ccl::render::kWindowBorder : 0;
+    RECT wanted{position.x, position.y, position.x + document.Width(),
+                position.y + document.Height()};
+    if (HasTitleBar()) {
+        ::AdjustWindowRectEx(&wanted, style, FALSE, exStyle);
+    } else {
+        ::InflateRect(&wanted, inset, inset);
+    }
+
+    hwnd_ = ::CreateWindowExW(exStyle, kClipWindowClass, L"CapturaClipA2", style,
+                              wanted.left, wanted.top, wanted.right - wanted.left,
+                              wanted.bottom - wanted.top, nullptr, nullptr,
+                              instance, this);
     if (hwnd_ == nullptr) {
         return false;
     }

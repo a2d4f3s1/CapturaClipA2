@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,21 @@ struct Color {
     float b = 0.0f;
     float a = 1.0f;
 };
+
+// The colours reachable with Shift+1..8, which are also the palette's fixed top
+// row. Editable in the settings, so this is only where they start.
+using QuickColors = std::array<Color, 8>;
+
+inline constexpr QuickColors kDefaultQuickColors = {{
+    {1.00f, 0.20f, 0.20f, 1.0f},  // red
+    {0.20f, 0.85f, 0.30f, 1.0f},  // green
+    {0.25f, 0.55f, 1.00f, 1.0f},  // blue
+    {1.00f, 0.85f, 0.15f, 1.0f},  // yellow
+    {1.00f, 0.40f, 0.85f, 1.0f},  // magenta
+    {0.20f, 0.85f, 0.90f, 1.0f},  // cyan
+    {1.00f, 1.00f, 1.00f, 1.0f},  // white
+    {0.05f, 0.05f, 0.05f, 1.0f},  // black
+}};
 
 struct StrokePoint {
     float x = 0.0f;
@@ -24,11 +40,19 @@ struct StrokePoint {
     float width = 3.0f;
 };
 
+// A highlighter is only a highlighter if what is under it still reads, so its
+// strokes go down at a fixed transparency rather than a chosen one.
+inline constexpr float kHighlighterOpacity = 0.4f;
+
 // A single drawn line, in image coordinates at 100% zoom.
 struct Stroke {
     std::vector<StrokePoint> points;
     Color color;
     bool antialias = true;
+    // Laid down as a translucent wash rather than an opaque line, and as one
+    // piece: a highlighter that darkened where the stroke crossed itself would
+    // not look like a highlighter.
+    bool highlighter = false;
 
     // True when the width changes along the stroke, which means it has to be
     // drawn segment by segment rather than as a single path.

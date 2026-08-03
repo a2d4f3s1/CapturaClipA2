@@ -80,6 +80,10 @@ public:
     void SetSmoothScaling(bool smooth) noexcept { smoothScaling_ = smooth; }
     bool SmoothScaling() const noexcept { return smoothScaling_; }
 
+    // Width of the outline drawn around the picture. Zero for the window styles
+    // that have a frame of their own, or none at all.
+    void SetBorderWidth(int width) noexcept { border_ = width; }
+
 
 private:
     bool EnsureTarget() noexcept;
@@ -92,6 +96,8 @@ private:
     void DiscardDeviceResources() noexcept;
 
     void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;
+    // The line itself, without the highlighter's layer around it.
+    void DrawStrokeShape(const ccl::doc::Stroke& stroke) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
     void DrawText(const ccl::doc::TextAnnotation& text) noexcept;
     void DrawEffect(const ccl::doc::EffectAnnotation& effect) noexcept;
@@ -113,6 +119,7 @@ private:
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Bitmap>>
         effectCache_;
 
+    int border_ = kWindowBorder;
     bool smoothScaling_ = true;
     bool measuredFirstDraw_ = false;
 };

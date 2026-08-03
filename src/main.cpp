@@ -115,7 +115,7 @@ POINT CentredPosition(int width, int height) noexcept {
 }
 
 // Shows a picture from disk instead of capturing one. Returns the exit code.
-int RunWithFile(const std::wstring& path, const ccl::app::Settings& settings,
+int RunWithFile(const std::wstring& path, ccl::app::Settings& settings,
                 LONGLONG launchStart) noexcept {
     ccl::render::D2DContext context;
     if (!context.Initialize()) {

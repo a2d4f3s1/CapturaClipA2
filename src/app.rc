@@ -1,0 +1,9 @@
+#include "res/Resources.h"
+
+// The icon the shell shows for the executable, and the one the window carries
+// into the taskbar and Alt+Tab. It has to be a resource: the shell reads it
+// straight out of the file, so it cannot be supplied at runtime.
+//
+// Lowest identifier wins when the shell picks an application icon, so this is
+// the only one.
+IDI_APPICON ICON "res/app.ico"

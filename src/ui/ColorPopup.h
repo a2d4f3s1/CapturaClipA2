@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "doc/Annotation.h"
+#include "tool/ToolState.h"
 
 namespace ccl::ui {
 
@@ -31,8 +32,11 @@ public:
     // for more than preview: the click that dismisses the popup is delivered to
     // the window underneath, and without live updates that click would act on
     // the previous colour.
+    // `templates` is the fixed top row, which the user can change in the
+    // settings, so it is passed in rather than baked in here.
     std::optional<ccl::doc::Color> Show(HWND owner, POINT screen,
                                         const ccl::doc::Color& current,
+                                        const ccl::tool::QuickColors& templates,
                                         const std::vector<ccl::doc::Color>& recent,
                                         int scalePercent,
                                         ColorChanged onChange) noexcept;
@@ -70,6 +74,7 @@ private:
     float saturation_ = 0.0f;  // 0..1
     float value_ = 1.0f;       // 0..1
 
+    ccl::tool::QuickColors templates_ = ccl::tool::kDefaultQuickColors;
     std::vector<ccl::doc::Color> recent_;
     ColorChanged onChange_;
 

@@ -17,17 +17,8 @@ enum class Tool {
     Select,
 };
 
-// Quick colours, reachable with Shift+1..8.
-inline constexpr std::array<ccl::doc::Color, 8> kQuickColors = {{
-    {1.00f, 0.20f, 0.20f, 1.0f},  // red
-    {0.20f, 0.85f, 0.30f, 1.0f},  // green
-    {0.25f, 0.55f, 1.00f, 1.0f},  // blue
-    {1.00f, 0.85f, 0.15f, 1.0f},  // yellow
-    {1.00f, 0.40f, 0.85f, 1.0f},  // magenta
-    {0.20f, 0.85f, 0.90f, 1.0f},  // cyan
-    {1.00f, 1.00f, 1.00f, 1.0f},  // white
-    {0.05f, 0.05f, 0.05f, 1.0f},  // black
-}};
+using ccl::doc::kDefaultQuickColors;
+using QuickColors = ccl::doc::QuickColors;
 
 inline constexpr size_t kMaxRecentColors = 8;
 
@@ -42,6 +33,9 @@ public:
 
     Tool tool = Tool::View;
     bool antialias = true;
+    // A mode of the pen rather than a tool of its own: the same size and colour,
+    // laid down as a translucent wash instead of an opaque line.
+    bool highlighter = false;
 
     // Text styling. Held here rather than only on each annotation so that the
     // same switches serve both new text and text being re-edited: opening an
@@ -66,18 +60,18 @@ public:
     // menu; editing the file to try it out is too much friction.
     bool usePressure = true;
 
-    const ccl::doc::Color& Color() const noexcept { return color_; }
+    const ccl::doc::Color& Color() const noexcept { return penColor_; }
 
     // Sets the colour without touching the recent list. Used while a colour is
     // still being chosen, so that dragging through a gradient does not fill the
     // history with every shade passed over.
-    void SetColor(const ccl::doc::Color& color) noexcept { color_ = color; }
+    void SetColor(const ccl::doc::Color& color) noexcept { penColor_ = color; }
 
     // Commits a colour. Every deliberate choice goes through here so the recent
     // list stays accurate however it was made -- quick key, palette or
     // eyedropper.
     void UseColor(const ccl::doc::Color& color) noexcept {
-        color_ = color;
+        SetColor(color);
 
         const auto existing = std::find_if(
             recent_.begin(), recent_.end(),
@@ -95,10 +89,10 @@ public:
         return recent_;
     }
 
-    float Width() const noexcept { return width_; }
+    float Width() const noexcept { return WidthSlot(); }
 
     void SetWidth(float width) noexcept {
-        width_ = std::clamp(width, kMinWidth, kMaxWidth);
+        WidthSlot() = std::clamp(width, kMinWidth, kMaxWidth);
     }
 
     // Multiplicative so that a step feels the same at 2px and at 60px.
@@ -116,12 +110,37 @@ public:
         return width;
     }
 
-    void StepWidth(int steps) noexcept { SetWidth(SteppedWidth(width_, steps)); }
+    void StepWidth(int steps) noexcept {
+        SetWidth(SteppedWidth(WidthSlot(), steps));
+    }
+
+    // Defaults from the settings file, applied before anything has been
+    // adjusted by hand.
+    void SeedDefaults(const ccl::doc::Color& pen, float penWidth,
+                      float eraserWidth, const QuickColors& colors) noexcept {
+        penColor_ = pen;
+        penWidth_ = std::clamp(penWidth, kMinWidth, kMaxWidth);
+        eraserWidth_ = std::clamp(eraserWidth, kMinWidth, kMaxWidth);
+        quickColors = colors;
+    }
+
+    QuickColors quickColors = kDefaultQuickColors;
 
 private:
-    ccl::doc::Color color_ = kQuickColors[1];  // green
+    // The eraser keeps its own size: it is usually wanted much wider than the
+    // line it is rubbing out, and having to resize twice on every switch would
+    // be tedious.
+    float& WidthSlot() noexcept {
+        return tool == Tool::Eraser ? eraserWidth_ : penWidth_;
+    }
+    const float& WidthSlot() const noexcept {
+        return const_cast<ToolState*>(this)->WidthSlot();
+    }
+
+    ccl::doc::Color penColor_ = kDefaultQuickColors[1];  // green
     std::vector<ccl::doc::Color> recent_;
-    float width_ = 4.0f;
+    float penWidth_ = 4.0f;
+    float eraserWidth_ = 24.0f;
 };
 
 }  // namespace ccl::tool
