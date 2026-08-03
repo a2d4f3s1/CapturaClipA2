@@ -2682,9 +2682,6 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                   L"クリップボードの画像を右に連結");
     ::AppendMenuW(image, pasteState, kMenuConcatBottom,
                   L"クリップボードの画像を下に連結");
-    ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(image, plain, kMenuCaptureSelf,
-                  L"現在の状態でキャプチャ(更新)する");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(image), L"画像");
 
     const HMENU zoom = ::CreatePopupMenu();
@@ -2714,6 +2711,11 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(
         menu, plain, kMenuCopy,
         withKey(L"クリップボードにコピー", ccl::app::Command::Copy).c_str());
+    // Sits with the other ways of getting the capture out rather than with the
+    // transforms: it produces the picture as it is being shown, which is what
+    // saving and copying do too.
+    ::AppendMenuW(menu, plain, kMenuCaptureSelf,
+                  L"現在の状態でキャプチャ(更新)する");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Replacing it with a different one. Recapturing belongs here rather than
