@@ -34,6 +34,10 @@ public:
     // bounds of this buffer; an empty result means the intersection was empty.
     DibBuffer Crop(const RECT& area) const noexcept;
 
+    // An independent copy. Explicit rather than a copy constructor, because
+    // copying a whole image is not something that should happen by accident.
+    DibBuffer Clone() const noexcept;
+
 private:
     HBITMAP bitmap_ = nullptr;
     void* pixels_ = nullptr;

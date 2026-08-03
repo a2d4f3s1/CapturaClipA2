@@ -15,6 +15,7 @@
 #include "io/AutoSave.h"
 #include "io/Clipboard.h"
 #include "io/ImageCodec.h"
+#include "io/ImageOps.h"
 #include "render/D2DContext.h"
 #include "ui/ColorPopup.h"
 #include "util/Dpi.h"
@@ -153,6 +154,14 @@ enum MenuId : UINT {
     kMenuMosaic,
     kMenuBlur,
     kMenuClearSelection,
+    kMenuCrop,
+    kMenuRotateLeft,
+    kMenuRotateRight,
+    kMenuRotate180,
+    kMenuFlipHorizontal,
+    kMenuFlipVertical,
+    kMenuConcatRight,
+    kMenuConcatBottom,
     kMenuCommitText,
     kMenuEyedropper,
     kMenuColorPicker,
@@ -1892,18 +1901,10 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
                 PasteImage();
                 return;
             case 'Z':
-                if (document_ != nullptr &&
-                    history_.Undo(document_->Annotations())) {
-                    adjustingEffectIndex_ = static_cast<size_t>(-1);
-                    Draw();
-                }
+                Undo();
                 return;
             case 'Y':
-                if (document_ != nullptr &&
-                    history_.Redo(document_->Annotations())) {
-                    adjustingEffectIndex_ = static_cast<size_t>(-1);
-                    Draw();
-                }
+                Redo();
                 return;
             default:
                 break;
@@ -2369,10 +2370,31 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
     ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(selection, selectionState, kMenuCrop,
+                  L"この範囲で切り抜く");
+    ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(selection, selectionState, kMenuClearSelection,
                   L"選択を解除");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(selection),
                   L"選択範囲");
+
+    // Reshaping the picture. Every one of these burns the annotations in, so
+    // they are kept together and away from the tools.
+    const HMENU image = ::CreatePopupMenu();
+    ::AppendMenuW(image, plain, kMenuRotateLeft, L"左に 90 度回転");
+    ::AppendMenuW(image, plain, kMenuRotateRight, L"右に 90 度回転");
+    ::AppendMenuW(image, plain, kMenuRotate180, L"180 度回転");
+    ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(image, plain, kMenuFlipHorizontal, L"左右反転");
+    ::AppendMenuW(image, plain, kMenuFlipVertical, L"上下反転");
+    ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
+    const UINT pasteState =
+        ccl::io::ClipboardHasImage() ? plain : (plain | MF_GRAYED);
+    ::AppendMenuW(image, pasteState, kMenuConcatRight,
+                  L"クリップボードの画像を右に連結");
+    ::AppendMenuW(image, pasteState, kMenuConcatBottom,
+                  L"クリップボードの画像を下に連結");
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(image), L"画像");
 
     const HMENU zoom = ::CreatePopupMenu();
     for (int percent = 100; percent <= 500; percent += 100) {
@@ -2446,14 +2468,34 @@ void ClipWindow::OnCommand(int command) noexcept {
             PasteImage();
             return;
         case kMenuUndo:
-            if (document_ != nullptr && history_.Undo(document_->Annotations())) {
-                Draw();
-            }
+            Undo();
             return;
         case kMenuRedo:
-            if (document_ != nullptr && history_.Redo(document_->Annotations())) {
-                Draw();
-            }
+            Redo();
+            return;
+        case kMenuCrop:
+            CropToSelection();
+            return;
+        case kMenuRotateLeft:
+            ApplyTransform(ccl::io::RotateLeft(FlattenForTransform()));
+            return;
+        case kMenuRotateRight:
+            ApplyTransform(ccl::io::RotateRight(FlattenForTransform()));
+            return;
+        case kMenuRotate180:
+            ApplyTransform(ccl::io::Rotate180(FlattenForTransform()));
+            return;
+        case kMenuFlipHorizontal:
+            ApplyTransform(ccl::io::FlipHorizontal(FlattenForTransform()));
+            return;
+        case kMenuFlipVertical:
+            ApplyTransform(ccl::io::FlipVertical(FlattenForTransform()));
+            return;
+        case kMenuConcatRight:
+            ConcatenateClipboard(true);
+            return;
+        case kMenuConcatBottom:
+            ConcatenateClipboard(false);
             return;
         case kMenuFit:
             FitToImage();
@@ -2633,6 +2675,118 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
     ResizeToImage();
     UpdateTitle();
     Draw();
+}
+
+void ClipWindow::Undo() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    // Asked before the step is consumed: afterwards there is no way to tell
+    // whether the picture was among what came back.
+    const bool reshaped = history_.NextUndoChangesImage();
+    if (!history_.Undo(document_->Annotations(), document_->Image())) {
+        return;
+    }
+
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    hoveredTextIndex_ = static_cast<size_t>(-1);
+    if (reshaped) {
+        hasSelection_ = false;
+        renderer_.SetDocument(document_);
+        ResizeToImage();
+        ClampScroll();
+        UpdateTitle();
+    }
+    Draw();
+}
+
+void ClipWindow::Redo() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    const bool reshaped = history_.NextRedoChangesImage();
+    if (!history_.Redo(document_->Annotations(), document_->Image())) {
+        return;
+    }
+
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    hoveredTextIndex_ = static_cast<size_t>(-1);
+    if (reshaped) {
+        hasSelection_ = false;
+        renderer_.SetDocument(document_);
+        ResizeToImage();
+        ClampScroll();
+        UpdateTitle();
+    }
+    Draw();
+}
+
+ccl::capture::DibBuffer ClipWindow::FlattenForTransform() noexcept {
+    if (EditingText()) {
+        CommitText();
+    }
+    return renderer_.Flatten();
+}
+
+void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
+    if (!transformed.IsValid() || document_ == nullptr) {
+        return;
+    }
+
+    history_.RecordWithImage(document_->Annotations(), document_->Image());
+
+    document_->Image() = std::move(transformed);
+    document_->Annotations().clear();
+
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    hoveredTextIndex_ = static_cast<size_t>(-1);
+    hasSelection_ = false;
+    saved_ = false;
+
+    renderer_.SetDocument(document_);
+    ResizeToImage();
+    ClampScroll();
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::CropToSelection() noexcept {
+    if (!HasSelection()) {
+        return;
+    }
+
+    const D2D1_RECT_F area = SelectionRect();
+    const ccl::capture::DibBuffer flat = FlattenForTransform();
+    if (!flat.IsValid()) {
+        return;
+    }
+
+    const RECT bounds{static_cast<LONG>(std::lround(area.left)),
+                      static_cast<LONG>(std::lround(area.top)),
+                      static_cast<LONG>(std::lround(area.right)),
+                      static_cast<LONG>(std::lround(area.bottom))};
+    ApplyTransform(flat.Crop(bounds));
+}
+
+void ClipWindow::ConcatenateClipboard(bool toRight) noexcept {
+    ccl::capture::DibBuffer addition = ccl::io::PasteFromClipboard(hwnd_);
+    if (!addition.IsValid()) {
+        return;
+    }
+
+    const ccl::capture::DibBuffer flat = FlattenForTransform();
+    if (!flat.IsValid()) {
+        return;
+    }
+
+    // Black padding for the shorter side. Screenshots of dark interfaces are
+    // the common case, and black is what the original filled with.
+    constexpr ccl::doc::Color fill{0.0f, 0.0f, 0.0f, 1.0f};
+
+    ApplyTransform(ccl::io::Concatenate(
+        flat, addition,
+        toRight ? ccl::io::ConcatSide::Right : ccl::io::ConcatSide::Bottom,
+        fill));
 }
 
 void ClipWindow::OpenFile() noexcept {

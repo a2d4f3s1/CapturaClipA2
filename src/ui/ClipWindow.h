@@ -79,6 +79,21 @@ private:
     // one: annotations, history, zoom and the window size.
     void ReplaceImage(ccl::capture::DibBuffer image,
                       const std::wstring& title) noexcept;
+    void Undo() noexcept;
+    void Redo() noexcept;
+
+    // Commits anything still in the editor and returns the picture with every
+    // annotation drawn into it, ready to be reshaped.
+    ccl::capture::DibBuffer FlattenForTransform() noexcept;
+    // Puts a reshaped picture in place of the current one. The annotations are
+    // already part of it by then, so they are dropped -- a stroke placed
+    // against the old shape has no meaning against the new one. Undoable,
+    // including the pixels.
+    void ApplyTransform(ccl::capture::DibBuffer transformed) noexcept;
+    void CropToSelection() noexcept;
+    // Joins the image on the clipboard onto the right or the bottom.
+    void ConcatenateClipboard(bool toRight) noexcept;
+
     // Saves automatically before the capture is discarded, unless the image has
     // already been saved or Shift is held to skip it.
     void AutoSaveBeforeClosing() noexcept;

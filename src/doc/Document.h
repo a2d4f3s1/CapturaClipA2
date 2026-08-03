@@ -22,6 +22,9 @@ public:
     int Height() const noexcept { return image_.Height(); }
 
     const ccl::capture::DibBuffer& Image() const noexcept { return image_; }
+    // Mutable so that a transform, or undoing one, can swap the picture out
+    // without discarding the document around it.
+    ccl::capture::DibBuffer& Image() noexcept { return image_; }
 
     const AnnotationList& Annotations() const noexcept { return annotations_; }
     AnnotationList& Annotations() noexcept { return annotations_; }

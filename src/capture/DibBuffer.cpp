@@ -97,4 +97,15 @@ DibBuffer DibBuffer::Crop(const RECT& area) const noexcept {
     return result;
 }
 
+DibBuffer DibBuffer::Clone() const noexcept {
+    DibBuffer result;
+    if (!IsValid() || !result.Create(width_, height_)) {
+        return result;
+    }
+    // Rows are contiguous and both buffers have the same stride.
+    std::memcpy(result.pixels_, pixels_,
+                static_cast<size_t>(Stride()) * static_cast<size_t>(height_));
+    return result;
+}
+
 }  // namespace ccl::capture

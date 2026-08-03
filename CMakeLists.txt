@@ -27,6 +27,7 @@ set(APP_SOURCES
     src/io/AutoSave.cpp
     src/io/Clipboard.cpp
     src/io/ImageCodec.cpp
+    src/io/ImageOps.cpp
     src/overlay/SelectionOverlay.cpp
     src/render/D2DContext.cpp
     src/render/Renderer.cpp
@@ -47,6 +48,7 @@ set(APP_HEADERS
     src/io/AutoSave.h
     src/io/Clipboard.h
     src/io/ImageCodec.h
+    src/io/ImageOps.h
     src/overlay/SelectionOverlay.h
     src/render/D2DContext.h
     src/render/Renderer.h
