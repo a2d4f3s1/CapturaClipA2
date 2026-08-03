@@ -56,6 +56,14 @@ public:
     // image and annotations placed against the old one cannot both be kept.
     ccl::capture::DibBuffer Flatten() noexcept;
 
+    // The window's contents as they appear: zoom applied, scrolled to where it
+    // is. The size given is the area inside the border, which is excluded --
+    // otherwise the picture would grow by the border on every use. What the
+    // tools draw on top -- the brush ring, the highlight around text -- is left
+    // out as well, since none of it is part of the picture.
+    ccl::capture::DibBuffer CaptureView(
+        UINT width, UINT height, const ccl::view::ViewState& view) noexcept;
+
     // Bounding box of a piece of text in image coordinates, used to work out
     // which one was clicked. Returns false if it could not be measured.
     bool MeasureText(const ccl::doc::TextAnnotation& text,
@@ -76,6 +84,11 @@ public:
 private:
     bool EnsureTarget() noexcept;
     bool EnsureImageBitmap() noexcept;
+    // Draws the document into a buffer of the given size through `transform`,
+    // on a target that can be read back on the CPU.
+    ccl::capture::DibBuffer RenderOffscreen(UINT width, UINT height,
+                                            const D2D1_MATRIX_3X2_F& transform,
+                                            bool clearBackground) noexcept;
     void DiscardDeviceResources() noexcept;
 
     void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;

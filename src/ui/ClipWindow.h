@@ -91,6 +91,13 @@ private:
     // including the pixels.
     void ApplyTransform(ccl::capture::DibBuffer transformed) noexcept;
     void CropToSelection() noexcept;
+    // Takes the window's own contents as the new picture, at the size they are
+    // being shown. Zooming in and then doing this is how a detail is enlarged
+    // for real rather than just magnified on screen.
+    void CaptureSelf() noexcept;
+    // Closes this capture and starts the program again from the area
+    // selection, as if it had just been launched.
+    void Recapture() noexcept;
     // Joins the image on the clipboard onto the right or the bottom.
     void ConcatenateClipboard(bool toRight) noexcept;
 
@@ -180,6 +187,9 @@ private:
 
     std::wstring sourceTitle_;
     bool saved_ = false;
+    // Set when the capture is being thrown away on purpose, which suppresses
+    // the automatic save that closing would otherwise do.
+    bool discarding_ = false;
 
     bool moving_ = false;
     POINT dragOrigin_{};

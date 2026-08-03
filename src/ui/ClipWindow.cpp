@@ -162,6 +162,8 @@ enum MenuId : UINT {
     kMenuFlipVertical,
     kMenuConcatRight,
     kMenuConcatBottom,
+    kMenuCaptureSelf,
+    kMenuRecapture,
     kMenuCommitText,
     kMenuEyedropper,
     kMenuColorPicker,
@@ -2279,7 +2281,9 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     ++suppressCommitDepth_;
 
     const int command = ::TrackPopupMenu(
-        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN |
+            TPM_NOANIMATION,
         screen.x, screen.y, 0, hwnd_, nullptr);
 
     ::DestroyMenu(menu);
@@ -2394,6 +2398,9 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                   L"クリップボードの画像を右に連結");
     ::AppendMenuW(image, pasteState, kMenuConcatBottom,
                   L"クリップボードの画像を下に連結");
+    ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(image, plain, kMenuCaptureSelf,
+                  L"現在の状態でキャプチャ(更新)する");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(image), L"画像");
 
     const HMENU zoom = ::CreatePopupMenu();
@@ -2410,13 +2417,18 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(zoom), L"表示");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, plain, kMenuRecapture, L"撮り直す");
     ::AppendMenuW(menu, plain, kMenuExit, L"終了");
 
     // TPM_RETURNCMD hands the choice back directly, which avoids routing it
     // through WM_COMMAND for a menu that only exists for the duration of the
-    // call.
+    // call. TPM_NOANIMATION drops the fade: it fits a tool built around
+    // responsiveness, and it is what left a ghost of the menu on screen when
+    // recapturing, since the fade outlives the process that started it.
     const int command = ::TrackPopupMenu(
-        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN |
+            TPM_NOANIMATION,
         screen.x, screen.y, 0, hwnd_, nullptr);
 
     ::DestroyMenu(menu);
@@ -2496,6 +2508,12 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuConcatBottom:
             ConcatenateClipboard(false);
+            return;
+        case kMenuCaptureSelf:
+            CaptureSelf();
+            return;
+        case kMenuRecapture:
+            Recapture();
             return;
         case kMenuFit:
             FitToImage();
@@ -2768,6 +2786,68 @@ void ClipWindow::CropToSelection() noexcept {
     ApplyTransform(flat.Crop(bounds));
 }
 
+void ClipWindow::CaptureSelf() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    if (EditingText()) {
+        CommitText();
+    }
+
+    // The viewport, not the whole client area: the border around it belongs to
+    // the window rather than to the picture.
+    const SIZE viewport = ViewportSize();
+    if (viewport.cx <= 0 || viewport.cy <= 0) {
+        return;
+    }
+
+    ccl::capture::DibBuffer view = renderer_.CaptureView(
+        static_cast<UINT>(viewport.cx), static_cast<UINT>(viewport.cy), view_);
+    if (!view.IsValid()) {
+        return;
+    }
+
+    // The new picture already has the zoom baked into it, so the view goes back
+    // to showing it one to one.
+    view_.SetZoom(1.0f);
+    view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
+    ApplyTransform(std::move(view));
+}
+
+void ClipWindow::Recapture() noexcept {
+    wchar_t path[MAX_PATH]{};
+    if (::GetModuleFileNameW(nullptr, path, ARRAYSIZE(path)) == 0) {
+        return;
+    }
+
+    // The copy is told to wait for this process to exit before it reads the
+    // screen. Hiding the window here is not enough on its own: the menu the
+    // command came from fades out afterwards, and that fade is drawn by this
+    // process, so it is only gone once the process is.
+    ::ShowWindow(hwnd_, SW_HIDE);
+
+    wchar_t arguments[64];
+    // Long enough for the desktop to finish repainting what this window was
+    // covering, on top of waiting for the process itself to go.
+    ::swprintf_s(arguments, L"--wait=%lu --prepare=250",
+                 ::GetCurrentProcessId());
+
+    // A second copy of the program, which starts at the area selection the way
+    // it always does. One window per process, so this one simply goes away.
+    const auto result = reinterpret_cast<INT_PTR>(
+        ::ShellExecuteW(nullptr, L"open", path, arguments, nullptr,
+                        SW_SHOWNORMAL));
+    if (result <= 32) {
+        ::ShowWindow(hwnd_, SW_SHOW);
+        return;
+    }
+
+    // Starting over means throwing this capture away, so it is not written out
+    // on the way past the way an ordinary close would.
+    discarding_ = true;
+    ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+}
+
 void ClipWindow::ConcatenateClipboard(bool toRight) noexcept {
     ccl::capture::DibBuffer addition = ccl::io::PasteFromClipboard(hwnd_);
     if (!addition.IsValid()) {
@@ -2844,7 +2924,7 @@ void ClipWindow::CopyImage() noexcept {
 }
 
 void ClipWindow::AutoSaveBeforeClosing() noexcept {
-    if (saved_ || context_ == nullptr || document_ == nullptr ||
+    if (saved_ || discarding_ || context_ == nullptr || document_ == nullptr ||
         settings_ == nullptr) {
         return;
     }

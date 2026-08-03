@@ -668,8 +668,36 @@ void Renderer::Draw(const ccl::view::ViewState& view,
 }
 
 ccl::capture::DibBuffer Renderer::Flatten() noexcept {
+    if (document_ == nullptr || !document_->IsValid()) {
+        return {};
+    }
+    return RenderOffscreen(static_cast<UINT>(document_->Width()),
+                           static_cast<UINT>(document_->Height()),
+                           D2D1::Matrix3x2F::Identity(), false);
+}
+
+ccl::capture::DibBuffer Renderer::CaptureView(
+    UINT width, UINT height, const ccl::view::ViewState& view) noexcept {
+    const float zoom = view.Zoom();
+    const POINT scroll = view.Scroll();
+
+    // The window's transform without its border inset, and sized to the area
+    // inside the border. Taking the outline too would make the picture two
+    // pixels wider every time this was used.
+    return RenderOffscreen(
+        width, height,
+        D2D1::Matrix3x2F::Scale(zoom, zoom) *
+            D2D1::Matrix3x2F::Translation(-static_cast<float>(scroll.x),
+                                          -static_cast<float>(scroll.y)),
+        true);
+}
+
+ccl::capture::DibBuffer Renderer::RenderOffscreen(
+    UINT width, UINT height, const D2D1_MATRIX_3X2_F& transform,
+    bool clearBackground) noexcept {
     ccl::capture::DibBuffer result;
-    if (context_ == nullptr || document_ == nullptr || !document_->IsValid()) {
+    if (context_ == nullptr || document_ == nullptr || !document_->IsValid() ||
+        width == 0 || height == 0) {
         return result;
     }
 
@@ -677,9 +705,6 @@ ccl::capture::DibBuffer Renderer::Flatten() noexcept {
     if (imaging == nullptr || context_->Factory() == nullptr) {
         return result;
     }
-
-    const auto width = static_cast<UINT>(document_->Width());
-    const auto height = static_cast<UINT>(document_->Height());
 
     Microsoft::WRL::ComPtr<IWICBitmap> surface;
     if (FAILED(imaging->CreateBitmap(width, height,
@@ -723,12 +748,25 @@ ccl::capture::DibBuffer Renderer::Flatten() noexcept {
 
     if (ok) {
         target_->BeginDraw();
-        target_->SetTransform(D2D1::Matrix3x2F::Identity());
-        target_->DrawBitmap(
-            image_.Get(),
-            D2D1::RectF(0.0f, 0.0f, static_cast<float>(width),
-                        static_cast<float>(height)),
-            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        if (clearBackground) {
+            // Whatever the picture does not cover shows the window's backing
+            // colour, the same as it does on screen.
+            target_->Clear(D2D1::ColorF(0.29f, 0.29f, 0.29f));
+        }
+        target_->SetTransform(transform);
+
+        const D2D1_SIZE_F size = image_->GetSize();
+        // Nearest neighbour at 1:1 keeps the pixels exact; anywhere the view is
+        // zoomed the window's own interpolation setting is what to match.
+        const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
+            smoothScaling_ ? D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+                           : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+        target_->DrawBitmap(image_.Get(),
+                            D2D1::RectF(0.0f, 0.0f, size.width, size.height),
+                            1.0f,
+                            clearBackground
+                                ? interpolation
+                                : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 
         for (const auto& annotation : document_->Annotations()) {
             switch (annotation.kind) {
@@ -744,6 +782,7 @@ ccl::capture::DibBuffer Renderer::Flatten() noexcept {
             }
         }
 
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
         ok = SUCCEEDED(target_->EndDraw());
     }
 

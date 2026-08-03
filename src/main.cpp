@@ -2,6 +2,8 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cwchar>
 #include <string>
 
 #include "app/Settings.h"
@@ -22,6 +24,55 @@ void ReportFatal(const wchar_t* what) noexcept {
 
 bool HasFlag(const wchar_t* commandLine, const wchar_t* flag) noexcept {
     return commandLine != nullptr && ::wcsstr(commandLine, flag) != nullptr;
+}
+
+// Milliseconds to wait before reading the screen, given as --prepare=<ms>.
+// Used when the program relaunches itself: the window it just closed is still
+// on screen until everything behind it has repainted.
+UINT PreparationDelay(UINT configured) noexcept {
+    constexpr wchar_t kSwitch[] = L"--prepare=";
+    const wchar_t* found = ::wcsstr(::GetCommandLineW(), kSwitch);
+    if (found == nullptr) {
+        return configured;
+    }
+    return static_cast<UINT>(
+        ::wcstoul(found + ARRAYSIZE(kSwitch) - 1, nullptr, 10));
+}
+
+// Waits for the process that started this one to exit, given as --wait=<pid>.
+//
+// Used when the program relaunches itself to capture again. Hiding the old
+// window is not enough: the menu the command came from fades out over the
+// screen, and that fade belongs to the old process, so nothing short of it
+// exiting will clear it. Once it is gone, whatever it covered still has to
+// repaint before the screen is worth reading.
+void WaitForCaller() noexcept {
+    constexpr wchar_t kSwitch[] = L"--wait=";
+    const wchar_t* found = ::wcsstr(::GetCommandLineW(), kSwitch);
+    if (found == nullptr) {
+        return;
+    }
+
+    const auto id = static_cast<DWORD>(
+        ::wcstoul(found + ARRAYSIZE(kSwitch) - 1, nullptr, 10));
+    if (id == 0) {
+        return;
+    }
+
+    const LONGLONG waitStart = ccl::timing::Now();
+    const HANDLE process = ::OpenProcess(SYNCHRONIZE, FALSE, id);
+    if (process != nullptr) {
+        // Bounded, so a process that will not die cannot hang this one.
+        ::WaitForSingleObject(process, 2000);
+        ::CloseHandle(process);
+    }
+    ccl::timing::Report(process != nullptr ? L"caller exit wait"
+                                           : L"caller already gone",
+                        waitStart);
+
+    // A null window is the documented way to ask every window on the desktop to
+    // repaint, which is what has to happen before the screen is worth reading.
+    ::InvalidateRect(nullptr, nullptr, TRUE);
 }
 
 // First argument that is not a switch, which is how a file dropped on the
@@ -116,6 +167,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
         return RunWithFile(file, settings, launchStart);
     }
 
+    // Before the window list, so that a capture being replaced is not among the
+    // windows that a click could pick.
+    WaitForCaller();
+
     // Recorded before the overlay covers the screen, so that clicking can pick
     // the window that was actually under the cursor.
     ccl::capture::WindowList windows;
@@ -123,7 +178,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     watch.Lap(L"  window list");
 
     ccl::capture::ScreenSnapshot snapshot;
-    if (!snapshot.Take(settings.preparationMs)) {
+    if (!snapshot.Take(PreparationDelay(settings.preparationMs))) {
         ReportFatal(L"Failed to capture the screen.");
         return 1;
     }
