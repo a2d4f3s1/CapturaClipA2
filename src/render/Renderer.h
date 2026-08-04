@@ -181,6 +181,10 @@ private:
     // took", which is the distinction that says whether caching would help.
     ccl::timing::FrameStats pictureStats_;
     ccl::timing::FrameStats annotationStats_;
+    // Carrying out the queued drawing, and putting the finished frame on the
+    // screen. Split because the two want opposite answers: less to draw, or a
+    // different way of handing it over.
+    ccl::timing::FrameStats rasterStats_;
     ccl::timing::FrameStats presentStats_;
 };
 

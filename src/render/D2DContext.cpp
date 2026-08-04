@@ -1,6 +1,23 @@
 #include "render/D2DContext.h"
 
+#include <cstdio>
+
+#include "util/Timing.h"
+
 namespace ccl::render {
+namespace {
+
+D2D1_RENDER_TARGET_PROPERTIES TargetProperties(
+    D2D1_RENDER_TARGET_TYPE type) noexcept {
+    return D2D1::RenderTargetProperties(
+        type,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        // Force 96 DPI: the process works in physical pixels, so letting D2D
+        // apply its own DPI scaling would double-scale the capture.
+        96.0f, 96.0f);
+}
+
+}  // namespace
 
 D2DContext::~D2DContext() {
     imaging_.Reset();
@@ -48,20 +65,36 @@ Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> D2DContext::CreateHwndTarget(
         return target;
     }
 
-    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-        // Force 96 DPI: the process works in physical pixels, so letting D2D
-        // apply its own DPI scaling would double-scale the capture.
-        96.0f, 96.0f);
-
     const D2D1_HWND_RENDER_TARGET_PROPERTIES windowProperties =
         D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(width, height),
                                          D2D1_PRESENT_OPTIONS_IMMEDIATELY);
 
-    if (FAILED(factory_->CreateHwndRenderTarget(properties, windowProperties,
-                                                &target))) {
+    // Asked for outright rather than left to DEFAULT, which settles for
+    // software when the GPU is not to be had and says nothing about it. The
+    // difference is between a frame costing a fraction of a millisecond and
+    // costing tens of them, so it is worth knowing which one this is.
+    const wchar_t* kind = L"hardware";
+    if (FAILED(factory_->CreateHwndRenderTarget(
+            TargetProperties(D2D1_RENDER_TARGET_TYPE_HARDWARE),
+            windowProperties, &target))) {
+        kind = L"software";
         target.Reset();
+        if (FAILED(factory_->CreateHwndRenderTarget(
+                TargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT),
+                windowProperties, &target))) {
+            target.Reset();
+            return target;
+        }
+    }
+
+    if (ccl::timing::g_enabled) {
+        // The size goes in the line as well: what it costs to put a frame on
+        // the screen follows the number of pixels in it, so the two numbers
+        // only mean anything together.
+        wchar_t line[128];
+        ::swprintf_s(line, L"[timing] render target          %-8s %ux%u\n", kind,
+                     width, height);
+        ccl::timing::Write(line);
     }
     return target;
 }

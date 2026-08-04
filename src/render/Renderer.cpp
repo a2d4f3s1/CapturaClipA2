@@ -50,6 +50,7 @@ void Renderer::InvalidateEffect(unsigned int id) noexcept {
 void Renderer::ReportStats() const noexcept {
     ccl::timing::ReportFrames(L"  picture", pictureStats_);
     ccl::timing::ReportFrames(L"  annotations", annotationStats_);
+    ccl::timing::ReportFrames(L"  raster", rasterStats_);
     ccl::timing::ReportFrames(L"  present", presentStats_);
 }
 
@@ -989,8 +990,16 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    // Direct2D queues the drawing above and does it here, so this covers the
-    // work itself as well as getting the result onto the screen.
+    // Direct2D queues the drawing above. Flush carries it out, so that what
+    // EndDraw costs after it is the handing over rather than the drawing.
+    // Only done while measuring: breaking the batch up is not free, and the
+    // split is a question about the program rather than a part of it.
+    const LONGLONG rasterStart = ccl::timing::Mark();
+    if (ccl::timing::g_enabled) {
+        target_->Flush();
+    }
+    ccl::timing::AddSince(rasterStats_, rasterStart);
+
     const LONGLONG presentStart = ccl::timing::Mark();
     const HRESULT presented = target_->EndDraw();
     ccl::timing::AddSince(presentStats_, presentStart);
