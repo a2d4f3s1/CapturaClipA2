@@ -906,7 +906,10 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     // rather than guessed at beforehand.
     adjustingEffectIndex_ = document_->Annotations().size() - 1;
 
-    hasSelection_ = false;
+    // The selection stays. Obscuring an area is rarely the end of what is
+    // wanted there -- a mosaic gets swapped for a blur, or a second pass goes
+    // on top -- and redrawing the same rectangle each time to find out is
+    // work the program can save.
     UpdateTitle();
     Draw();
 }
@@ -2368,7 +2371,7 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case '3':
         case '4':
         case '5': {
-            const ZoomAnchor anchor = CenterZoomAnchor();
+            const ZoomAnchor anchor = KeyZoomAnchor();
             view_.SetZoom(static_cast<float>(key - '0'));
             ApplyZoom(&anchor);
             return;
@@ -2399,7 +2402,49 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
     }
 }
 
+ClipWindow::ZoomAnchor ClipWindow::AnchorAt(POINT client) const noexcept {
+    ZoomAnchor anchor;
+    anchor.image = ToImage(client);
+    anchor.screen = client;
+    ::ClientToScreen(hwnd_, &anchor.screen);
+    return anchor;
+}
+
+ClipWindow::ZoomAnchor ClipWindow::CornerZoomAnchor() const noexcept {
+    // The corner of the visible area. Holding it means the picture grows away
+    // from where it already is, and the window never moves.
+    const int border = BorderWidth();
+    return AnchorAt(POINT{border, border});
+}
+
+ClipWindow::ZoomAnchor ClipWindow::CenterZoomAnchor() const noexcept {
+    const SIZE viewport = ViewportSize();
+    const int border = BorderWidth();
+    return AnchorAt(POINT{border + static_cast<int>(viewport.cx / 2),
+                          border + static_cast<int>(viewport.cy / 2)});
+}
+
+// The anchor a zoom that came from the keyboard or the menu uses. There is no
+// pointer behind those, so the cursor setting has to mean something else for
+// them; the middle of the view is the nearest thing to "where I am looking".
+ClipWindow::ZoomAnchor ClipWindow::KeyZoomAnchor() const noexcept {
+    if (settings_ != nullptr &&
+        settings_->zoomAnchor == ccl::app::ZoomAnchor::TopLeft) {
+        return CornerZoomAnchor();
+    }
+    return CenterZoomAnchor();
+}
+
 ClipWindow::ZoomAnchor ClipWindow::WheelZoomAnchor(POINT client) noexcept {
+    if (settings_ != nullptr &&
+        settings_->zoomAnchor != ccl::app::ZoomAnchor::Cursor) {
+        // Not following the pointer, so there is no gesture to hold on to.
+        zoomAnchorValid_ = false;
+        return settings_->zoomAnchor == ccl::app::ZoomAnchor::TopLeft
+                   ? CornerZoomAnchor()
+                   : CenterZoomAnchor();
+    }
+
     const ULONGLONG now = ::GetTickCount64();
     if (!zoomAnchorValid_ || now - lastZoomTick_ > kZoomGestureGapMs) {
         // The wheel reaches the window that has the focus, which is not always
@@ -2412,26 +2457,11 @@ ClipWindow::ZoomAnchor ClipWindow::WheelZoomAnchor(POINT client) noexcept {
             std::clamp(client.x, area.left, std::max(area.left, area.right - 1)),
             std::clamp(client.y, area.top, std::max(area.top, area.bottom - 1))};
 
-        zoomAnchor_.image = ToImage(inside);
-        zoomAnchor_.screen = inside;
-        ::ClientToScreen(hwnd_, &zoomAnchor_.screen);
+        zoomAnchor_ = AnchorAt(inside);
         zoomAnchorValid_ = true;
     }
     lastZoomTick_ = now;
     return zoomAnchor_;
-}
-
-ClipWindow::ZoomAnchor ClipWindow::CenterZoomAnchor() const noexcept {
-    const SIZE viewport = ViewportSize();
-    const int border = BorderWidth();
-    POINT client{border + static_cast<int>(viewport.cx / 2),
-                 border + static_cast<int>(viewport.cy / 2)};
-
-    ZoomAnchor anchor;
-    anchor.image = ToImage(client);
-    anchor.screen = client;
-    ::ClientToScreen(hwnd_, &anchor.screen);
-    return anchor;
 }
 
 void ClipWindow::ApplyZoom(const ZoomAnchor* anchor) noexcept {
@@ -2685,6 +2715,13 @@ bool ClipWindow::PickColorAt(POINT client) noexcept {
 
 void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     adjustingEffectIndex_ = static_cast<size_t>(-1);
+
+    // A selection belongs to the tool that draws it. Left behind, it would sit
+    // there through a session of drawing and then act on whatever the next
+    // command was, long after there was any reason to expect it.
+    if (tool != ccl::tool::Tool::Select) {
+        hasSelection_ = false;
+    }
 
     if (tool != ccl::tool::Tool::Text) {
         // Leaving text entry keeps what was typed and returns the keyboard to
@@ -3138,7 +3175,7 @@ void ClipWindow::OnCommand(int command) noexcept {
     }
 
     if (id >= kMenuZoomBase) {
-        const ZoomAnchor anchor = CenterZoomAnchor();
+        const ZoomAnchor anchor = KeyZoomAnchor();
         view_.SetZoom(static_cast<float>(id - kMenuZoomBase) / 100.0f);
         ApplyZoom(&anchor);
         return;

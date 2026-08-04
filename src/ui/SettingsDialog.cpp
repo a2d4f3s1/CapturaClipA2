@@ -144,6 +144,7 @@ enum ControlId : UINT {
     kIdTitleFormat,
     kIdSmoothScaling,
     kIdZoomStep,
+    kIdZoomAnchor,
     kIdPaletteScale,
 
     kIdPenWidth,
@@ -387,16 +388,33 @@ HWND AddCheck(Dialog& dialog, const wchar_t* label, UINT id,
     return control;
 }
 
-// Explanatory text under a control. Given a real height per line, because
-// squeezing two lines into one row is what made the first version unreadable.
-void AddNote(Dialog& dialog, const wchar_t* text, bool indent = true,
-             int lines = 1) noexcept {
+// Explanatory text under a control.
+//
+// The height is measured rather than counted in lines. Counting looks right
+// until a note is one character too long for its column, at which point it
+// wraps and quietly loses its last line -- and how many characters fit depends
+// on the font and the monitor, so it cannot be settled by reading the source.
+void AddNote(Dialog& dialog, const wchar_t* text, bool indent = true) noexcept {
     const int left =
         Scaled(dialog, kMargin + kPagePad + (indent ? kLabelWidth : 0));
-    const int height = Scaled(dialog, kNoteHeight) * lines;
+    const int width = dialog.width - left - Scaled(dialog, kMargin + kPagePad);
 
-    Add(dialog, L"STATIC", text, SS_LEFT, left, dialog.cursorY,
-        dialog.width - left - Scaled(dialog, kMargin + kPagePad), height, 0);
+    int height = Scaled(dialog, kNoteHeight);
+    if (const HDC screen = ::GetDC(nullptr); screen != nullptr) {
+        const HGDIOBJ previous = ::SelectObject(screen, dialog.font);
+        RECT bounds{0, 0, width, 0};
+        ::DrawTextW(screen, text, -1, &bounds,
+                    DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        ::SelectObject(screen, previous);
+        ::ReleaseDC(nullptr, screen);
+        // A couple of pixels over, so a descender on the last line is not
+        // shaved off by the edge of the control.
+        height = (std::max)(height,
+                            static_cast<int>(bounds.bottom - bounds.top) + 2);
+    }
+
+    Add(dialog, L"STATIC", text, SS_LEFT, left, dialog.cursorY, width, height,
+        0);
     dialog.cursorY += height + Scaled(dialog, kRowGap);
 }
 
@@ -420,12 +438,23 @@ void BuildGeneral(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"%y 年  %m 月  %d 日  %h 時  %n 分  %s 秒\n"
             L"%t 取得元のウィンドウ名   %% パーセント記号",
-            true, 2);
+            true);
     AddCheck(dialog,
              L"拡大縮小をなめらかにする：切ると 1 ピクセルずつそのまま拡大します",
              kIdSmoothScaling);
     AddRow(dialog, L"ホイール 1 段の拡大率 (%)", L"EDIT",
            ES_AUTOHSCROLL | WS_BORDER, kIdZoomStep, kNarrowField);
+
+    const HWND anchor =
+        AddRow(dialog, L"拡大縮小で動かさない所", L"COMBOBOX",
+               CBS_DROPDOWNLIST | WS_VSCROLL, kIdZoomAnchor, kFieldWidth, 5);
+    ComboBox_AddString(anchor, L"左上：ウィンドウは動きません");
+    ComboBox_AddString(anchor, L"カーソルの位置：狙った所に寄れます");
+    ComboBox_AddString(anchor, L"画面の中央");
+    AddNote(dialog,
+            L"カーソルの位置を選ぶと、それを保つためにウィンドウ自体が動き、\n"
+            L"画面の外へはみ出すことがあります。",
+            true);
     AddRow(dialog, L"パレットの大きさ (%)", L"EDIT",
            ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdPaletteScale, kNarrowField);
     EndPage(dialog);
@@ -551,7 +580,7 @@ void BuildWindow(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"「しばらく隠す」を押すと、この時間だけ消えて自動で戻ります。\n"
             L"隠れている間はキーが届かないため、時間で戻るようにしています。",
-            true, 2);
+            true);
     EndPage(dialog);
 }
 
@@ -704,7 +733,7 @@ void BuildAssignments(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"行を選んで「割り当てを変更」を押します。キーの行はそのキーを"
             L"押し、\nマウスの行は候補から選びます。",
-            false, 2);
+            false);
 
     const int left = Scaled(dialog, kMargin + kPagePad);
     const int listWidth = dialog.width - 2 * left;
@@ -759,13 +788,13 @@ void BuildAssignments(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"拡大・縮小に Shift を足すと、1 段の変化が小さくなります。\n"
             L"割り当てにない修飾キーを押している間は、何も起きません。",
-            false, 2);
+            false);
     AddNote(dialog,
             L"サイズ変更の [ ]、ズームの 1〜5、色の Shift+1〜8、"
             L"スクロールのスペースと矢印は、\n"
             L"押している間や描いている最中で意味が変わるため、"
             L"割り当ては変えられません。",
-            false, 2);
+            false);
     EndPage(dialog);
 }
 
@@ -953,6 +982,8 @@ void Populate(Dialog& dialog) noexcept {
     Button_SetCheck(dialog.Field(kIdSmoothScaling),
                     values.smoothScaling ? BST_CHECKED : BST_UNCHECKED);
     SetNumber(dialog.Field(kIdZoomStep), values.zoomStepPercent);
+    ComboBox_SetCurSel(dialog.Field(kIdZoomAnchor),
+                       static_cast<int>(values.zoomAnchor));
     SetNumber(dialog.Field(kIdPaletteScale), values.paletteScalePercent);
 
     SetNumber(dialog.Field(kIdPenWidth), values.penWidth);
@@ -1014,6 +1045,11 @@ void Collect(Dialog& dialog) noexcept {
         Button_GetCheck(dialog.Field(kIdSmoothScaling)) == BST_CHECKED;
     values.zoomStepPercent =
         ReadFloat(dialog.Field(kIdZoomStep), values.zoomStepPercent);
+    switch (ComboBox_GetCurSel(dialog.Field(kIdZoomAnchor))) {
+        case 1: values.zoomAnchor = ccl::app::ZoomAnchor::Cursor; break;
+        case 2: values.zoomAnchor = ccl::app::ZoomAnchor::Center; break;
+        default: values.zoomAnchor = ccl::app::ZoomAnchor::TopLeft; break;
+    }
     values.paletteScalePercent =
         ReadInt(dialog.Field(kIdPaletteScale), values.paletteScalePercent);
 

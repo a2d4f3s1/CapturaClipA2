@@ -17,6 +17,17 @@ enum class ImageFormat {
     Bmp,
 };
 
+// What stays still while the zoom changes.
+//
+// Not a matter of one being right: holding the corner keeps the window where
+// it is and is the quietest, while holding the pointer is what lets you aim at
+// a detail and go in on it, at the cost of the window moving to make it true.
+enum class ZoomAnchor {
+    TopLeft,  // the corner of the visible area, so nothing moves but the size
+    Cursor,   // the pixel under the pointer, for going in on something
+    Center,   // the middle of the visible area
+};
+
 // How much of a window frame the capture gets. Applied when the window is
 // created, so a change takes effect on the next capture rather than this one.
 enum class WindowFrame {
@@ -75,6 +86,7 @@ public:
     // Size of the colour palette popup, as a percentage of its normal size.
     int paletteScalePercent = 100;
     WindowFrame windowFrame = WindowFrame::NoTitleBar;
+    ZoomAnchor zoomAnchor = ZoomAnchor::TopLeft;
 
     // Saving
     ImageFormat defaultFormat = ImageFormat::Png;

@@ -91,15 +91,20 @@ private:
     // thing being kept, and the anchored pixel is under the pointer, so some
     // of the window is always still in view.
     void ApplyZoom(const ZoomAnchor* anchor = nullptr) noexcept;
-    // The anchor for a turn of the wheel. A run of notches is one gesture and
-    // keeps the point it started on: taking the pointer's position afresh
+    // An anchor holding whatever is at that point of the window.
+    ZoomAnchor AnchorAt(POINT client) const noexcept;
+    // The corner of the visible area, and its middle.
+    ZoomAnchor CornerZoomAnchor() const noexcept;
+    ZoomAnchor CenterZoomAnchor() const noexcept;
+    // The anchor for a turn of the wheel, which is the only zoom with a
+    // pointer behind it. Following the pointer, a run of notches is one
+    // gesture and keeps the point it started on: reading the position afresh
     // every notch would let the anchor creep with the smallest movement of
     // the hand, which is the one thing zooming to a point has to not do.
     ZoomAnchor WheelZoomAnchor(POINT client) noexcept;
-    // The anchor for the keyboard presets and the menu, which have no pointer
-    // to work from: the middle of what is on screen. Without one the view
-    // drifts towards the top left of the picture as the zoom goes up.
-    ZoomAnchor CenterZoomAnchor() const noexcept;
+    // The anchor for the keyboard presets and the menu. They have no pointer,
+    // so the cursor setting cannot apply to them and they hold the middle.
+    ZoomAnchor KeyZoomAnchor() const noexcept;
     void ApplyOpacity() noexcept;
     void FitToImage() noexcept;
     void UpdateTitle() noexcept;

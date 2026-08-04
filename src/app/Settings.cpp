@@ -89,6 +89,22 @@ WindowFrame ParseFrame(const std::wstring& name, WindowFrame fallback) noexcept 
     return fallback;
 }
 
+const wchar_t* AnchorName(ZoomAnchor anchor) noexcept {
+    switch (anchor) {
+        case ZoomAnchor::Cursor: return L"Cursor";
+        case ZoomAnchor::Center: return L"Center";
+        case ZoomAnchor::TopLeft:
+        default: return L"TopLeft";
+    }
+}
+
+ZoomAnchor ParseAnchor(const std::wstring& name, ZoomAnchor fallback) noexcept {
+    if (::_wcsicmp(name.c_str(), L"TopLeft") == 0) return ZoomAnchor::TopLeft;
+    if (::_wcsicmp(name.c_str(), L"Cursor") == 0) return ZoomAnchor::Cursor;
+    if (::_wcsicmp(name.c_str(), L"Center") == 0) return ZoomAnchor::Center;
+    return fallback;
+}
+
 const wchar_t* FormatName(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::Jpeg: return L"JPEG";
@@ -181,6 +197,9 @@ void Settings::Load() noexcept {
     windowFrame = ParseFrame(
         ReadString(L"Appearance", L"WindowFrame", FrameName(windowFrame), path_),
         windowFrame);
+    zoomAnchor = ParseAnchor(
+        ReadString(L"Appearance", L"ZoomAnchor", AnchorName(zoomAnchor), path_),
+        zoomAnchor);
     hideDurationMs = ::GetPrivateProfileIntW(L"Appearance", L"HideDurationMs",
                                              static_cast<INT>(hideDurationMs),
                                              path_.c_str());
@@ -322,6 +341,15 @@ void Settings::Save() const noexcept {
                L"; Without a title bar there is nothing to drag, so the middle\n"
                L"; button moves the window instead.\n"
                L"WindowFrame=%s\n"
+               L"; What stays still while the zoom changes.\n"
+               L";   TopLeft  the corner of the view; the window does not move\n"
+               L";   Cursor   the pixel under the pointer, so you can aim at a\n"
+               L";            detail and go in on it. The window moves to keep\n"
+               L";            that true, and may end up over the screen edge\n"
+               L";   Center   the middle of the view\n"
+               L"; The keyboard and menu zooms have no pointer to work from, so\n"
+               L"; they use the middle of the view when this is Cursor.\n"
+               L"ZoomAnchor=%s\n"
                L"; How long the window stays hidden, in milliseconds. It comes\n"
                L"; back by itself: while hidden it has no keyboard focus, so\n"
                L"; nothing could tell it to.\n"
@@ -376,7 +404,8 @@ void Settings::Save() const noexcept {
                ColorText(quickColors[6]).c_str(),
                ColorText(quickColors[7]).c_str(), titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
-               FrameName(windowFrame), hideDurationMs, FormatName(defaultFormat),
+               FrameName(windowFrame), AnchorName(zoomAnchor), hideDurationMs,
+               FormatName(defaultFormat),
                jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays,
                shortcuts.ToFileText().c_str(), mouse.ToFileText().c_str());
 
