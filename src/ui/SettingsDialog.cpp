@@ -29,9 +29,111 @@ enum Page : int {
     kPageText,
     kPageSaving,
     kPageWindow,
-    kPageShortcuts,
+    kPageAssignments,
     kPageCount,
 };
+
+// Headings the assignment list is divided under. Keys and mouse gestures share
+// the list, because "how do I scroll" is one question whether the answer turns
+// out to be a key or a drag, and splitting them made it two places to look.
+enum Group : int {
+    kGroupEdit,
+    kGroupFile,
+    kGroupTool,
+    kGroupDraw,
+    kGroupView,
+    kGroupWindow,
+    kGroupCount,
+};
+
+const wchar_t* const kGroupNames[kGroupCount] = {
+    L"編集", L"ファイル", L"ツール", L"描く", L"表示", L"ウィンドウ",
+};
+
+// What a row of the list is assigned from. The three are separate spaces: a
+// key can never clash with a drag, and a drag can never clash with a turn of
+// the wheel.
+enum class RowKind {
+    Key,
+    Drag,
+    Wheel,
+};
+
+struct AssignRow {
+    RowKind kind;
+    int command;  // Command or MouseCommand, according to kind
+    int group;
+};
+
+constexpr AssignRow kAssignRows[] = {
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Undo), kGroupEdit},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Redo), kGroupEdit},
+
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Open), kGroupFile},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Save), kGroupFile},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Copy), kGroupFile},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Paste), kGroupFile},
+
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolView), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolPen), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolEraser), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolText), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolSelect), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Eyedropper), kGroupTool},
+
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ColorPicker), kGroupDraw},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Highlighter), kGroupDraw},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Antialias), kGroupDraw},
+
+    {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::Scroll), kGroupView},
+    {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Zoom), kGroupView},
+    {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Opacity),
+     kGroupView},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::FitToImage), kGroupView},
+
+    {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::MoveWindow),
+     kGroupWindow},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::HideWindow),
+     kGroupWindow},
+};
+
+constexpr int kAssignRowCount = static_cast<int>(ARRAYSIZE(kAssignRows));
+
+// A command missing from the table above would simply not appear in the list,
+// and nothing else would go wrong -- which is exactly how it would go
+// unnoticed until someone went looking for the key it was given.
+constexpr bool EveryCommandListed() noexcept {
+    for (int i = 0; i < static_cast<int>(ccl::app::Command::Count); ++i) {
+        int seen = 0;
+        for (const AssignRow& row : kAssignRows) {
+            if (row.kind == RowKind::Key && row.command == i) {
+                ++seen;
+            }
+        }
+        if (seen != 1) {
+            return false;
+        }
+    }
+    for (int i = 0; i < static_cast<int>(ccl::app::MouseCommand::Count); ++i) {
+        int seen = 0;
+        for (const AssignRow& row : kAssignRows) {
+            if (row.kind != RowKind::Key && row.command == i) {
+                ++seen;
+            }
+        }
+        if (seen != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(EveryCommandListed(),
+              "every command belongs on exactly one row of the assignment list");
+
+// Background for a row whose assignment is also on something else. Light
+// enough that the black text on it stays readable.
+constexpr COLORREF kConflictColor = RGB(255, 205, 205);
 
 // Control identifiers. Only the ones read back or acted on need a name; labels
 // and notes are placed and forgotten.
@@ -65,10 +167,12 @@ enum ControlId : UINT {
     kIdFrameThin,
     kIdFrameNoTitle,
     kIdFrameNoFrame,
+    kIdHideDuration,
 
-    kIdShortcutList,
-    kIdAssignKey,
-    kIdClearKey,
+    kIdAssignList,
+    kIdAssignChange,
+    kIdAssignClear,
+    kIdAssignWarning,
 
     kIdReset,
 
@@ -121,6 +225,12 @@ struct Dialog {
     // Live colour values for the swatch buttons, which draw themselves.
     ccl::doc::Color penColor;
     ccl::doc::QuickColors quickColors{};
+
+    // Which rows share their assignment with another row. Worked out when the
+    // list is filled rather than while it is being painted, since the painting
+    // happens once per row per repaint.
+    bool conflicting[kAssignRowCount]{};
+    bool anyConflict = false;
 
     HWND Field(UINT id) const noexcept {
         return ::GetDlgItem(window, static_cast<int>(id));
@@ -433,6 +543,15 @@ void BuildWindow(Dialog& dialog) noexcept {
     AddCheck(dialog,
              L"タイトルバー・枠なし：背景に溶けこんで見失うことがあります",
              kIdFrameNoFrame, BS_AUTORADIOBUTTON);
+
+    dialog.cursorY += Scaled(dialog, kRowGap);
+    AddRow(dialog, L"隠れている時間 (ミリ秒)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdHideDuration,
+           kNarrowField);
+    AddNote(dialog,
+            L"「しばらく隠す」を押すと、この時間だけ消えて自動で戻ります。\n"
+            L"隠れている間はキーが届かないため、時間で戻るようにしています。",
+            true, 2);
     EndPage(dialog);
 }
 
@@ -580,44 +699,67 @@ std::optional<ccl::app::Binding> KeyCatcher::Run(HWND owner, HFONT font,
     return state.binding;
 }
 
-void BuildShortcuts(Dialog& dialog) noexcept {
-    BeginPage(dialog, kPageShortcuts);
+void BuildAssignments(Dialog& dialog) noexcept {
+    BeginPage(dialog, kPageAssignments);
     AddNote(dialog,
-            L"行を選んで「キーを設定」を押し、割り当てたいキーを押します。",
-            false);
+            L"行を選んで「割り当てを変更」を押します。キーの行はそのキーを"
+            L"押し、\nマウスの行は候補から選びます。",
+            false, 2);
 
     const int left = Scaled(dialog, kMargin + kPagePad);
     const int listWidth = dialog.width - 2 * left;
-    const int listHeight = Scaled(dialog, 260);
+    const int listHeight = Scaled(dialog, 300);
 
     const HWND list = Add(dialog, WC_LISTVIEWW, L"",
                           LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
                               WS_BORDER | WS_TABSTOP,
                           left, dialog.cursorY, listWidth, listHeight,
-                          kIdShortcutList);
+                          kIdAssignList);
     ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
 
     LVCOLUMNW column{};
     column.mask = LVCF_TEXT | LVCF_WIDTH;
-    column.cx = listWidth * 2 / 3;
+    column.cx = listWidth * 3 / 5;
     column.pszText = const_cast<wchar_t*>(L"操作");
     ListView_InsertColumn(list, 0, &column);
-    column.cx = listWidth / 3 - Scaled(dialog, 20);
-    column.pszText = const_cast<wchar_t*>(L"キー");
+    column.cx = listWidth * 2 / 5 - Scaled(dialog, 20);
+    column.pszText = const_cast<wchar_t*>(L"割り当て");
     ListView_InsertColumn(list, 1, &column);
+
+    // Grouped rather than sorted flat: the list is long enough that finding
+    // "the one that scrolls" by reading every row is the slow way round.
+    ListView_EnableGroupView(list, TRUE);
+    for (int i = 0; i < kGroupCount; ++i) {
+        LVGROUP group{};
+        group.cbSize = sizeof(group);
+        group.mask = LVGF_HEADER | LVGF_GROUPID;
+        group.pszHeader = const_cast<wchar_t*>(kGroupNames[i]);
+        group.iGroupId = i;
+        ListView_InsertGroup(list, -1, &group);
+    }
 
     dialog.cursorY += listHeight + Scaled(dialog, kRowGap);
 
     const int buttonWidth = Scaled(dialog, kButtonWidth);
     const int buttonHeight = Scaled(dialog, kButtonHeight);
     const int gap = Scaled(dialog, kRowGap);
-    Add(dialog, L"BUTTON", L"キーを設定", BS_PUSHBUTTON | WS_TABSTOP, left,
-        dialog.cursorY, buttonWidth, buttonHeight, kIdAssignKey);
+    Add(dialog, L"BUTTON", L"割り当てを変更", BS_PUSHBUTTON | WS_TABSTOP, left,
+        dialog.cursorY, buttonWidth + gap * 2, buttonHeight, kIdAssignChange);
     Add(dialog, L"BUTTON", L"解除", BS_PUSHBUTTON | WS_TABSTOP,
-        left + buttonWidth + gap, dialog.cursorY, buttonWidth, buttonHeight,
-        kIdClearKey);
+        left + buttonWidth + gap * 3, dialog.cursorY, buttonWidth, buttonHeight,
+        kIdAssignClear);
     dialog.cursorY += buttonHeight + gap;
 
+    // Sits empty until something clashes, so the page does not carry a warning
+    // about a state it is not in.
+    Add(dialog, L"STATIC", L"", SS_LEFT, left, dialog.cursorY,
+        dialog.width - 2 * left, Scaled(dialog, kNoteHeight), kIdAssignWarning);
+    dialog.cursorY += Scaled(dialog, kNoteHeight) + gap;
+
+    AddNote(dialog,
+            L"拡大・縮小に Shift を足すと、1 段の変化が小さくなります。\n"
+            L"割り当てにない修飾キーを押している間は、何も起きません。",
+            false, 2);
     AddNote(dialog,
             L"サイズ変更の [ ]、ズームの 1〜5、色の Shift+1〜8、"
             L"スクロールのスペースと矢印は、\n"
@@ -627,44 +769,164 @@ void BuildShortcuts(Dialog& dialog) noexcept {
     EndPage(dialog);
 }
 
-// Refills the shortcut list from the working bindings.
-void FillShortcutList(Dialog& dialog) noexcept {
-    const HWND list = dialog.Field(kIdShortcutList);
+// What a row currently reads as in the second column.
+std::wstring RowAssignment(const Dialog& dialog, const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Key) {
+        return ccl::app::BindingText(dialog.working.shortcuts.For(
+            static_cast<ccl::app::Command>(row.command)));
+    }
+    return dialog.working.mouse.Text(
+        static_cast<ccl::app::MouseCommand>(row.command));
+}
+
+const wchar_t* RowLabel(const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Key) {
+        return ccl::app::CommandLabel(
+            static_cast<ccl::app::Command>(row.command));
+    }
+    return ccl::app::MouseCommandLabel(
+        static_cast<ccl::app::MouseCommand>(row.command));
+}
+
+bool RowConflicts(const Dialog& dialog, const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Key) {
+        return dialog.working.shortcuts.Conflicts(
+            static_cast<ccl::app::Command>(row.command));
+    }
+    return dialog.working.mouse.Conflicts(
+        static_cast<ccl::app::MouseCommand>(row.command));
+}
+
+// Refills the assignment list from the working values, and works out which
+// rows clash. Called after every edit, since one change can settle or start a
+// clash on a row other than the one that was touched.
+void FillAssignList(Dialog& dialog) noexcept {
+    const HWND list = dialog.Field(kIdAssignList);
     const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
     ListView_DeleteAllItems(list);
 
-    for (int i = 0; i < static_cast<int>(ccl::app::Command::Count); ++i) {
-        const auto command = static_cast<ccl::app::Command>(i);
+    dialog.anyConflict = false;
+
+    for (int i = 0; i < kAssignRowCount; ++i) {
+        const AssignRow& row = kAssignRows[i];
 
         LVITEMW item{};
-        item.mask = LVIF_TEXT;
+        item.mask = LVIF_TEXT | LVIF_GROUPID;
         item.iItem = i;
-        item.pszText =
-            const_cast<wchar_t*>(ccl::app::CommandLabel(command));
+        item.iGroupId = row.group;
+        item.pszText = const_cast<wchar_t*>(RowLabel(row));
         ListView_InsertItem(list, &item);
 
-        const std::wstring key =
-            ccl::app::BindingText(dialog.working.shortcuts.For(command));
-        ListView_SetItemText(list, i, 1, const_cast<wchar_t*>(key.c_str()));
+        const std::wstring assignment = RowAssignment(dialog, row);
+        ListView_SetItemText(list, i, 1,
+                             const_cast<wchar_t*>(assignment.c_str()));
+
+        dialog.conflicting[i] = RowConflicts(dialog, row);
+        dialog.anyConflict = dialog.anyConflict || dialog.conflicting[i];
     }
 
     if (selected >= 0) {
         ListView_SetItemState(list, selected, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
     }
+
+    // Two things on one key or one gesture leaves one of them unreachable, and
+    // which one is pure luck. Rather than quietly take it off the other
+    // command, the clash is shown and OK is held until it is sorted out.
+    ::SetWindowTextW(dialog.Field(kIdAssignWarning),
+                     dialog.anyConflict
+                         ? L"赤い行が重複しています。直すまで OK を押せません。"
+                         : L"");
+    const HWND ok = dialog.Field(IDOK);
+    if (ok != nullptr) {
+        ::EnableWindow(ok, dialog.anyConflict ? FALSE : TRUE);
+    }
+    ::InvalidateRect(list, nullptr, TRUE);
 }
 
-void AssignShortcut(Dialog& dialog, bool clear) noexcept {
-    const HWND list = dialog.Field(kIdShortcutList);
-    const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
-    if (selected < 0) {
+// The gestures offered for a mouse row, in the order they are listed.
+void ShowGestureMenu(Dialog& dialog, const AssignRow& row) noexcept {
+    const auto command = static_cast<ccl::app::MouseCommand>(row.command);
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) {
         return;
     }
-    const auto command = static_cast<ccl::app::Command>(selected);
+
+    // One-based command ids, so that TrackPopupMenu returning zero can mean
+    // "nothing was picked" without colliding with the first entry.
+    if (row.kind == RowKind::Wheel) {
+        for (int i = 0; i < static_cast<int>(ccl::app::WheelGesture::Count);
+             ++i) {
+            ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(i) + 1,
+                          ccl::app::WheelGestureLabel(
+                              static_cast<ccl::app::WheelGesture>(i)));
+        }
+    } else {
+        for (int i = 0; i < static_cast<int>(ccl::app::DragGesture::Count);
+             ++i) {
+            const auto gesture = static_cast<ccl::app::DragGesture>(i);
+            if (!ccl::app::DragGestureAllowed(command, gesture) &&
+                gesture != ccl::app::DragGesture::None) {
+                continue;
+            }
+            ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(i) + 1,
+                          ccl::app::DragGestureLabel(gesture));
+        }
+    }
+
+    RECT button{};
+    ::GetWindowRect(dialog.Field(kIdAssignChange), &button);
+    const int chosen = ::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_NOANIMATION,
+        button.left, button.bottom, 0, dialog.window, nullptr);
+    ::DestroyMenu(menu);
+
+    if (chosen <= 0) {
+        return;
+    }
+
+    if (row.kind == RowKind::Wheel) {
+        dialog.working.mouse.SetWheel(
+            command, static_cast<ccl::app::WheelGesture>(chosen - 1));
+    } else {
+        dialog.working.mouse.SetDrag(
+            command, static_cast<ccl::app::DragGesture>(chosen - 1));
+    }
+    FillAssignList(dialog);
+}
+
+void ChangeAssignment(Dialog& dialog, bool clear) noexcept {
+    const HWND list = dialog.Field(kIdAssignList);
+    const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= kAssignRowCount) {
+        return;
+    }
+    const AssignRow& row = kAssignRows[selected];
 
     if (clear) {
-        dialog.working.shortcuts.Clear(command);
-        FillShortcutList(dialog);
+        switch (row.kind) {
+            case RowKind::Key:
+                dialog.working.shortcuts.Clear(
+                    static_cast<ccl::app::Command>(row.command));
+                break;
+            case RowKind::Drag:
+                dialog.working.mouse.SetDrag(
+                    static_cast<ccl::app::MouseCommand>(row.command),
+                    ccl::app::DragGesture::None);
+                break;
+            case RowKind::Wheel:
+                dialog.working.mouse.SetWheel(
+                    static_cast<ccl::app::MouseCommand>(row.command),
+                    ccl::app::WheelGesture::None);
+                break;
+        }
+        FillAssignList(dialog);
+        return;
+    }
+
+    if (row.kind != RowKind::Key) {
+        ShowGestureMenu(dialog, row);
         return;
     }
 
@@ -673,10 +935,9 @@ void AssignShortcut(Dialog& dialog, bool clear) noexcept {
         return;
     }
 
-    // Assign takes the key off whatever had it, so the whole list is refilled
-    // rather than just the row that was edited.
-    dialog.working.shortcuts.Assign(command, *binding);
-    FillShortcutList(dialog);
+    dialog.working.shortcuts.Set(static_cast<ccl::app::Command>(row.command),
+                                 *binding);
+    FillAssignList(dialog);
 }
 
 // Writes the working values into the controls. Separate from building them so
@@ -734,8 +995,10 @@ void Populate(Dialog& dialog) noexcept {
         Button_SetCheck(dialog.Field(frames[i]),
                         chosen ? BST_CHECKED : BST_UNCHECKED);
     }
+    SetNumber(dialog.Field(kIdHideDuration),
+              static_cast<int>(values.hideDurationMs));
 
-    FillShortcutList(dialog);
+    FillAssignList(dialog);
 }
 
 void Collect(Dialog& dialog) noexcept {
@@ -798,6 +1061,9 @@ void Collect(Dialog& dialog) noexcept {
     } else {
         values.windowFrame = ccl::app::WindowFrame::NoTitleBar;
     }
+    values.hideDurationMs = static_cast<UINT>(
+        (std::max)(0, ReadInt(dialog.Field(kIdHideDuration),
+                              static_cast<int>(values.hideDurationMs))));
 
     values.Clamp();
 }
@@ -916,9 +1182,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_NOTIFY: {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-            if (dialog != nullptr && header->hwndFrom == dialog->tabs &&
+            if (dialog == nullptr) {
+                break;
+            }
+            if (header->hwndFrom == dialog->tabs &&
                 header->code == TCN_SELCHANGE) {
                 ShowPage(*dialog, TabCtrl_GetCurSel(dialog->tabs));
+                return 0;
+            }
+
+            // A clashing row is painted on a red background. The list has no
+            // per-item colour of its own, so it is done as it is drawn.
+            // This is an ordinary window rather than a dialog box, so the
+            // result goes back as the window procedure's return value.
+            if (header->idFrom == kIdAssignList &&
+                header->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    const auto row = static_cast<int>(draw->nmcd.dwItemSpec);
+                    if (row >= 0 && row < kAssignRowCount &&
+                        dialog->conflicting[row]) {
+                        draw->clrTextBk = kConflictColor;
+                    }
+                }
+                return CDRF_DODEFAULT;
+            }
+
+            // Double-clicking a row is the same as pressing the button, which
+            // is what a list of settings is expected to do.
+            if (header->idFrom == kIdAssignList && header->code == NM_DBLCLK) {
+                ChangeAssignment(*dialog, false);
                 return 0;
             }
             break;
@@ -944,21 +1240,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             switch (id) {
                 case IDOK:
+                    // Held while something clashes. Reached by Enter as well
+                    // as by the button, so the check is here rather than only
+                    // on whether the button is greyed.
+                    if (dialog->anyConflict) {
+                        return 0;
+                    }
                     Collect(*dialog);
                     dialog->accepted = true;
                     dialog->finished = true;
                     return 0;
                 case IDCANCEL:
+                    // Never held: a clash has to be escapable, or a settings
+                    // window with one in it could not be closed at all.
                     dialog->finished = true;
                     return 0;
                 case kIdBrowseFolder:
                     BrowseForFolder(*dialog);
                     return 0;
-                case kIdAssignKey:
-                    AssignShortcut(*dialog, false);
+                case kIdAssignChange:
+                    ChangeAssignment(*dialog, false);
                     return 0;
-                case kIdClearKey:
-                    AssignShortcut(*dialog, true);
+                case kIdAssignClear:
+                    ChangeAssignment(*dialog, true);
                     return 0;
                 case kIdReset:
                     ResetToDefaults(*dialog);
@@ -1062,7 +1366,7 @@ bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings) noexcept {
     AddTab(dialog.tabs, kPageText, L"文字");
     AddTab(dialog.tabs, kPageSaving, L"保存");
     AddTab(dialog.tabs, kPageWindow, L"ウィンドウ");
-    AddTab(dialog.tabs, kPageShortcuts, L"ショートカット");
+    AddTab(dialog.tabs, kPageAssignments, L"操作の割り当て");
 
     // Where a page's contents may start. Only the top matters here; the height
     // is settled once the pages are built.
@@ -1078,7 +1382,7 @@ bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings) noexcept {
     BuildText(dialog);
     BuildSaving(dialog);
     BuildWindow(dialog);
-    BuildShortcuts(dialog);
+    BuildAssignments(dialog);
 
     Populate(dialog);
     ShowPage(dialog, kPageGeneral);
@@ -1103,6 +1407,11 @@ bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings) noexcept {
     Add(dialog, L"BUTTON", L"キャンセル", BS_PUSHBUTTON | WS_TABSTOP,
         right - buttonWidth, buttonY, buttonWidth, buttonHeight, IDCANCEL,
         false);
+
+    // Filled once already, before OK existed to be greyed out. A settings file
+    // edited by hand can arrive with a clash in it, so the state has to be
+    // settled now that there is a button to reflect it.
+    FillAssignList(dialog);
 
     // The client area has to end up as tall as the controls made it, so the
     // frame is added on top of that rather than taken out of it.

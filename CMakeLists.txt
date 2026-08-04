@@ -18,6 +18,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(APP_SOURCES
     src/main.cpp
+    src/app/MouseBindings.cpp
     src/app/Settings.cpp
     src/app/Shortcuts.cpp
     src/capture/DibBuffer.cpp
@@ -41,6 +42,7 @@ set(APP_SOURCES
 )
 
 set(APP_HEADERS
+    src/app/MouseBindings.h
     src/app/Settings.h
     src/app/Shortcuts.h
     src/capture/DibBuffer.h

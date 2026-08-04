@@ -1,12 +1,14 @@
 #pragma once
 
 #include <d2d1_1.h>
+#include <dwrite.h>
 #include <wrl/client.h>
 
 #include <unordered_map>
 
 #include "capture/DibBuffer.h"
 #include "doc/Annotation.h"
+#include "util/Timing.h"
 #include "view/ViewState.h"
 
 namespace ccl::doc {
@@ -40,6 +42,11 @@ public:
 
     // Drops the cached pixels for an effect whose strength has changed.
     void InvalidateEffect(unsigned int id) noexcept;
+
+    // Where the time in a frame went, split so that rebuilding shapes on the
+    // CPU can be told apart from the cost of putting pixels on the screen.
+    // Written to the timing log when the window closes.
+    void ReportStats() const noexcept;
 
     // `active` is the stroke currently being drawn, which is not yet part of
     // the document. `cursor` draws the brush size outline when set.
@@ -93,17 +100,45 @@ private:
     ccl::capture::DibBuffer RenderOffscreen(UINT width, UINT height,
                                             const D2D1_MATRIX_3X2_F& transform,
                                             bool clearBackground) noexcept;
+    // Draws the annotations below `limit` onto a piece of the picture that was
+    // cropped out at (left, top). Works on the piece alone, so what it costs
+    // follows the size of the area rather than the size of the capture.
+    bool OverlayAnnotations(ccl::capture::DibBuffer& region, int left, int top,
+                            size_t limit) noexcept;
     void DiscardDeviceResources() noexcept;
 
-    void DrawStroke(const ccl::doc::Stroke& stroke) noexcept;
+    // `id` is the annotation the shape belongs to, which is what the worked-out
+    // result is kept against. Zero for the stroke still being drawn: it grows
+    // with every mouse message, so there is nothing about it worth keeping.
+    void DrawStroke(const ccl::doc::Stroke& stroke, unsigned int id) noexcept;
     // The line itself, without the highlighter's layer around it.
-    void DrawStrokeShape(const ccl::doc::Stroke& stroke) noexcept;
+    void DrawStrokeShape(const ccl::doc::Stroke& stroke,
+                         unsigned int id) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
-    void DrawText(const ccl::doc::TextAnnotation& text) noexcept;
-    void DrawEffect(const ccl::doc::EffectAnnotation& effect) noexcept;
-    // Processes the covered pixels once and keeps the result; the obscured
-    // area never changes after it is placed.
-    ID2D1Bitmap* EffectBitmap(const ccl::doc::EffectAnnotation& effect) noexcept;
+    // The path a stroke traces, built once and kept. Null for a stroke whose
+    // width varies, which Direct2D cannot express as a single path.
+    ID2D1PathGeometry* StrokeGeometry(const ccl::doc::Stroke& stroke,
+                                      unsigned int id) noexcept;
+    void DrawText(const ccl::doc::TextAnnotation& text, unsigned int id) noexcept;
+    // The laid-out glyphs of a piece of text. Text is never edited in place --
+    // re-editing replaces the annotation -- so a layout stays good for as long
+    // as its id does.
+    IDWriteTextLayout* TextLayout(const ccl::doc::TextAnnotation& text,
+                                  unsigned int id) noexcept;
+    void DrawEffect(const ccl::doc::EffectAnnotation& effect,
+                    unsigned int id) noexcept;
+    // Takes a copy of what lies under each effect that has not got one yet:
+    // the picture with everything drawn below the effect, so that a stroke it
+    // covers is obscured along with the picture rather than wiped out. Runs
+    // before the frame starts, because Direct2D cannot be asked to draw
+    // somewhere else in the middle of drawing here.
+    void CaptureEffectSources() noexcept;
+    // Processes those pixels once and keeps the result; what an effect
+    // obscures is settled when it is placed and does not change after.
+    ID2D1Bitmap* EffectBitmap(const ccl::doc::EffectAnnotation& effect,
+                              unsigned int id) noexcept;
+    // Throws away cached results for annotations that are no longer there.
+    void PruneCaches() noexcept;
 
     D2DContext* context_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -118,10 +153,35 @@ private:
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Bitmap>>
         effectCache_;
+    // What was under each effect when it was placed. Kept separately from the
+    // processed result above, so that turning the strength up and down only
+    // costs the processing and not another look at the picture.
+    std::unordered_map<unsigned int, ccl::capture::DibBuffer> effectSource_;
+    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>>
+        geometryCache_;
+    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextLayout>>
+        layoutCache_;
+    // The stroke still being drawn changes shape with every mouse message, so
+    // its path is rebuilt each frame. Held here only so it outlives the call
+    // that draws with it.
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> transientGeometry_;
+    Microsoft::WRL::ComPtr<IDWriteTextLayout> transientLayout_;
+    // One layer, reused by every highlighter stroke. Each PushLayer wants an
+    // intermediate surface, and asking for a new one per stroke per frame is
+    // the one cost here that grows with the size of the capture.
+    Microsoft::WRL::ComPtr<ID2D1Layer> highlightLayer_;
 
     int border_ = kWindowBorder;
     bool smoothScaling_ = true;
     bool measuredFirstDraw_ = false;
+
+    // Direct2D queues drawing and does the work at EndDraw, so these do not
+    // split the frame into "time spent on each thing". They split it into
+    // "time this process spent building shapes" and "time everything else
+    // took", which is the distinction that says whether caching would help.
+    ccl::timing::FrameStats pictureStats_;
+    ccl::timing::FrameStats annotationStats_;
+    ccl::timing::FrameStats presentStats_;
 };
 
 }  // namespace ccl::render

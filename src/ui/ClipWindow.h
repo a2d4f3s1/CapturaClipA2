@@ -43,12 +43,21 @@ public:
     void ResizeToImage() noexcept;
 
 private:
+    // A pixel of the picture to keep where it is while the zoom changes, and
+    // the place on the desktop to keep it. Held in both spaces at once: the
+    // point comes from the picture, but what must not move is where it lands
+    // on screen, and the window may have to move for that to stay true.
+    struct ZoomAnchor {
+        D2D1_POINT_2F image{};
+        POINT screen{};
+    };
+
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
                                          LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
     void Draw() noexcept;
-    void OnWheel(int notches, WPARAM keys) noexcept;
+    void OnWheel(int notches, WPARAM keys, POINT client) noexcept;
     void OnKeyDown(WPARAM key) noexcept;
     // Runs whatever the key is bound to. Returns false when it is bound to
     // nothing, leaving the modal keys -- the size keys, the zoom digits, the
@@ -58,9 +67,39 @@ private:
     void OnMouseMove(POINT client) noexcept;
     void OnLeftUp() noexcept;
 
+    // Which gesture a button press amounts to, given the modifiers held. The
+    // button is one of the kButton values in the implementation.
+    ccl::app::DragGesture GestureFor(int button) const noexcept;
+    // Starts whatever the button, with the modifiers held, is assigned to.
+    // Returns false when that combination is assigned to nothing, leaving the
+    // press to whoever else wants it.
+    bool BeginDragCommand(int button) noexcept;
+    void BeginScrollDrag() noexcept;
+    void BeginWindowMove() noexcept;
+
+    // Takes the window off the screen for the time set in the settings. It
+    // comes back on a timer rather than when a key is released, because a
+    // hidden window has no keyboard focus and would never hear the release.
+    void HideTemporarily() noexcept;
+    void StopHiding() noexcept;
+
     // Resizes the window to the zoomed image (bounded by the work area),
-    // re-clamps the scroll offset and repaints.
-    void ApplyZoom() noexcept;
+    // re-clamps the scroll offset and repaints. With an anchor, the picture is
+    // also slid -- and the window moved, if sliding is not enough -- so that
+    // the anchored pixel stays exactly where it was on the desktop. The window
+    // is free to hang off the edge of the screen doing it; the anchor is the
+    // thing being kept, and the anchored pixel is under the pointer, so some
+    // of the window is always still in view.
+    void ApplyZoom(const ZoomAnchor* anchor = nullptr) noexcept;
+    // The anchor for a turn of the wheel. A run of notches is one gesture and
+    // keeps the point it started on: taking the pointer's position afresh
+    // every notch would let the anchor creep with the smallest movement of
+    // the hand, which is the one thing zooming to a point has to not do.
+    ZoomAnchor WheelZoomAnchor(POINT client) noexcept;
+    // The anchor for the keyboard presets and the menu, which have no pointer
+    // to work from: the middle of what is on screen. Without one the view
+    // drifts towards the top left of the picture as the zoom goes up.
+    ZoomAnchor CenterZoomAnchor() const noexcept;
     void ApplyOpacity() noexcept;
     void FitToImage() noexcept;
     void UpdateTitle() noexcept;
@@ -230,6 +269,25 @@ private:
     bool scrolling_ = false;
     POINT scrollOrigin_{};
     POINT scrollStart_{};
+
+    // Set while the right button is down and assigned to a drag. A press that
+    // never moved is still a click, and a click has to open the menu: it is
+    // the only way to reach everything the keys do not cover.
+    bool rightDragging_ = false;
+    bool rightDragMoved_ = false;
+    POINT rightDragStart_{};
+
+    // Non-zero while the window is hidden waiting to come back.
+    UINT_PTR hideTimer_ = 0;
+
+    // The point a run of wheel notches is zooming around, and when the last
+    // one arrived. A gap long enough to be a pause starts a new gesture.
+    ZoomAnchor zoomAnchor_{};
+    bool zoomAnchorValid_ = false;
+    ULONGLONG lastZoomTick_ = 0;
+    // Set while the window is being rearranged for a new zoom, so the WM_SIZE
+    // that causes does not paint a frame of its own.
+    bool applyingZoom_ = false;
 
     bool drawing_ = false;
     bool straightLine_ = false;

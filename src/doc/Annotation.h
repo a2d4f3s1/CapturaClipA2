@@ -141,9 +141,6 @@ struct EffectAnnotation {
     float bottom = 0.0f;
     // Mosaic block size, or blur radius, in image pixels.
     float strength = 12.0f;
-    // Identifies the processed pixels in the renderer's cache. Reprocessing
-    // the area on every frame would be wasteful; the result never changes.
-    unsigned int id = 0;
 };
 
 // Annotations are kept as objects instead of being burned into the image.
@@ -161,11 +158,25 @@ enum class AnnotationKind {
 };
 
 struct Annotation {
+    // Identifies this annotation for as long as it exists, including across
+    // undo and redo, since those restore copies of the list.
+    //
+    // The renderer keeps worked-out results against it -- the path a stroke
+    // traces, the laid-out glyphs of a piece of text, the obscured pixels of
+    // an effect -- none of which change once the annotation is placed, and all
+    // of which cost real time to produce again. Keyed on a position in the
+    // list instead, erasing one annotation would hand the next one's cached
+    // result to its neighbour.
+    unsigned int id = 0;
     AnnotationKind kind = AnnotationKind::Stroke;
     Stroke stroke;
     TextAnnotation text;
     EffectAnnotation effect;
 };
+
+// Handed out in order and never reused, so a cached result can never be taken
+// for one belonging to a different annotation.
+unsigned int NextAnnotationId() noexcept;
 
 using AnnotationList = std::vector<Annotation>;
 

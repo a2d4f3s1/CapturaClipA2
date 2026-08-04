@@ -5,6 +5,7 @@
 #include <array>
 #include <string>
 
+#include "app/MouseBindings.h"
 #include "app/Shortcuts.h"
 #include "doc/Annotation.h"
 
@@ -59,11 +60,16 @@ public:
     // Colours
     ccl::doc::QuickColors quickColors = ccl::doc::kDefaultQuickColors;
 
-    // Keys
+    // Keys and mouse gestures
     Shortcuts shortcuts;
+    MouseBindings mouse;
 
     // Appearance
     std::wstring titleFormat = L"%t";
+    // How long the window stays out of the way when asked to hide. It comes
+    // back on a timer rather than when a key is released: a hidden window has
+    // no keyboard focus, so nothing would tell it the key had been let go.
+    UINT hideDurationMs = 3000;
     bool smoothScaling = true;
     float zoomStepPercent = 10.0f;
     // Size of the colour palette popup, as a percentage of its normal size.

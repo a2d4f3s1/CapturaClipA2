@@ -39,6 +39,16 @@ constexpr LONG kResizeGrip = 6;
 // Drives the eyedropper's magnifier while nothing is being dragged.
 constexpr UINT_PTR kColorPreviewTimer = 1;
 
+// Brings the window back after it has been asked to hide.
+constexpr UINT_PTR kHideTimer = 2;
+
+// Which button a press came from, for working out its gesture.
+enum : int {
+    kButtonLeft,
+    kButtonMiddle,
+    kButtonRight,
+};
+
 // Points closer together than this are dropped while drawing, which keeps the
 // stroke geometry small without any visible difference.
 constexpr float kMinPointSpacing = 0.75f;
@@ -46,6 +56,11 @@ constexpr float kMinPointSpacing = 0.75f;
 // Movement below this counts as a click rather than a drag, so that a slight
 // tremor while clicking text does not nudge it.
 constexpr int kClickThreshold = 3;
+
+// A pause this long ends a run of wheel notches. Long enough that turning the
+// wheel steadily stays one gesture, short enough that stopping to look and
+// then zooming somewhere else picks the new place up.
+constexpr ULONGLONG kZoomGestureGapMs = 400;
 
 
 // The rich edit control lives in its own library, which has to be loaded
@@ -596,16 +611,42 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_GETMINMAXINFO: {
+            // A capture can legitimately be a few pixels across, and a sizable
+            // frame comes with a minimum tracking size that would quietly hand
+            // back a window larger than the one asked for. Everything worked
+            // out from the requested size -- the viewport, and with it the
+            // scroll range and the zoom anchor -- would then be against a
+            // window that is not the one on screen.
+            auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+            limits->ptMinTrackSize.x = 1;
+            limits->ptMinTrackSize.y = 1;
+            return 0;
+        }
+
         case WM_SIZE:
             renderer_.Resize(LOWORD(lParam), HIWORD(lParam));
+            // While the zoom is being applied the caller repaints once at the
+            // end, against the finished state. Painting here as well would
+            // draw the whole window twice for every notch of the wheel, the
+            // first time against a window that has been resized but not yet
+            // scrolled or moved.
+            if (applyingZoom_) {
+                return 0;
+            }
             ClampScroll();
             Draw();
             return 0;
 
-        case WM_MOUSEWHEEL:
+        case WM_MOUSEWHEEL: {
+            // The wheel reports where the pointer is in screen coordinates,
+            // which is what the zoom needs to know to keep that spot still.
+            POINT client{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ::ScreenToClient(hwnd_, &client);
             OnWheel(GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA,
-                    GET_KEYSTATE_WPARAM(wParam));
+                    GET_KEYSTATE_WPARAM(wParam), client);
             return 0;
+        }
 
         case WM_KEYDOWN:
             if (wParam == VK_SPACE) {
@@ -624,10 +665,20 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MBUTTONDOWN:
-            moving_ = true;
-            ::GetCursorPos(&dragOrigin_);
-            ::GetWindowRect(hwnd_, &windowOrigin_);
-            ::SetCapture(hwnd_);
+            BeginDragCommand(kButtonMiddle);
+            return 0;
+
+        case WM_RBUTTONDOWN:
+            // Started rather than acted on: whether this turns out to be a
+            // drag or a click that opens the menu is only known on release.
+            if (settings_ != nullptr &&
+                settings_->mouse.LookupDrag(ccl::app::DragGesture::RightDrag) !=
+                    ccl::app::MouseCommand::Count) {
+                rightDragging_ = true;
+                rightDragMoved_ = false;
+                rightDragStart_ =
+                    POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            }
             return 0;
 
         case WM_POINTERDOWN:
@@ -664,8 +715,9 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MBUTTONUP:
-            if (moving_) {
+            if (moving_ || scrolling_) {
                 moving_ = false;
+                scrolling_ = false;
                 ::ReleaseCapture();
             }
             return 0;
@@ -673,6 +725,10 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kColorPreviewTimer) {
                 UpdateColorPreview();
+                return 0;
+            }
+            if (wParam == kHideTimer) {
+                StopHiding();
                 return 0;
             }
             break;
@@ -718,6 +774,22 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
 
+            if (rightDragging_) {
+                const bool dragged = rightDragMoved_;
+                rightDragging_ = false;
+                rightDragMoved_ = false;
+                if (moving_ || scrolling_) {
+                    moving_ = false;
+                    scrolling_ = false;
+                    ::ReleaseCapture();
+                }
+                // Only a press that actually moved was a drag. Anything else
+                // is a click, and a click has to reach the menu.
+                if (dragged) {
+                    return 0;
+                }
+            }
+
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ::ClientToScreen(hwnd_, &screen);
             ShowContextMenu(screen);
@@ -742,12 +814,19 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CLOSE:
+            // Only the timer is dropped, not the hiding: bringing the window
+            // back for the instant before it is destroyed would just flash it.
+            if (hideTimer_ != 0) {
+                ::KillTimer(hwnd_, kHideTimer);
+                hideTimer_ = 0;
+            }
             // A hook left installed would outlive the window it posts to.
             RemoveEyedropperHook();
             SetColorPreviewActive(false);
             // Text still being typed is kept rather than discarded.
             CommitText();
             ccl::timing::ReportFrames(L"clip window draw", drawStats_);
+            renderer_.ReportStats();
             AutoSaveBeforeClosing();
             ::DestroyWindow(hwnd_);
             return 0;
@@ -788,20 +867,16 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
 
     history_.Record(document_->Annotations());
 
-    // Identifies the processed pixels for caching. A counter is enough: it only
-    // has to be unique within the run.
-    static unsigned int nextEffectId = 1;
-
     const D2D1_RECT_F area = SelectionRect();
 
     ccl::doc::Annotation annotation;
+    annotation.id = ccl::doc::NextAnnotationId();
     annotation.kind = ccl::doc::AnnotationKind::Effect;
     annotation.effect.kind = kind;
     annotation.effect.left = area.left;
     annotation.effect.top = area.top;
     annotation.effect.right = area.right;
     annotation.effect.bottom = area.bottom;
-    annotation.effect.id = nextEffectId++;
 
     // Reuses the strength last chosen for this effect. The first time round
     // there is none, so it is scaled to the area instead -- a small region
@@ -876,7 +951,7 @@ void ClipWindow::StepEffectStrength(int steps) noexcept {
     effect.strength = strength;
 
     // The cached pixels were produced at the old strength.
-    renderer_.InvalidateEffect(effect.id);
+    renderer_.InvalidateEffect(annotation.id);
 
     if (mosaic) {
         tool_.mosaicStrength = strength;
@@ -890,6 +965,121 @@ void ClipWindow::StepEffectStrength(int steps) noexcept {
 
 bool ClipWindow::ScrollingWithLeftButton() const noexcept {
     return spaceHeld_ || tool_.tool == ccl::tool::Tool::View;
+}
+
+ccl::app::DragGesture ClipWindow::GestureFor(int button) const noexcept {
+    using ccl::app::DragGesture;
+
+    const bool ctrl = IsKeyDown(VK_CONTROL);
+    const bool shift = IsKeyDown(VK_SHIFT);
+    const bool alt = IsKeyDown(VK_MENU);
+
+    // Alt is not part of any gesture: it already means "sample the colour
+    // without leaving the tool", which has to keep working over every button.
+    if (alt) {
+        return DragGesture::None;
+    }
+
+    switch (button) {
+        case kButtonLeft:
+            if (ctrl && !shift) return DragGesture::CtrlLeftDrag;
+            // Shift with the left button draws a straight line, so it is not
+            // offered as a gesture and must not be read as the bare one.
+            if (!ctrl && !shift) return DragGesture::LeftDrag;
+            return DragGesture::None;
+
+        case kButtonMiddle:
+            if (ctrl && !shift) return DragGesture::CtrlMiddleDrag;
+            if (shift && !ctrl) return DragGesture::ShiftMiddleDrag;
+            if (!ctrl && !shift) return DragGesture::MiddleDrag;
+            return DragGesture::None;
+
+        case kButtonRight:
+            if (!ctrl && !shift) return DragGesture::RightDrag;
+            return DragGesture::None;
+
+        default:
+            return DragGesture::None;
+    }
+}
+
+void ClipWindow::BeginScrollDrag() noexcept {
+    scrolling_ = true;
+    ::GetCursorPos(&scrollOrigin_);
+    scrollStart_ = view_.Scroll();
+    ::SetCapture(hwnd_);
+}
+
+void ClipWindow::BeginWindowMove() noexcept {
+    moving_ = true;
+    ::GetCursorPos(&dragOrigin_);
+    ::GetWindowRect(hwnd_, &windowOrigin_);
+    ::SetCapture(hwnd_);
+}
+
+bool ClipWindow::BeginDragCommand(int button) noexcept {
+    using ccl::app::DragGesture;
+    using ccl::app::MouseCommand;
+
+    if (settings_ == nullptr) {
+        return false;
+    }
+
+    // Only the combinations that are gestures in their own right do anything.
+    // A modifier that is not part of the assignment makes the press mean
+    // nothing, the same way it does on the wheel.
+    const DragGesture gesture = GestureFor(button);
+    const MouseCommand command = settings_->mouse.LookupDrag(gesture);
+
+    // The bare left button is never dispatched from here. It belongs to the
+    // tool, and the view tool and space are how it comes free -- which is
+    // handled where the tools are, so that assigning scrolling elsewhere
+    // cannot take the view tool's whole reason for existing away.
+    if (gesture == DragGesture::LeftDrag) {
+        return false;
+    }
+
+    switch (command) {
+        case MouseCommand::Scroll:
+            BeginScrollDrag();
+            return true;
+        case MouseCommand::MoveWindow:
+            BeginWindowMove();
+            return true;
+        default:
+            return false;
+    }
+}
+
+void ClipWindow::HideTemporarily() noexcept {
+    if (settings_ == nullptr || hwnd_ == nullptr) {
+        return;
+    }
+    // Nothing is drawn or moved while it is away, so anything mid-gesture is
+    // let go of first rather than resumed against a window that has moved on.
+    if (::GetCapture() == hwnd_) {
+        ::ReleaseCapture();
+    }
+
+    ::ShowWindow(hwnd_, SW_HIDE);
+    hideTimer_ = ::SetTimer(hwnd_, kHideTimer, settings_->hideDurationMs,
+                            nullptr);
+    // Without a timer the window would be gone for good, so it comes straight
+    // back rather than being left somewhere it cannot be found.
+    if (hideTimer_ == 0) {
+        ::ShowWindow(hwnd_, SW_SHOWNA);
+    }
+}
+
+void ClipWindow::StopHiding() noexcept {
+    if (hideTimer_ == 0) {
+        return;
+    }
+    ::KillTimer(hwnd_, kHideTimer);
+    hideTimer_ = 0;
+    // Shown without being activated: whatever the window was hiding from is
+    // being worked in, and taking the focus back would interrupt it.
+    ::ShowWindow(hwnd_, SW_SHOWNA);
 }
 
 bool ClipWindow::ShowsBrushCursor() const noexcept {
@@ -1473,6 +1663,9 @@ void ClipWindow::CommitText() noexcept {
     }
 
     ccl::doc::Annotation annotation;
+    // A re-edit is a new annotation rather than a changed one, so it gets an
+    // id of its own and nothing worked out for the old wording is reused.
+    annotation.id = ccl::doc::NextAnnotationId();
     annotation.kind = ccl::doc::AnnotationKind::Text;
 
     // Re-edited text keeps the size and decoration it was created with; only
@@ -1567,6 +1760,7 @@ void ClipWindow::EndStroke() noexcept {
         history_.Record(document_->Annotations());
 
         ccl::doc::Annotation annotation;
+        annotation.id = ccl::doc::NextAnnotationId();
         annotation.kind = ccl::doc::AnnotationKind::Stroke;
         annotation.stroke = std::move(activeStroke_);
         document_->Annotations().push_back(std::move(annotation));
@@ -1716,11 +1910,17 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
         return;
     }
 
+    // The tool has first claim on the bare left button; the view tool and
+    // space are what free it up. Checked before the assignments below so that
+    // moving scrolling onto another gesture cannot take this away.
     if (ScrollingWithLeftButton()) {
-        scrolling_ = true;
-        ::GetCursorPos(&scrollOrigin_);
-        scrollStart_ = view_.Scroll();
-        ::SetCapture(hwnd_);
+        BeginScrollDrag();
+        return;
+    }
+
+    // Ctrl with the left button is assignable; the bare one is not, and
+    // BeginDragCommand refuses it.
+    if (BeginDragCommand(kButtonLeft)) {
         return;
     }
 
@@ -1788,6 +1988,16 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         // belongs to whichever window is under it, and the magnifier is what
         // says the eyedropper is armed.
         ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+    }
+
+    // A right press only becomes a drag once it has moved far enough that it
+    // cannot have been meant as a click on the menu.
+    if (rightDragging_ && !rightDragMoved_) {
+        if (std::abs(client.x - rightDragStart_.x) > kClickThreshold ||
+            std::abs(client.y - rightDragStart_.y) > kClickThreshold) {
+            rightDragMoved_ = true;
+            BeginDragCommand(kButtonRight);
+        }
     }
 
     if (moving_) {
@@ -1989,17 +2199,65 @@ void ClipWindow::ClampScroll() noexcept {
     view_.SetScroll(view_.Scroll(), ContentSize(), ViewportSize());
 }
 
-void ClipWindow::OnWheel(int notches, WPARAM keys) noexcept {
-    if (notches == 0) {
+void ClipWindow::OnWheel(int notches, WPARAM keys, POINT client) noexcept {
+    using ccl::app::MouseCommand;
+    using ccl::app::WheelGesture;
+
+    if (notches == 0 || settings_ == nullptr) {
         return;
     }
 
-    if ((keys & MK_CONTROL) != 0) {
-        view_.StepZoom(notches, (keys & MK_SHIFT) != 0);
-        ApplyZoom();
-    } else {
-        view_.StepOpacity(notches);
-        ApplyOpacity();
+    const ccl::app::MouseBindings& mouse = settings_->mouse;
+
+    const bool ctrl = (keys & MK_CONTROL) != 0;
+    const bool shift = (keys & MK_SHIFT) != 0;
+    // The wheel message carries no flag for Alt, so it is read from the
+    // keyboard instead.
+    const bool alt = IsKeyDown(VK_MENU);
+
+    // Only the combinations that are gestures in their own right do anything.
+    // A modifier that is not part of the assignment makes the turn mean
+    // nothing, rather than being ignored so that it still acts: holding a key
+    // is how you say "not the usual thing".
+    const auto exact = [&]() -> WheelGesture {
+        if (!ctrl && !shift && !alt) return WheelGesture::Wheel;
+        if (ctrl && !shift && !alt) return WheelGesture::CtrlWheel;
+        if (!ctrl && shift && !alt) return WheelGesture::ShiftWheel;
+        if (!ctrl && !shift && alt) return WheelGesture::AltWheel;
+        return WheelGesture::None;
+    }();
+
+    MouseCommand command = mouse.LookupWheel(exact);
+    bool fine = false;
+
+    // Shift is the finer-step modifier for the zoom, wherever the zoom has
+    // been put. It is not a gesture of its own, so the combination is looked
+    // up again without it, and only the zoom answers to it.
+    if (command == MouseCommand::Count && shift && !alt) {
+        const WheelGesture withoutShift =
+            ctrl ? WheelGesture::CtrlWheel : WheelGesture::Wheel;
+        if (mouse.LookupWheel(withoutShift) == MouseCommand::Zoom) {
+            command = MouseCommand::Zoom;
+            fine = true;
+        }
+    }
+
+    switch (command) {
+        case MouseCommand::Zoom: {
+            // Taken before the zoom changes: the anchor is a point of the
+            // picture, and which point is under the pointer depends on the
+            // zoom it was read at.
+            const ZoomAnchor anchor = WheelZoomAnchor(client);
+            view_.StepZoom(notches, fine);
+            ApplyZoom(&anchor);
+            return;
+        }
+        case MouseCommand::Opacity:
+            view_.StepOpacity(notches);
+            ApplyOpacity();
+            return;
+        default:
+            return;
     }
 }
 
@@ -2052,6 +2310,9 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
             return true;
         case ccl::app::Command::FitToImage:
             FitToImage();
+            return true;
+        case ccl::app::Command::HideWindow:
+            HideTemporarily();
             return true;
         default:
             return false;
@@ -2106,10 +2367,12 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
         case '2':
         case '3':
         case '4':
-        case '5':
+        case '5': {
+            const ZoomAnchor anchor = CenterZoomAnchor();
             view_.SetZoom(static_cast<float>(key - '0'));
-            ApplyZoom();
+            ApplyZoom(&anchor);
             return;
+        }
 
         case VK_LEFT:
             view_.ScrollBy(-kKeyScrollStep, 0, ContentSize(), ViewportSize());
@@ -2136,11 +2399,48 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
     }
 }
 
-void ClipWindow::ApplyZoom() noexcept {
+ClipWindow::ZoomAnchor ClipWindow::WheelZoomAnchor(POINT client) noexcept {
+    const ULONGLONG now = ::GetTickCount64();
+    if (!zoomAnchorValid_ || now - lastZoomTick_ > kZoomGestureGapMs) {
+        // The wheel reaches the window that has the focus, which is not always
+        // the window the pointer is over. A point outside the window is a
+        // point outside the picture, and zooming around one sends the window
+        // off after it, so the pointer is pulled back onto the picture first.
+        RECT area{};
+        ::GetClientRect(hwnd_, &area);
+        const POINT inside{
+            std::clamp(client.x, area.left, std::max(area.left, area.right - 1)),
+            std::clamp(client.y, area.top, std::max(area.top, area.bottom - 1))};
+
+        zoomAnchor_.image = ToImage(inside);
+        zoomAnchor_.screen = inside;
+        ::ClientToScreen(hwnd_, &zoomAnchor_.screen);
+        zoomAnchorValid_ = true;
+    }
+    lastZoomTick_ = now;
+    return zoomAnchor_;
+}
+
+ClipWindow::ZoomAnchor ClipWindow::CenterZoomAnchor() const noexcept {
+    const SIZE viewport = ViewportSize();
+    const int border = BorderWidth();
+    POINT client{border + static_cast<int>(viewport.cx / 2),
+                 border + static_cast<int>(viewport.cy / 2)};
+
+    ZoomAnchor anchor;
+    anchor.image = ToImage(client);
+    anchor.screen = client;
+    ::ClientToScreen(hwnd_, &anchor.screen);
+    return anchor;
+}
+
+void ClipWindow::ApplyZoom(const ZoomAnchor* anchor) noexcept {
     const SIZE content = ContentSize();
 
-    // Keep the window on screen: past the work area the image is scrolled
-    // instead of the window growing beyond the monitor.
+    // The window itself never grows past the monitor: beyond that the image is
+    // scrolled instead. Only the size is bounded this way -- where the window
+    // sits is settled by the anchor below, which is allowed to push it off the
+    // edge rather than give up holding the point still.
     RECT work{};
     const HMONITOR monitor = ::MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{};
@@ -2153,10 +2453,83 @@ void ClipWindow::ApplyZoom() noexcept {
     const LONG maxHeight =
         work.bottom > work.top ? work.bottom - work.top : content.cy;
 
-    const SIZE outer = WindowSizeFor(SIZE{std::min(content.cx, maxWidth),
-                                          std::min(content.cy, maxHeight)});
-    ::SetWindowPos(hwnd_, nullptr, 0, 0, outer.cx, outer.cy,
-                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // What WindowSizeFor is given is the area the picture gets, which is also
+    // what the viewport will be once the window has been resized.
+    const SIZE viewport{std::min(content.cx, maxWidth),
+                        std::min(content.cy, maxHeight)};
+    const SIZE outer = WindowSizeFor(viewport);
+
+    RECT bounds{};
+    ::GetWindowRect(hwnd_, &bounds);
+
+    UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE;
+    int x = bounds.left;
+    int y = bounds.top;
+
+    if (anchor != nullptr) {
+        const float zoom = view_.Zoom();
+        const auto border = static_cast<float>(BorderWidth());
+
+        // With a title bar the client area does not start at the corner of the
+        // window, and the picture is placed against the client area. The gap
+        // is the same before and after the resize, so it is measured once and
+        // taken back off when the window position is worked out.
+        POINT clientOrigin{0, 0};
+        ::ClientToScreen(hwnd_, &clientOrigin);
+        const int frameX = clientOrigin.x - bounds.left;
+        const int frameY = clientOrigin.y - bounds.top;
+
+        // A point of the picture sits at, in screen coordinates:
+        //   client origin + border + image * zoom - scroll
+        // Scrolling is tried first, so the amount asked of it is whatever
+        // would hold the point still with the window left where it is.
+        const float wantX = static_cast<float>(clientOrigin.x) + border +
+                            anchor->image.x * zoom -
+                            static_cast<float>(anchor->screen.x);
+        const float wantY = static_cast<float>(clientOrigin.y) + border +
+                            anchor->image.y * zoom -
+                            static_cast<float>(anchor->screen.y);
+
+        view_.SetScroll(POINT{std::lround(wantX), std::lround(wantY)}, content,
+                        viewport);
+
+        // Whatever the scroll could not take -- because the picture is already
+        // against its edge, or is smaller than the window and cannot slide at
+        // all -- the window position takes instead.
+        const POINT scroll = view_.Scroll();
+        x = static_cast<int>(std::lround(static_cast<float>(anchor->screen.x) -
+                                         border - anchor->image.x * zoom +
+                                         static_cast<float>(scroll.x))) -
+            frameX;
+        y = static_cast<int>(std::lround(static_cast<float>(anchor->screen.y) -
+                                         border - anchor->image.y * zoom +
+                                         static_cast<float>(scroll.y))) -
+            frameY;
+        // Without this the system carries the old pixels across to the new
+        // position before anything is repainted, which shows the previous
+        // frame slid sideways for an instant. Every pixel is about to be
+        // drawn again at a different scale, so there is nothing worth
+        // carrying.
+        // Hanging off the edge is allowed -- holding the point still is worth
+        // more than staying tidy -- but going off it altogether is not. The
+        // anchored pixel is the one thing that must remain reachable, and the
+        // pointer it sits under is on a monitor by definition, so the window
+        // is kept far enough over to still cover it.
+        const int anchorX = static_cast<int>(anchor->screen.x);
+        const int anchorY = static_cast<int>(anchor->screen.y);
+        x = std::clamp(x, anchorX - static_cast<int>(outer.cx) + 1, anchorX);
+        y = std::clamp(y, anchorY - static_cast<int>(outer.cy) + 1, anchorY);
+
+        flags &= ~static_cast<UINT>(SWP_NOMOVE);
+        flags |= SWP_NOCOPYBITS;
+    }
+
+    // One repaint per change, at the end, against the finished state: the
+    // resize below sends a WM_SIZE, which would otherwise paint a half-applied
+    // frame first.
+    applyingZoom_ = true;
+    ::SetWindowPos(hwnd_, nullptr, x, y, outer.cx, outer.cy, flags);
+    applyingZoom_ = false;
 
     ClampScroll();
     UpdateTitle();
@@ -2765,8 +3138,9 @@ void ClipWindow::OnCommand(int command) noexcept {
     }
 
     if (id >= kMenuZoomBase) {
+        const ZoomAnchor anchor = CenterZoomAnchor();
         view_.SetZoom(static_cast<float>(id - kMenuZoomBase) / 100.0f);
-        ApplyZoom();
+        ApplyZoom(&anchor);
         return;
     }
     if (id >= kMenuWidthBase) {
@@ -3006,6 +3380,9 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
     hasSelection_ = false;
     saved_ = false;
     sourceTitle_ = title;
+    // The anchor names a point of the old picture, which the new one has no
+    // reason to share.
+    zoomAnchorValid_ = false;
 
     view_.SetZoom(1.0f);
     view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
@@ -3295,7 +3672,7 @@ void ClipWindow::AutoSaveBeforeClosing() noexcept {
 }
 
 void ClipWindow::Draw() noexcept {
-    const LONGLONG frameStart = ccl::timing::Now();
+    const LONGLONG frameStart = ccl::timing::Mark();
 
     ccl::render::BrushCursor cursor{};
     const bool showCursor = ShowsBrushCursor();
@@ -3332,7 +3709,7 @@ void ClipWindow::Draw() noexcept {
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.
     if (reportedFirstFrame_) {
-        drawStats_.Add(ccl::timing::MillisecondsSince(frameStart));
+        ccl::timing::AddSince(drawStats_, frameStart);
     }
 }
 

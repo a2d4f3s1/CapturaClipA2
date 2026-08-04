@@ -181,6 +181,9 @@ void Settings::Load() noexcept {
     windowFrame = ParseFrame(
         ReadString(L"Appearance", L"WindowFrame", FrameName(windowFrame), path_),
         windowFrame);
+    hideDurationMs = ::GetPrivateProfileIntW(L"Appearance", L"HideDurationMs",
+                                             static_cast<INT>(hideDurationMs),
+                                             path_.c_str());
 
     defaultFormat = ParseFormat(
         ReadString(L"Save", L"DefaultFormat", FormatName(defaultFormat), path_),
@@ -189,6 +192,7 @@ void Settings::Load() noexcept {
         ::GetPrivateProfileIntW(L"Save", L"JpegQuality", jpegQuality, path_.c_str());
 
     shortcuts.Load(path_);
+    mouse.Load(path_);
 
     autoSaveFolder = ReadString(L"AutoSave", L"Folder", autoSaveFolder, path_);
     autoSaveHistoryDays = ::GetPrivateProfileIntW(
@@ -229,6 +233,11 @@ void Settings::Clamp() noexcept {
     // A capture that waits minutes before grabbing the screen is a hang, not a
     // setting.
     if (preparationMs > 10000) preparationMs = 10000;
+
+    // Hiding is only useful if the window comes back. Too short and it is gone
+    // before it has been looked past; too long and it reads as having crashed.
+    if (hideDurationMs < 200) hideDurationMs = 200;
+    if (hideDurationMs > 60000) hideDurationMs = 60000;
 }
 
 void Settings::Save() const noexcept {
@@ -313,6 +322,10 @@ void Settings::Save() const noexcept {
                L"; Without a title bar there is nothing to drag, so the middle\n"
                L"; button moves the window instead.\n"
                L"WindowFrame=%s\n"
+               L"; How long the window stays hidden, in milliseconds. It comes\n"
+               L"; back by itself: while hidden it has no keyboard focus, so\n"
+               L"; nothing could tell it to.\n"
+               L"HideDurationMs=%u\n"
                L"\n"
                L"[Save]\n"
                L"; PNG, JPEG or BMP\n"
@@ -332,6 +345,23 @@ void Settings::Save() const noexcept {
                L"[Shortcuts]\n"
                L"; Written as Ctrl+S, Shift+F1, B and so on. An empty value\n"
                L"; leaves the command with no key at all.\n"
+               L"%s"
+               L"\n"
+               L"[Mouse]\n"
+               L"; Scrolling and moving the window are drags; zooming and the\n"
+               L"; opacity are turns of the wheel. Written as LeftDrag,\n"
+               L"; MiddleDrag, RightDrag, Ctrl+LeftDrag, Ctrl+MiddleDrag,\n"
+               L"; Shift+MiddleDrag, Wheel, Ctrl+Wheel, Shift+Wheel or\n"
+               L"; Alt+Wheel. An empty value leaves the action unreachable.\n"
+               L";\n"
+               L"; Shift is what makes the zoom step finer: add it to whatever\n"
+               L"; Zoom is set to. Any other modifier that is not part of an\n"
+               L"; assignment does nothing at all while it is held.\n"
+               L";\n"
+               L"; Scroll=LeftDrag means the bare left button, which scrolls\n"
+               L"; only while the tool is not using it -- the view tool, or\n"
+               L"; space held down. That stays true whatever this is set to,\n"
+               L"; since it is what the view tool is for.\n"
                L"%s",
                preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
@@ -346,9 +376,9 @@ void Settings::Save() const noexcept {
                ColorText(quickColors[6]).c_str(),
                ColorText(quickColors[7]).c_str(), titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
-               FrameName(windowFrame), FormatName(defaultFormat), jpegQuality,
-               autoSaveFolder.c_str(), autoSaveHistoryDays,
-               shortcuts.ToFileText().c_str());
+               FrameName(windowFrame), hideDurationMs, FormatName(defaultFormat),
+               jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays,
+               shortcuts.ToFileText().c_str(), mouse.ToFileText().c_str());
 
     ::fclose(file);
 }

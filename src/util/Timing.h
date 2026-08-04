@@ -37,6 +37,10 @@ inline double MillisecondsSince(LONGLONG start) noexcept {
            static_cast<double>(frequency.QuadPart);
 }
 
+// Reads the clock only when the log is on. Measuring is a development aid,
+// and reading the clock is not free on the one path that has to stay quick.
+inline LONGLONG Mark() noexcept { return g_enabled ? Now() : 0; }
+
 inline void Write(const wchar_t* line) noexcept {
     if (!g_enabled) {
         return;
@@ -115,6 +119,13 @@ struct FrameStats {
         }
     }
 };
+
+// The other half of Mark: does nothing at all unless the log is on.
+inline void AddSince(FrameStats& stats, LONGLONG start) noexcept {
+    if (g_enabled) {
+        stats.Add(MillisecondsSince(start));
+    }
+}
 
 inline void ReportFrames(const wchar_t* label, const FrameStats& stats) noexcept {
     if (!g_enabled || stats.count == 0) {

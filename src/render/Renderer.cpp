@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -28,10 +29,12 @@ void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
 void Renderer::SetDocument(const ccl::doc::Document* document) noexcept {
     document_ = document;
     image_.Reset();
-    // Effect bitmaps are keyed by annotation id, and a different document
-    // numbers its annotations from the start again -- keeping them would show
-    // the old picture's blur under the new one's rectangle.
+    // Nothing worked out for the old picture's annotations means anything for
+    // the new one's.
     effectCache_.clear();
+    effectSource_.clear();
+    geometryCache_.clear();
+    layoutCache_.clear();
 }
 
 void Renderer::Resize(UINT width, UINT height) noexcept {
@@ -44,12 +47,49 @@ void Renderer::InvalidateEffect(unsigned int id) noexcept {
     effectCache_.erase(id);
 }
 
+void Renderer::ReportStats() const noexcept {
+    ccl::timing::ReportFrames(L"  picture", pictureStats_);
+    ccl::timing::ReportFrames(L"  annotations", annotationStats_);
+    ccl::timing::ReportFrames(L"  present", presentStats_);
+}
+
+// Everything cached is tied to a device that has gone, apart from the text
+// layouts, which belong to DirectWrite rather than to the render target.
 void Renderer::DiscardDeviceResources() noexcept {
     effectCache_.clear();
+    geometryCache_.clear();
+    highlightLayer_.Reset();
     brush_.Reset();
     image_.Reset();
     target_.Reset();
     windowTarget_.Reset();
+}
+
+void Renderer::PruneCaches() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    const size_t count = document_->Annotations().size();
+
+    // Undoing leaves results behind for annotations that are no longer in the
+    // list, and redoing wants them straight back, so they are not dropped the
+    // moment they go unused. Only once there are clearly more than the picture
+    // could account for is the lot thrown away and built again as needed.
+    const size_t limit = count * 2 + 32;
+    if (effectCache_.size() > limit) {
+        effectCache_.clear();
+    }
+    // The sources go with them: without one an effect cannot be processed at
+    // all, and they are the largest thing kept here.
+    if (effectSource_.size() > limit) {
+        effectSource_.clear();
+    }
+    if (geometryCache_.size() > limit) {
+        geometryCache_.clear();
+    }
+    if (layoutCache_.size() > limit) {
+        layoutCache_.clear();
+    }
 }
 
 bool Renderer::EnsureTarget() noexcept {
@@ -148,13 +188,40 @@ void Renderer::DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept {
     }
 }
 
-void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
+namespace {
+
+// The area a stroke covers, in image coordinates, widened by the thickest it
+// gets so that nothing is clipped off the ends or the sides.
+D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke) noexcept {
+    float left = stroke.points.front().x;
+    float top = stroke.points.front().y;
+    float right = left;
+    float bottom = top;
+    float widest = 0.0f;
+
+    for (const ccl::doc::StrokePoint& point : stroke.points) {
+        left = (std::min)(left, point.x);
+        top = (std::min)(top, point.y);
+        right = (std::max)(right, point.x);
+        bottom = (std::max)(bottom, point.y);
+        widest = (std::max)(widest, point.width);
+    }
+
+    const float margin = widest * 0.5f + 1.0f;
+    return D2D1::RectF(left - margin, top - margin, right + margin,
+                       bottom + margin);
+}
+
+}  // namespace
+
+void Renderer::DrawStroke(const ccl::doc::Stroke& stroke,
+                          unsigned int id) noexcept {
     if (stroke.points.empty() || !brush_) {
         return;
     }
 
     if (!stroke.highlighter) {
-        DrawStrokeShape(stroke);
+        DrawStrokeShape(stroke, id);
         return;
     }
 
@@ -162,23 +229,66 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke) noexcept {
     // wherever the stroke crosses itself. Drawing the segments translucent
     // instead would darken every overlap, which is exactly what a highlighter
     // does not do.
-    Microsoft::WRL::ComPtr<ID2D1Layer> layer;
-    if (FAILED(target_->CreateLayer(nullptr, &layer))) {
-        DrawStrokeShape(stroke);
+    //
+    // The layer object is made once and reused, and it is bounded to the
+    // stroke rather than left unbounded: an unbounded layer needs an
+    // intermediate the size of the whole window, for every highlighter stroke,
+    // on every frame.
+    if (!highlightLayer_ && FAILED(target_->CreateLayer(nullptr,
+                                                        &highlightLayer_))) {
+        DrawStrokeShape(stroke, id);
         return;
     }
 
     target_->PushLayer(
-        D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr,
+        D2D1::LayerParameters(StrokeBounds(stroke), nullptr,
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                               D2D1::IdentityMatrix(),
                               ccl::doc::kHighlighterOpacity),
-        layer.Get());
-    DrawStrokeShape(stroke);
+        highlightLayer_.Get());
+    DrawStrokeShape(stroke, id);
     target_->PopLayer();
 }
 
-void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke) noexcept {
+ID2D1PathGeometry* Renderer::StrokeGeometry(const ccl::doc::Stroke& stroke,
+                                            unsigned int id) noexcept {
+    if (id != 0) {
+        const auto cached = geometryCache_.find(id);
+        if (cached != geometryCache_.end()) {
+            return cached->second.Get();
+        }
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> geometry;
+    if (context_->Factory() == nullptr ||
+        FAILED(context_->Factory()->CreatePathGeometry(&geometry))) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(&sink))) {
+        return nullptr;
+    }
+
+    sink->BeginFigure(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
+                      D2D1_FIGURE_BEGIN_HOLLOW);
+    for (size_t i = 1; i < stroke.points.size(); ++i) {
+        sink->AddLine(D2D1::Point2F(stroke.points[i].x, stroke.points[i].y));
+    }
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+
+    // The stroke being drawn is a different shape every frame, so it is built
+    // and thrown away; a finished one is kept, since it never changes again.
+    if (id == 0) {
+        transientGeometry_ = geometry;
+        return transientGeometry_.Get();
+    }
+    return (geometryCache_[id] = geometry).Get();
+}
+
+void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke,
+                               unsigned int id) noexcept {
     brush_->SetColor(ToD2D(stroke.color));
     target_->SetAntialiasMode(stroke.antialias
                                   ? D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
@@ -199,26 +309,12 @@ void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke) noexcept {
         return;
     }
 
-    Microsoft::WRL::ComPtr<ID2D1PathGeometry> geometry;
-    if (context_->Factory() == nullptr ||
-        FAILED(context_->Factory()->CreatePathGeometry(&geometry))) {
+    ID2D1PathGeometry* geometry = StrokeGeometry(stroke, id);
+    if (geometry == nullptr) {
         return;
     }
 
-    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(geometry->Open(&sink))) {
-        return;
-    }
-
-    sink->BeginFigure(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
-                      D2D1_FIGURE_BEGIN_HOLLOW);
-    for (size_t i = 1; i < stroke.points.size(); ++i) {
-        sink->AddLine(D2D1::Point2F(stroke.points[i].x, stroke.points[i].y));
-    }
-    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-    sink->Close();
-
-    target_->DrawGeometry(geometry.Get(), brush_.Get(),
+    target_->DrawGeometry(geometry, brush_.Get(),
                           stroke.points.front().width, strokeStyle_.Get());
 }
 
@@ -418,9 +514,173 @@ void ApplyBlur(std::vector<unsigned char>& pixels, int width, int height,
 
 }  // namespace
 
-ID2D1Bitmap* Renderer::EffectBitmap(
-    const ccl::doc::EffectAnnotation& effect) noexcept {
-    const auto cached = effectCache_.find(effect.id);
+// Draws the annotations below `limit` onto a cropped piece of the picture,
+// which sits at (left, top) in image coordinates. Returns false if it could
+// not be done, in which case the piece is left as the picture alone.
+bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
+                                  int top, size_t limit) noexcept {
+    if (context_ == nullptr || document_ == nullptr || !region.IsValid()) {
+        return false;
+    }
+    IWICImagingFactory* imaging = context_->Imaging();
+    if (imaging == nullptr || context_->Factory() == nullptr) {
+        return false;
+    }
+
+    const UINT width = static_cast<UINT>(region.Width());
+    const UINT height = static_cast<UINT>(region.Height());
+    const UINT stride = region.Stride();
+    const UINT bytes = stride * height;
+
+    // The screen grab leaves the alpha bytes at zero. Read as premultiplied
+    // that is a fully transparent picture, and everything drawn on top of it
+    // would come back as a smear, so the piece is made opaque first.
+    auto* pixels = static_cast<unsigned char*>(region.Pixels());
+    for (UINT i = 3; i < bytes; i += 4) {
+        pixels[i] = 255;
+    }
+
+    // Made the same way the off-screen render makes its surface, which is the
+    // call known to produce something this can draw into, and seeded with the
+    // piece of picture through a lock.
+    Microsoft::WRL::ComPtr<IWICBitmap> surface;
+    if (FAILED(imaging->CreateBitmap(width, height,
+                                     GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, &surface))) {
+        return false;
+    }
+    {
+        const WICRect whole{0, 0, static_cast<INT>(width),
+                            static_cast<INT>(height)};
+        Microsoft::WRL::ComPtr<IWICBitmapLock> lock;
+        if (FAILED(surface->Lock(&whole, WICBitmapLockWrite, &lock))) {
+            return false;
+        }
+        UINT lockStride = 0;
+        UINT lockSize = 0;
+        BYTE* lockPixels = nullptr;
+        if (FAILED(lock->GetStride(&lockStride)) ||
+            FAILED(lock->GetDataPointer(&lockSize, &lockPixels))) {
+            return false;
+        }
+        for (UINT y = 0; y < height; ++y) {
+            std::memcpy(lockPixels + static_cast<size_t>(y) * lockStride,
+                        pixels + static_cast<size_t>(y) * stride, stride);
+        }
+    }
+
+    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> offscreen;
+    if (FAILED(context_->Factory()->CreateWicBitmapRenderTarget(
+            surface.Get(), properties, &offscreen))) {
+        return false;
+    }
+
+    // Deliberately no picture bitmap: the piece already holds the picture, so
+    // there is nothing here that grows with the size of the capture.
+    auto savedTarget = target_;
+    auto savedBrush = brush_;
+    auto savedCache = std::move(effectCache_);
+    effectCache_.clear();
+
+    target_ = offscreen;
+    brush_.Reset();
+
+    bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
+        D2D1::ColorF(D2D1::ColorF::White), &brush_));
+
+    if (ok) {
+        target_->BeginDraw();
+        target_->SetTransform(D2D1::Matrix3x2F::Translation(
+            -static_cast<float>(left), -static_cast<float>(top)));
+
+        const ccl::doc::AnnotationList& annotations = document_->Annotations();
+        const size_t drawn = (std::min)(limit, annotations.size());
+        for (size_t i = 0; i < drawn; ++i) {
+            const ccl::doc::Annotation& annotation = annotations[i];
+            switch (annotation.kind) {
+                case ccl::doc::AnnotationKind::Stroke:
+                    DrawStroke(annotation.stroke, annotation.id);
+                    break;
+                case ccl::doc::AnnotationKind::Text:
+                    DrawText(annotation.text, annotation.id);
+                    break;
+                case ccl::doc::AnnotationKind::Effect:
+                    DrawEffect(annotation.effect, annotation.id);
+                    break;
+            }
+        }
+
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        ok = SUCCEEDED(target_->EndDraw());
+    }
+
+    target_ = savedTarget;
+    brush_ = savedBrush;
+    effectCache_ = std::move(savedCache);
+
+    return ok && SUCCEEDED(surface->CopyPixels(nullptr, stride, bytes, pixels));
+}
+
+void Renderer::CaptureEffectSources() noexcept {
+    if (document_ == nullptr || !document_->IsValid()) {
+        return;
+    }
+
+    const ccl::doc::AnnotationList& annotations = document_->Annotations();
+    for (size_t i = 0; i < annotations.size(); ++i) {
+        const ccl::doc::Annotation& annotation = annotations[i];
+        if (annotation.kind != ccl::doc::AnnotationKind::Effect ||
+            effectSource_.count(annotation.id) != 0) {
+            continue;
+        }
+
+        const ccl::doc::EffectAnnotation& effect = annotation.effect;
+        const RECT area{static_cast<LONG>(effect.left),
+                        static_cast<LONG>(effect.top),
+                        static_cast<LONG>(effect.right),
+                        static_cast<LONG>(effect.bottom)};
+
+        // Only the region, taken straight out of the picture. Working through
+        // a full-size off-screen render instead put the whole capture through
+        // software rendering for the sake of a small rectangle.
+        ccl::capture::DibBuffer region = document_->Image().Crop(area);
+        if (!region.IsValid()) {
+            continue;
+        }
+
+        // Only the annotations below this one, so an effect never takes its
+        // own output as its input, and anything drawn afterwards stays on top
+        // of it rather than being baked into it. If this cannot be done, the
+        // picture on its own still hides the area, which matters more than
+        // the strokes being included in what is hidden.
+        const bool overlaid = OverlayAnnotations(
+            region, static_cast<int>(area.left), static_cast<int>(area.top), i);
+
+        if (ccl::timing::g_enabled) {
+            wchar_t line[160];
+            ::swprintf_s(line,
+                         L"[timing] effect source          %4dx%-4d  %2zu below"
+                         L"  overlay %s\n",
+                         region.Width(), region.Height(), i,
+                         overlaid ? L"ok" : L"FAILED");
+            ccl::timing::Write(line);
+        }
+
+        // Stored either way. Retrying every frame is how a failure here turned
+        // into the effect never appearing at all.
+        effectSource_[annotation.id] = std::move(region);
+    }
+}
+
+ID2D1Bitmap* Renderer::EffectBitmap(const ccl::doc::EffectAnnotation& effect,
+                                    unsigned int id) noexcept {
+    const auto cached = effectCache_.find(id);
     if (cached != effectCache_.end()) {
         return cached->second.Get();
     }
@@ -429,16 +689,18 @@ ID2D1Bitmap* Renderer::EffectBitmap(
         return nullptr;
     }
 
-    const auto& source = document_->Image();
-    const int left = std::clamp(static_cast<int>(effect.left), 0, source.Width());
-    const int top = std::clamp(static_cast<int>(effect.top), 0, source.Height());
-    const int right =
-        std::clamp(static_cast<int>(effect.right), left, source.Width());
-    const int bottom =
-        std::clamp(static_cast<int>(effect.bottom), top, source.Height());
+    // What was under the area when the effect was placed, picture and drawing
+    // together. Taken from the bare capture instead, the area would come back
+    // showing pixels that never had the pen strokes in them -- which read as
+    // the strokes having been rubbed out rather than obscured.
+    const auto stored = effectSource_.find(id);
+    if (stored == effectSource_.end() || !stored->second.IsValid()) {
+        return nullptr;
+    }
+    const ccl::capture::DibBuffer& source = stored->second;
 
-    const int width = right - left;
-    const int height = bottom - top;
+    const int width = source.Width();
+    const int height = source.Height();
     if (width <= 0 || height <= 0) {
         return nullptr;
     }
@@ -447,8 +709,7 @@ ID2D1Bitmap* Renderer::EffectBitmap(
     const auto* origin = static_cast<const unsigned char*>(source.Pixels());
     for (int y = 0; y < height; ++y) {
         std::memcpy(pixels.data() + static_cast<size_t>(y) * width * 4u,
-                    origin + static_cast<size_t>(top + y) * source.Stride() +
-                        static_cast<size_t>(left) * 4u,
+                    origin + static_cast<size_t>(y) * source.Stride(),
                     static_cast<size_t>(width) * 4u);
     }
 
@@ -470,17 +731,18 @@ ID2D1Bitmap* Renderer::EffectBitmap(
         return nullptr;
     }
 
-    return (effectCache_[effect.id] = bitmap).Get();
+    return (effectCache_[id] = bitmap).Get();
 }
 
-void Renderer::DrawEffect(const ccl::doc::EffectAnnotation& effect) noexcept {
+void Renderer::DrawEffect(const ccl::doc::EffectAnnotation& effect,
+                          unsigned int id) noexcept {
     // Zero strength means the area is left as it is; the annotation stays so
     // the effect can be turned back up.
     if (effect.strength <= 0.0f) {
         return;
     }
 
-    ID2D1Bitmap* bitmap = EffectBitmap(effect);
+    ID2D1Bitmap* bitmap = EffectBitmap(effect, id);
     if (bitmap == nullptr) {
         return;
     }
@@ -520,14 +782,49 @@ bool Renderer::MeasureLine(const ccl::doc::TextAnnotation& text,
     return true;
 }
 
-void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
+IDWriteTextLayout* Renderer::TextLayout(const ccl::doc::TextAnnotation& text,
+                                        unsigned int id) noexcept {
+    if (id != 0) {
+        const auto cached = layoutCache_.find(id);
+        if (cached != layoutCache_.end()) {
+            return cached->second.Get();
+        }
+    }
+
+    // Deliberately without the per-range colours. Those are attached by the
+    // caller, after the shadow and the outline have been laid down, because a
+    // layout that already carried them would colour those too and turn them
+    // into a blurred copy of the text rather than a backing for it.
+    auto layout = BuildLayout(context_->Text(), text);
+    if (!layout) {
+        return nullptr;
+    }
+
+    if (id == 0) {
+        transientLayout_ = layout;
+        return transientLayout_.Get();
+    }
+    return (layoutCache_[id] = layout).Get();
+}
+
+void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
+                        unsigned int id) noexcept {
     if (text.text.empty() || !brush_ || context_ == nullptr) {
         return;
     }
 
-    const auto layout = BuildLayout(context_->Text(), text);
-    if (!layout) {
+    IDWriteTextLayout* layout = TextLayout(text, id);
+    if (layout == nullptr) {
         return;
+    }
+
+    // A kept layout still carries the colours the last pass attached to it, so
+    // they are taken off before the shadow and outline go down. Without this
+    // the second frame onwards would draw a coloured shadow.
+    if (!text.runs.empty()) {
+        layout->SetDrawingEffect(
+            nullptr,
+            DWRITE_TEXT_RANGE{0, static_cast<UINT32>(text.text.size())});
     }
 
     target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -540,7 +837,7 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
         const float offset = std::max(1.0f, text.fontSize * 0.06f);
         brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.55f));
         target_->DrawTextLayout(
-            D2D1::Point2F(origin.x + offset, origin.y + offset), layout.Get(),
+            D2D1::Point2F(origin.x + offset, origin.y + offset), layout,
             brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
     }
 
@@ -555,14 +852,14 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
                 target_->DrawTextLayout(
                     D2D1::Point2F(origin.x + static_cast<float>(dx) * offset,
                                   origin.y + static_cast<float>(dy) * offset),
-                    layout.Get(), brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    layout, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
     }
 
-    // Per-range colour is attached only for the final pass. The shadow and
-    // outline underneath are deliberately flat -- picking up the text colours
-    // would turn them into a blurred copy rather than a backing.
+    // Per-range colour is attached only for the final pass, so the shadow and
+    // outline above stay flat. Cheap next to laying the text out, which is
+    // what the layout is kept for.
     for (const ccl::doc::TextRun& run : text.runs) {
         Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> runBrush;
         if (SUCCEEDED(target_->CreateSolidColorBrush(ToD2D(run.color),
@@ -573,7 +870,7 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text) noexcept {
     }
 
     brush_->SetColor(ToD2D(text.color));
-    target_->DrawTextLayout(origin, layout.Get(), brush_.Get(),
+    target_->DrawTextLayout(origin, layout, brush_.Get(),
                             D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
@@ -595,6 +892,10 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         watch.Lap(L"  d2d image bitmap");
     }
 
+    // Before the frame opens: this draws to a target of its own, which cannot
+    // be done once BeginDraw below has been called.
+    CaptureEffectSources();
+
     target_->BeginDraw();
 
     // Clearing to the outline colour and insetting the content by the border
@@ -612,6 +913,7 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         D2D1::Matrix3x2F::Translation(inset - static_cast<float>(scroll.x),
                                       inset - static_cast<float>(scroll.y)));
 
+    const LONGLONG pictureStart = ccl::timing::Mark();
     if (image_) {
         const D2D1_SIZE_F size = image_->GetSize();
         const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
@@ -621,25 +923,29 @@ void Renderer::Draw(const ccl::view::ViewState& view,
                             D2D1::RectF(0.0f, 0.0f, size.width, size.height),
                             1.0f, interpolation);
     }
+    ccl::timing::AddSince(pictureStats_, pictureStart);
 
+    const LONGLONG annotationStart = ccl::timing::Mark();
     if (document_ != nullptr) {
         for (const auto& annotation : document_->Annotations()) {
             switch (annotation.kind) {
                 case ccl::doc::AnnotationKind::Stroke:
-                    DrawStroke(annotation.stroke);
+                    DrawStroke(annotation.stroke, annotation.id);
                     break;
                 case ccl::doc::AnnotationKind::Text:
-                    DrawText(annotation.text);
+                    DrawText(annotation.text, annotation.id);
                     break;
                 case ccl::doc::AnnotationKind::Effect:
-                    DrawEffect(annotation.effect);
+                    DrawEffect(annotation.effect, annotation.id);
                     break;
             }
         }
     }
     if (active != nullptr) {
-        DrawStroke(*active);
+        // No id: the stroke in progress is a different shape every frame.
+        DrawStroke(*active, 0);
     }
+    ccl::timing::AddSince(annotationStats_, annotationStart);
 
     if (highlight != nullptr && brush_) {
         // Marks what a click would pick up. Drawn slightly outside the text so
@@ -683,9 +989,17 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {
+    // Direct2D queues the drawing above and does it here, so this covers the
+    // work itself as well as getting the result onto the screen.
+    const LONGLONG presentStart = ccl::timing::Mark();
+    const HRESULT presented = target_->EndDraw();
+    ccl::timing::AddSince(presentStats_, presentStart);
+
+    if (presented == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
     }
+
+    PruneCaches();
 
     if (measure) {
         watch.Lap(L"  d2d present");
@@ -697,6 +1011,10 @@ ccl::capture::DibBuffer Renderer::Flatten() noexcept {
     if (document_ == nullptr || !document_->IsValid()) {
         return {};
     }
+    // An effect with nothing to process draws nothing, and an area that was
+    // meant to be hidden would go out unhidden. Saving and copying come
+    // through here, so the sources are made sure of first.
+    CaptureEffectSources();
     return RenderOffscreen(static_cast<UINT>(document_->Width()),
                            static_cast<UINT>(document_->Height()),
                            D2D1::Matrix3x2F::Identity(), false);
@@ -706,6 +1024,9 @@ ccl::capture::DibBuffer Renderer::CaptureView(
     UINT width, UINT height, const ccl::view::ViewState& view) noexcept {
     const float zoom = view.Zoom();
     const POINT scroll = view.Scroll();
+
+    // As for Flatten: what an effect hides has to survive being captured.
+    CaptureEffectSources();
 
     // The window's transform without its border inset, and sized to the area
     // inside the border. Taking the outline too would make the picture two
@@ -797,13 +1118,13 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
         for (const auto& annotation : document_->Annotations()) {
             switch (annotation.kind) {
                 case ccl::doc::AnnotationKind::Stroke:
-                    DrawStroke(annotation.stroke);
+                    DrawStroke(annotation.stroke, annotation.id);
                     break;
                 case ccl::doc::AnnotationKind::Text:
-                    DrawText(annotation.text);
+                    DrawText(annotation.text, annotation.id);
                     break;
                 case ccl::doc::AnnotationKind::Effect:
-                    DrawEffect(annotation.effect);
+                    DrawEffect(annotation.effect, annotation.id);
                     break;
             }
         }

@@ -32,6 +32,7 @@ enum class Command {
     Highlighter,
     Antialias,
     FitToImage,
+    HideWindow,
     Count,
 };
 
@@ -68,11 +69,16 @@ public:
         return bindings_[static_cast<size_t>(command)];
     }
 
-    // Assigns a key, taking it away from whichever command had it. Two commands
-    // sharing a binding would make one of them unreachable, and which one is
-    // pure luck.
-    void Assign(Command command, const Binding& binding) noexcept;
+    // Plain assignment: a key already in use is left where it is and the clash
+    // is reported instead. Taking it off the other command quietly is a change
+    // no one sees until that other command is missed.
+    void Set(Command command, const Binding& binding) noexcept;
     void Clear(Command command) noexcept;
+
+    // True when another command has been given the same key. Two commands
+    // sharing a binding would make one of them unreachable, and which one is
+    // pure luck, so this is what the settings window refuses to accept.
+    bool Conflicts(Command command) const noexcept;
 
     // The command a key press means, or Count for none.
     Command Lookup(const Binding& pressed) const noexcept;

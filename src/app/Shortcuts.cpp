@@ -31,6 +31,7 @@ constexpr CommandInfo kCommands[] = {
     {L"Highlighter", L"蛍光マーカー", {'H', false, false, false}},
     {L"Antialias", L"なめらかにする", {'A', false, false, false}},
     {L"FitToImage", L"画像サイズに合わせる", {'F', false, false, false}},
+    {L"HideWindow", L"しばらく隠す", {'X', false, false, false}},
 };
 
 static_assert(ARRAYSIZE(kCommands) == static_cast<size_t>(Command::Count),
@@ -175,19 +176,26 @@ void Shortcuts::ResetToDefaults() noexcept {
     }
 }
 
-void Shortcuts::Assign(Command command, const Binding& binding) noexcept {
-    if (binding.IsSet()) {
-        for (Binding& existing : bindings_) {
-            if (existing == binding) {
-                existing = Binding{};
-            }
-        }
-    }
+void Shortcuts::Set(Command command, const Binding& binding) noexcept {
     bindings_[static_cast<size_t>(command)] = binding;
 }
 
 void Shortcuts::Clear(Command command) noexcept {
     bindings_[static_cast<size_t>(command)] = Binding{};
+}
+
+bool Shortcuts::Conflicts(Command command) const noexcept {
+    const size_t self = static_cast<size_t>(command);
+    const Binding& mine = bindings_[self];
+    if (!mine.IsSet()) {
+        return false;
+    }
+    for (size_t i = 0; i < bindings_.size(); ++i) {
+        if (i != self && bindings_[i] == mine) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Command Shortcuts::Lookup(const Binding& pressed) const noexcept {
