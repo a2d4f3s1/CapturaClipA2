@@ -322,6 +322,10 @@ CMake は Visual Studio に同梱のものが使えます。生成された `bui
 
 C ランタイムを静的リンクしているため、出力される実行ファイル 1 つだけで動作します。
 
+## 変更履歴
+
+[CHANGELOG.md](CHANGELOG.md) にまとめています。
+
 ## ライセンス
 
 MIT License。詳しくは `LICENSE` を参照してください。**無保証です。**
