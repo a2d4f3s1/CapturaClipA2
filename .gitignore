@@ -6,12 +6,12 @@
 
 # Explicitly track these
 !/.gitignore
-!/CLAUDE.md
 !/README.md
 !/CHANGELOG.md
 !/LICENSE
 !/CMakeLists.txt
 !/src/
+!/docs/
 
 # Safety-net patterns that apply inside tracked directories too
 **/.vs/
