@@ -88,12 +88,40 @@ Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> D2DContext::CreateHwndTarget(
     }
 
     if (ccl::timing::g_enabled) {
-        // The size goes in the line as well: what it costs to put a frame on
-        // the screen follows the number of pixels in it, so the two numbers
-        // only mean anything together.
-        wchar_t line[128];
-        ::swprintf_s(line, L"[timing] render target          %-8s %ux%u\n", kind,
-                     width, height);
+        // Where the window is goes in as well as how big it is. The cost of a
+        // frame turned out not to follow the pixel count alone, and the other
+        // thing it might follow is which output has to be handed the result --
+        // the displays here are on three different adapters, at two different
+        // refresh rates, and one of them is not a graphics output at all.
+        MONITORINFOEXW monitor{};
+        monitor.cbSize = sizeof(monitor);
+        const HMONITOR handle =
+            ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+
+        wchar_t where[96] = L"?";
+        if (::GetMonitorInfoW(handle, &monitor)) {
+            DEVMODEW mode{};
+            mode.dmSize = sizeof(mode);
+            const DWORD refresh =
+                ::EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS,
+                                       &mode)
+                    ? mode.dmDisplayFrequency
+                    : 0;
+
+            RECT bounds{};
+            ::GetWindowRect(hwnd, &bounds);
+            const bool spans = bounds.left < monitor.rcMonitor.left ||
+                               bounds.top < monitor.rcMonitor.top ||
+                               bounds.right > monitor.rcMonitor.right ||
+                               bounds.bottom > monitor.rcMonitor.bottom;
+
+            ::swprintf_s(where, L"%s %luHz %s", monitor.szDevice, refresh,
+                         spans ? L"spanning" : L"single");
+        }
+
+        wchar_t line[192];
+        ::swprintf_s(line, L"[timing] render target          %-8s %ux%u  %s\n",
+                     kind, width, height, where);
         ccl::timing::Write(line);
     }
     return target;
