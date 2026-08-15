@@ -154,6 +154,10 @@ private:
     // including the pixels.
     void ApplyTransform(ccl::capture::DibBuffer transformed) noexcept;
     void CropToSelection() noexcept;
+    // Turns the picture by an angle chosen in a dialog. Kept apart from the
+    // quarter turns because it resamples: those move pixels about and lose
+    // nothing, this one cannot.
+    void RotateFreely() noexcept;
     void OpenSettings() noexcept;
     // Takes the window's own contents as the new picture, at the size they are
     // being shown. Zooming in and then doing this is how a detail is enlarged

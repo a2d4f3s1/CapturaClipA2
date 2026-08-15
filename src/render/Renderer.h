@@ -71,6 +71,17 @@ public:
     ccl::capture::DibBuffer CaptureView(
         UINT width, UINT height, const ccl::view::ViewState& view) noexcept;
 
+    // The picture and its annotations turned by `degrees`, on a surface grown
+    // to fit the corners. What the turn leaves uncovered is filled with `fill`.
+    //
+    // `scale` shrinks the whole result, which is what makes a preview cheap:
+    // the same call at a small scale while the angle is being chosen, and at
+    // 1.0 once it is settled. Turning always resamples, so the picture is only
+    // ever built from the original -- previewing costs it nothing.
+    ccl::capture::DibBuffer RenderRotated(float degrees,
+                                          const ccl::doc::Color& fill,
+                                          float scale) noexcept;
+
     // Bounding box of a piece of text in image coordinates, used to work out
     // which one was clicked. Returns false if it could not be measured.
     bool MeasureText(const ccl::doc::TextAnnotation& text,
@@ -81,6 +92,19 @@ public:
     // text sit on the same lines.
     bool MeasureLine(const ccl::doc::TextAnnotation& text, float& lineHeight,
                      float& baseline) noexcept;
+
+    // Turns what is on screen without touching the picture, so an angle can be
+    // judged against the real thing at its real size rather than a thumbnail.
+    // The zoom is left alone: what falls outside the window is simply not seen,
+    // and committing grows the picture to fit its corners, so nothing is lost.
+    //
+    // `fill` is shown wherever the turn leaves the picture, so that the padding
+    // being previewed is the padding that will be applied. Zero degrees puts
+    // everything back.
+    void SetPreviewRotation(float degrees, const ccl::doc::Color& fill) noexcept {
+        previewRotation_ = degrees;
+        previewFill_ = fill;
+    }
 
     // Smooth interpolation looks better for photographs and text, nearest
     // neighbour is what you want when inspecting individual pixels.
@@ -97,9 +121,17 @@ private:
     bool EnsureImageBitmap() noexcept;
     // Draws the document into a buffer of the given size through `transform`,
     // on a target that can be read back on the CPU.
+    // `background` fills the surface before anything is drawn; without one,
+    // whatever the picture does not cover is left as it started.
+    //
+    // `interpolate` is separate on purpose. Clearing and smoothing sound like
+    // they go together -- and did, while the only callers were saving at 1:1
+    // and capturing a zoomed view -- but a turn needs smoothing over a filled
+    // background, and saving needs neither. Tying them to one flag hides that.
     ccl::capture::DibBuffer RenderOffscreen(UINT width, UINT height,
                                             const D2D1_MATRIX_3X2_F& transform,
-                                            bool clearBackground) noexcept;
+                                            const D2D1_COLOR_F* background,
+                                            bool interpolate) noexcept;
     // Draws the annotations below `limit` onto a piece of the picture that was
     // cropped out at (left, top). Works on the piece alone, so what it costs
     // follows the size of the area rather than the size of the capture.
@@ -170,6 +202,10 @@ private:
     // intermediate surface, and asking for a new one per stroke per frame is
     // the one cost here that grows with the size of the capture.
     Microsoft::WRL::ComPtr<ID2D1Layer> highlightLayer_;
+
+    // Non-zero only while a rotation is being previewed.
+    float previewRotation_ = 0.0f;
+    ccl::doc::Color previewFill_{};
 
     int border_ = kWindowBorder;
     bool smoothScaling_ = true;

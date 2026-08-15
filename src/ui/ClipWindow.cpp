@@ -20,6 +20,7 @@
 #include "render/D2DContext.h"
 #include "res/Resources.h"
 #include "ui/ColorPopup.h"
+#include "ui/RotateDialog.h"
 #include "ui/SettingsDialog.h"
 #include "util/Dpi.h"
 #include "util/NameFormat.h"
@@ -206,6 +207,7 @@ enum MenuId : UINT {
     kMenuRotateLeft,
     kMenuRotateRight,
     kMenuRotate180,
+    kMenuRotateFree,
     kMenuFlipHorizontal,
     kMenuFlipVertical,
     kMenuConcatRight,
@@ -3224,6 +3226,7 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(image, plain, kMenuRotateLeft, L"左に 90 度回転");
     ::AppendMenuW(image, plain, kMenuRotateRight, L"右に 90 度回転");
     ::AppendMenuW(image, plain, kMenuRotate180, L"180 度回転");
+    ::AppendMenuW(image, plain, kMenuRotateFree, L"自由に回転...");
     ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(image, plain, kMenuFlipHorizontal, L"左右反転");
     ::AppendMenuW(image, plain, kMenuFlipVertical, L"上下反転");
@@ -3363,6 +3366,9 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuRotate180:
             ApplyTransform(ccl::io::Rotate180(FlattenForTransform()));
+            return;
+        case kMenuRotateFree:
+            RotateFreely();
             return;
         case kMenuFlipHorizontal:
             ApplyTransform(ccl::io::FlipHorizontal(FlattenForTransform()));
@@ -3643,6 +3649,42 @@ void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
     ClampScroll();
     UpdateTitle();
     Draw();
+}
+
+void ClipWindow::RotateFreely() noexcept {
+    if (document_ == nullptr || !document_->IsValid()) {
+        return;
+    }
+    // Anything still being typed becomes part of the picture first, as it does
+    // for every other reshaping.
+    if (EditingText()) {
+        CommitText();
+    }
+
+    // Black for the corners a turn leaves empty, matching what joining two
+    // pictures fills with.
+    constexpr ccl::doc::Color fill{0.0f, 0.0f, 0.0f, 1.0f};
+
+    // The angle is shown on the picture itself while it is being chosen, at its
+    // own size. What falls outside the window is only out of sight -- settling
+    // grows the picture to fit its corners.
+    const auto degrees =
+        ccl::ui::ShowRotateDialog(hwnd_, [this, fill](float angle) {
+            renderer_.SetPreviewRotation(angle, fill);
+            Draw();
+        });
+
+    // The dialog puts the preview back on its way out. Cleared again here
+    // because a turn left on screen would outlive the dialog that caused it,
+    // and that is not a fault worth risking to save a line.
+    renderer_.SetPreviewRotation(0.0f, fill);
+
+    if (!degrees.has_value()) {
+        Draw();
+        return;
+    }
+
+    ApplyTransform(renderer_.RenderRotated(*degrees, fill, 1.0f));
 }
 
 void ClipWindow::CropToSelection() noexcept {

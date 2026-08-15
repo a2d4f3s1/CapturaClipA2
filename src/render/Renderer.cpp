@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <numbers>
 #include <vector>
 
 #include "doc/Document.h"
@@ -901,7 +902,12 @@ void Renderer::Draw(const ccl::view::ViewState& view,
 
     // Clearing to the outline colour and insetting the content by the border
     // width leaves exactly a one pixel frame around the capture.
-    target_->Clear(D2D1::ColorF(0.29f, 0.29f, 0.29f));
+    //
+    // While a turn is being previewed the padding colour takes over, so that
+    // what shows around the picture is what committing would fill in.
+    const bool previewing = previewRotation_ != 0.0f;
+    target_->Clear(previewing ? ToD2D(previewFill_)
+                              : D2D1::ColorF(0.29f, 0.29f, 0.29f));
 
     // Zoom and scroll are applied as a transform, so annotations are stored in
     // image coordinates and stay locked to the picture at any zoom level.
@@ -909,10 +915,22 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     const POINT scroll = view.Scroll();
     const auto inset = static_cast<float>(border_);
 
-    target_->SetTransform(
+    D2D1_MATRIX_3X2_F transform =
         D2D1::Matrix3x2F::Scale(zoom, zoom) *
         D2D1::Matrix3x2F::Translation(inset - static_cast<float>(scroll.x),
-                                      inset - static_cast<float>(scroll.y)));
+                                      inset - static_cast<float>(scroll.y));
+
+    // Turned about the middle of the picture, before the zoom and scroll, so
+    // the preview turns about the same point that committing does.
+    if (previewing && image_) {
+        const D2D1_SIZE_F picture = image_->GetSize();
+        transform = D2D1::Matrix3x2F::Rotation(
+                        previewRotation_, D2D1::Point2F(picture.width * 0.5f,
+                                                        picture.height * 0.5f)) *
+                    transform;
+    }
+
+    target_->SetTransform(transform);
 
     const LONGLONG pictureStart = ccl::timing::Mark();
     if (image_) {
@@ -1024,9 +1042,11 @@ ccl::capture::DibBuffer Renderer::Flatten() noexcept {
     // meant to be hidden would go out unhidden. Saving and copying come
     // through here, so the sources are made sure of first.
     CaptureEffectSources();
+    // No background and no smoothing: the picture covers the whole surface at
+    // its own size, and its pixels are wanted exactly as they are.
     return RenderOffscreen(static_cast<UINT>(document_->Width()),
                            static_cast<UINT>(document_->Height()),
-                           D2D1::Matrix3x2F::Identity(), false);
+                           D2D1::Matrix3x2F::Identity(), nullptr, false);
 }
 
 ccl::capture::DibBuffer Renderer::CaptureView(
@@ -1040,17 +1060,62 @@ ccl::capture::DibBuffer Renderer::CaptureView(
     // The window's transform without its border inset, and sized to the area
     // inside the border. Taking the outline too would make the picture two
     // pixels wider every time this was used.
+    // Whatever the picture does not cover shows the window's backing colour,
+    // the same as it does on screen.
+    const D2D1_COLOR_F backing = D2D1::ColorF(0.29f, 0.29f, 0.29f);
     return RenderOffscreen(
         width, height,
         D2D1::Matrix3x2F::Scale(zoom, zoom) *
             D2D1::Matrix3x2F::Translation(-static_cast<float>(scroll.x),
                                           -static_cast<float>(scroll.y)),
-        true);
+        &backing, true);
+}
+
+ccl::capture::DibBuffer Renderer::RenderRotated(float degrees,
+                                                const ccl::doc::Color& fill,
+                                                float scale) noexcept {
+    ccl::capture::DibBuffer result;
+    if (document_ == nullptr || !document_->IsValid() || scale <= 0.0f) {
+        return result;
+    }
+
+    const float width = static_cast<float>(document_->Width());
+    const float height = static_cast<float>(document_->Height());
+
+    // The box a turned picture needs. Direct2D takes the angle in degrees while
+    // the sines want radians, so the conversion is kept here, in the one place
+    // that needs both -- apart, the two would drift.
+    const float radians = degrees * std::numbers::pi_v<float> / 180.0f;
+    const float across = std::abs(std::cos(radians));
+    const float down = std::abs(std::sin(radians));
+    const float turnedWidth = width * across + height * down;
+    const float turnedHeight = width * down + height * across;
+
+    const auto scaled = [scale](float value) {
+        return static_cast<UINT>(std::max(1L, std::lround(value * scale)));
+    };
+
+    // Turn about the middle of the picture, slide that middle onto the middle
+    // of the larger surface, then shrink the lot when a preview asks for it.
+    const D2D1_MATRIX_3X2_F transform =
+        D2D1::Matrix3x2F::Rotation(
+            degrees, D2D1::Point2F(width * 0.5f, height * 0.5f)) *
+        D2D1::Matrix3x2F::Translation((turnedWidth - width) * 0.5f,
+                                      (turnedHeight - height) * 0.5f) *
+        D2D1::Matrix3x2F::Scale(scale, scale);
+
+    // As for saving: what an effect hides has to survive being turned, or the
+    // area comes back showing what it was put there to cover.
+    CaptureEffectSources();
+
+    const D2D1_COLOR_F background = ToD2D(fill);
+    return RenderOffscreen(scaled(turnedWidth), scaled(turnedHeight), transform,
+                           &background, true);
 }
 
 ccl::capture::DibBuffer Renderer::RenderOffscreen(
     UINT width, UINT height, const D2D1_MATRIX_3X2_F& transform,
-    bool clearBackground) noexcept {
+    const D2D1_COLOR_F* background, bool interpolate) noexcept {
     ccl::capture::DibBuffer result;
     if (context_ == nullptr || document_ == nullptr || !document_->IsValid() ||
         width == 0 || height == 0) {
@@ -1104,10 +1169,8 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
 
     if (ok) {
         target_->BeginDraw();
-        if (clearBackground) {
-            // Whatever the picture does not cover shows the window's backing
-            // colour, the same as it does on screen.
-            target_->Clear(D2D1::ColorF(0.29f, 0.29f, 0.29f));
+        if (background != nullptr) {
+            target_->Clear(*background);
         }
         target_->SetTransform(transform);
 
@@ -1120,7 +1183,7 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
         target_->DrawBitmap(image_.Get(),
                             D2D1::RectF(0.0f, 0.0f, size.width, size.height),
                             1.0f,
-                            clearBackground
+                            interpolate
                                 ? interpolation
                                 : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 
