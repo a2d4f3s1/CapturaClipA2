@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,32 @@ const std::vector<std::wstring>& InstalledFonts(IDWriteFactory* writer) {
 
 bool IsKeyDown(int key) noexcept {
     return (::GetKeyState(key) & 0x8000) != 0;
+}
+
+// Swings `to` round to the nearest multiple of `degrees` about `from`, keeping
+// how far away it is.
+//
+// The distance is kept rather than dropping a perpendicular onto the snapped
+// direction: pulling the pointer further out should still lengthen the line.
+// Only its angle is taken over.
+//
+// Zero degrees is how the setting turns snapping off. A pointer that has not
+// left the start comes back unchanged -- atan2(0, 0) is 0 and the distance is
+// 0 with it, so the result is the start itself.
+D2D1_POINT_2F SnapToAngle(D2D1_POINT_2F from, D2D1_POINT_2F to,
+                          float degrees) noexcept {
+    if (degrees <= 0.0f) {
+        return to;
+    }
+
+    const float dx = to.x - from.x;
+    const float dy = to.y - from.y;
+    const float step = degrees * std::numbers::pi_v<float> / 180.0f;
+    const float angle = std::round(std::atan2(dy, dx) / step) * step;
+    const float distance = std::sqrt(dx * dx + dy * dy);
+
+    return D2D1::Point2F(from.x + std::cos(angle) * distance,
+                         from.y + std::sin(angle) * distance);
 }
 
 // Context menu command ids. Ranges leave room for the per-entry items that
@@ -652,6 +679,18 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == VK_SPACE) {
                 spaceHeld_ = true;
                 UpdateCursor();
+                return 0;
+            }
+            // Shift pressed again part way through a straight line turns a
+            // corner: the end it has reached settles, and the next stretch
+            // carries on from there at the same width.
+            //
+            // Bit 30 of lParam is the previous key state. Without it, holding
+            // Shift down would lay a corner on every auto-repeat.
+            if (wParam == VK_SHIFT && drawing_ && straightLine_ &&
+                (lParam & 0x40000000) == 0 &&
+                activeStroke_.points.size() > fixedPoints_) {
+                fixedPoints_ = activeStroke_.points.size();
                 return 0;
             }
             OnKeyDown(wParam);
@@ -1723,6 +1762,8 @@ void ClipWindow::BeginStroke(POINT client, float pressure) noexcept {
     // Decided at press time and held for the whole stroke, so the line does not
     // flip between freehand and straight midway through.
     straightLine_ = IsKeyDown(VK_SHIFT);
+    // Only the start is settled; no corners have been laid down yet.
+    fixedPoints_ = 1;
     ::SetCapture(hwnd_);
     Draw();
 }
@@ -1731,15 +1772,34 @@ void ClipWindow::ContinueStroke(POINT client, float pressure) noexcept {
     const D2D1_POINT_2F point = ToImage(client);
 
     if (straightLine_) {
-        // Two points only. Both ends take a brush size rather than a pressure:
-        // the force of putting a pen down is hard to aim, whereas [ and ] can
-        // be nudged while the line is previewed. The far end keeps whatever
-        // width it was given, so moving the pointer does not undo it.
-        const float endWidth = activeStroke_.points.size() == 2
-                                   ? activeStroke_.points.back().width
-                                   : tool_.Width();
-        activeStroke_.points.resize(1);
-        activeStroke_.points.push_back({point.x, point.y, endWidth});
+        // Only the stretch past the settled points moves. Both ends take a
+        // brush size rather than a pressure: the force of putting a pen down is
+        // hard to aim, whereas [ and ] can be nudged while the line is
+        // previewed.
+        //
+        // Where the moving end's width comes from:
+        //  - a stretch already being aimed keeps the width it was given, so
+        //    moving the pointer does not undo an adjustment
+        //  - the first frame after a corner takes the corner's own width, so
+        //    the two stretches meet without a step in the line
+        //  - a line that has no corners yet starts from the brush size
+        const float endWidth =
+            (activeStroke_.points.size() > fixedPoints_ || fixedPoints_ > 1)
+                ? activeStroke_.points.back().width
+                : tool_.Width();
+        activeStroke_.points.resize(fixedPoints_);
+
+        // Alt swings the line onto a fixed angle. Read afresh every time
+        // rather than latched at the press, so it can be reached for -- and
+        // let go of -- while the line is still being aimed.
+        const D2D1_POINT_2F start = D2D1::Point2F(
+            activeStroke_.points.back().x, activeStroke_.points.back().y);
+        const D2D1_POINT_2F end =
+            IsKeyDown(VK_MENU) && settings_ != nullptr
+                ? SnapToAngle(start, point, settings_->lineSnapDegrees)
+                : point;
+
+        activeStroke_.points.push_back({end.x, end.y, endWidth});
     } else {
         const auto& last = activeStroke_.points.back();
         if (std::abs(last.x - point.x) < kMinPointSpacing &&
@@ -1757,6 +1817,7 @@ void ClipWindow::EndStroke() noexcept {
         return;
     }
     drawing_ = false;
+    fixedPoints_ = 1;
     ::ReleaseCapture();
 
     if (document_ != nullptr && !activeStroke_.points.empty()) {
@@ -2352,10 +2413,13 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             //
             // Each end steps from its own current width rather than from the
             // brush size, so adjusting one end leaves the other alone.
-            if (drawing_ && straightLine_ && activeStroke_.points.size() == 2) {
+            if (drawing_ && straightLine_ && activeStroke_.points.size() >= 2) {
+                // The stretch being aimed, not the line as a whole: past a
+                // corner, its near end is the corner itself.
+                const size_t last = activeStroke_.points.size() - 1;
                 float& target = IsKeyDown(VK_CONTROL)
-                                    ? activeStroke_.points.front().width
-                                    : activeStroke_.points.back().width;
+                                    ? activeStroke_.points[last - 1].width
+                                    : activeStroke_.points[last].width;
                 target = ccl::tool::ToolState::SteppedWidth(target, steps);
             } else {
                 tool_.StepWidth(steps);
@@ -2583,10 +2647,11 @@ void ClipWindow::UpdateTitle() noexcept {
         case ccl::tool::Tool::Pen:
             // While a straight line is being drawn, both ends are reported, so
             // it is clear which one the size keys just changed.
-            if (drawing_ && straightLine_ && activeStroke_.points.size() == 2) {
+            if (drawing_ && straightLine_ && activeStroke_.points.size() >= 2) {
+                const size_t last = activeStroke_.points.size() - 1;
                 ::swprintf_s(title, L"%s  %d%%  Line %.0f → %.0fpx", name.c_str(),
-                             zoom, activeStroke_.points.front().width,
-                             activeStroke_.points.back().width);
+                             zoom, activeStroke_.points[last - 1].width,
+                             activeStroke_.points[last].width);
                 break;
             }
             ::swprintf_s(title, L"%s  %d%%  %s %.0fpx%s", name.c_str(), zoom,

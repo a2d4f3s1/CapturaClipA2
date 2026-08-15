@@ -296,6 +296,13 @@ private:
 
     bool drawing_ = false;
     bool straightLine_ = false;
+    // How many points of the straight line have settled. Everything past this
+    // is the stretch still following the pointer.
+    //
+    // Pressing Shift again part way through settles the end it has reached and
+    // carries on from there, which is how a line turns a corner without the
+    // button being let go. One means only the start is settled.
+    size_t fixedPoints_ = 1;
     ccl::doc::Stroke activeStroke_;
 
     // Set while a pen is in contact, so pointer and mouse messages for the

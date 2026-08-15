@@ -67,6 +67,10 @@ public:
     // The eraser keeps its own size: it is usually wanted much wider than the
     // line it is rubbing out.
     float eraserWidth = 24.0f;
+    // Angle a straight line is pulled to while Alt is held, in degrees. Zero is
+    // a real value: it leaves the line free at any angle, which is what it does
+    // without Alt anyway.
+    float lineSnapDegrees = 15.0f;
 
     // Colours
     ccl::doc::QuickColors quickColors = ccl::doc::kDefaultQuickColors;

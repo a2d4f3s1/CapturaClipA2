@@ -179,6 +179,8 @@ void Settings::Load() noexcept {
     penColor = ParseColor(
         ReadString(L"Drawing", L"PenColor", ColorText(penColor), path_), penColor);
     eraserWidth = ReadFloat(L"Drawing", L"EraserWidth", eraserWidth, path_);
+    lineSnapDegrees =
+        ReadFloat(L"Drawing", L"LineSnapDegrees", lineSnapDegrees, path_);
 
     for (size_t i = 0; i < quickColors.size(); ++i) {
         wchar_t key[16];
@@ -237,6 +239,10 @@ void Settings::Clamp() noexcept {
     if (paletteScalePercent > 300) paletteScalePercent = 300;
     if (pressureMinScale < 0.0f) pressureMinScale = 0.0f;
     if (pressureMinScale > 1.0f) pressureMinScale = 1.0f;
+    // Zero stays as it is; it means the line is never pulled to an angle. Past
+    // half a turn the steps stop being distinct from one another.
+    if (lineSnapDegrees < 0.0f) lineSnapDegrees = 0.0f;
+    if (lineSnapDegrees > 180.0f) lineSnapDegrees = 180.0f;
 
     // Same bounds the brush enforces at runtime.
     const auto clampWidth = [](float& width) {
@@ -307,6 +313,9 @@ void Settings::Save() const noexcept {
                L"PenWidth=%g\n"
                L"PenColor=%s\n"
                L"EraserWidth=%g\n"
+               L"; Angle a straight line is pulled to while Alt is held, in\n"
+               L"; degrees. 0 leaves it free at any angle.\n"
+               L"LineSnapDegrees=%g\n"
                L"\n"
                L"[Colors]\n"
                L"; The eight colours on Shift+1..8, which are also the fixed\n"
@@ -394,7 +403,7 @@ void Settings::Save() const noexcept {
                preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
-               ColorText(penColor).c_str(), eraserWidth,
+               ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
                ColorText(quickColors[0]).c_str(),
                ColorText(quickColors[1]).c_str(),
                ColorText(quickColors[2]).c_str(),

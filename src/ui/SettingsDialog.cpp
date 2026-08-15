@@ -152,6 +152,7 @@ enum ControlId : UINT {
     kIdEraserWidth,
     kIdUsePressure,
     kIdPressureMin,
+    kIdLineSnap,
 
     kIdFontFamily,
     kIdFontSize,
@@ -474,6 +475,11 @@ void BuildDrawing(Dialog& dialog) noexcept {
     AddRow(dialog, L"筆圧が最小のときの太さ (%)", L"EDIT",
            ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdPressureMin, kNarrowField);
     AddNote(dialog, L"0 にすると、軽く触れた所は消えます");
+    AddRow(dialog, L"直線を揃える角度 (度)", L"EDIT",
+           ES_AUTOHSCROLL | WS_BORDER, kIdLineSnap, kNarrowField);
+    AddNote(dialog,
+            L"直線を引いている間に Alt を押すと、この角度ずつに揃います。"
+            L"0 にすると揃えません");
     EndPage(dialog);
 }
 
@@ -992,6 +998,7 @@ void Populate(Dialog& dialog) noexcept {
                     values.usePenPressure ? BST_CHECKED : BST_UNCHECKED);
     SetNumber(dialog.Field(kIdPressureMin),
               static_cast<int>(values.pressureMinScale * 100.0f + 0.5f));
+    SetNumber(dialog.Field(kIdLineSnap), values.lineSnapDegrees);
 
     dialog.penColor = values.penColor;
     dialog.quickColors = values.quickColors;
@@ -1064,6 +1071,8 @@ void Collect(Dialog& dialog) noexcept {
             dialog.Field(kIdPressureMin),
             static_cast<int>(values.pressureMinScale * 100.0f + 0.5f))) /
         100.0f;
+    values.lineSnapDegrees =
+        ReadFloat(dialog.Field(kIdLineSnap), values.lineSnapDegrees);
 
     values.quickColors = dialog.quickColors;
 
