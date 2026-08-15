@@ -253,6 +253,10 @@ constexpr UINT kCommitTextMessage = WM_APP + 1;
 constexpr UINT kEyedropperMoveMessage = WM_APP + 5;
 constexpr UINT kEyedropperPickMessage = WM_APP + 6;
 constexpr UINT kEyedropperCancelMessage = WM_APP + 7;
+// The button has gone down with the eyedropper armed. Taking a colour starts
+// here and is settled by letting go, so the sample can be aimed by dragging
+// instead of having to be right on the first press.
+constexpr UINT kEyedropperPressMessage = WM_APP + 8;
 
 // The window whose eyedropper is armed, for the hook to reach. Only one can be
 // armed at a time; the hook takes the mouse for the whole screen.
@@ -708,6 +712,7 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_RBUTTONDOWN:
+            rightButtonDown_ = true;
             // Started rather than acted on: whether this turns out to be a
             // drag or a click that opens the menu is only known on release.
             if (settings_ != nullptr &&
@@ -772,20 +777,56 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
 
-        case kEyedropperMoveMessage:
+        case kEyedropperMoveMessage: {
+            // Released before anything else. A message that turns up after the
+            // eyedropper has been put away still has to clear this, or the
+            // hook stops sending movement for the rest of the session.
             previewPending_ = false;
-            colorPreview_.Update(POINT{static_cast<LONG>(wParam),
-                                       static_cast<LONG>(lParam)});
+            if (tool_.tool != ccl::tool::Tool::Eyedropper) {
+                return 0;
+            }
+            const POINT screen{static_cast<LONG>(wParam),
+                               static_cast<LONG>(lParam)};
+            colorPreview_.Update(screen);
+
+            // While the button is down the colour follows the pointer, so the
+            // sample can be aimed instead of having to be hit first time. No
+            // repaint for the same reason as below: nothing on screen shows it.
+            if (sampling_) {
+                POINT client = screen;
+                ::ScreenToClient(hwnd_, &client);
+                PickColorAt(client);
+            }
             return 0;
+        }
+
+        case kEyedropperPressMessage: {
+            if (tool_.tool != ccl::tool::Tool::Eyedropper) {
+                return 0;
+            }
+            sampling_ = true;
+            POINT client{static_cast<LONG>(wParam), static_cast<LONG>(lParam)};
+            ::ScreenToClient(hwnd_, &client);
+            // No repaint: this tool draws nothing, so the colour it has taken
+            // is not on screen anywhere until the previous tool comes back.
+            PickColorAt(client);
+            return 0;
+        }
 
         case kEyedropperPickMessage: {
+            // The hook posts its messages, so one can arrive after a right
+            // click has already put the eyedropper away.
+            if (tool_.tool != ccl::tool::Tool::Eyedropper) {
+                return 0;
+            }
             POINT screen{static_cast<LONG>(wParam), static_cast<LONG>(lParam)};
             POINT client = screen;
             ::ScreenToClient(hwnd_, &client);
             if (PickColorAt(client)) {
                 Draw();
             }
-            // One sample, then back to whatever tool was in use before.
+            // Letting go settles the colour, and the tool goes back to
+            // whatever was in use before.
             EndEyedropper();
             return 0;
         }
@@ -805,6 +846,9 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_RBUTTONUP: {
+            const bool pressedHere = rightButtonDown_;
+            rightButtonDown_ = false;
+
             // The eyedropper takes over the whole screen while it is armed, so
             // there has to be a way out that does not involve finding this
             // window again. The menu would be the wrong thing to open here.
@@ -827,6 +871,15 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (dragged) {
                     return 0;
                 }
+            }
+
+            // A release with no press of ours behind it is not a click here.
+            // It turns up when the eyedropper's hook took the press and then
+            // let the mouse go, and when a press that began in another window
+            // is released over this one. Treating either as a click is what
+            // flashed the menu up on the way out of the eyedropper.
+            if (!pressedHere) {
+                return 0;
             }
 
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -1965,12 +2018,18 @@ bool ClipWindow::HandlePointerMessage(UINT msg, WPARAM wParam) noexcept {
 }
 
 void ClipWindow::OnLeftDown(POINT client) noexcept {
-    // Alt+click samples a colour without leaving the current tool, matching
-    // the shortcut image editors use.
+    // Alt reaches for the eyedropper without leaving the current tool, matching
+    // the shortcut image editors use. It is the same eyedropper the key opens
+    // -- magnifier, the whole screen to sample from, all of it -- and letting
+    // go of the button hands the tool back.
+    //
+    // The press has already happened by the time the hook goes up, so the hook
+    // only ever sees the movement and the release. That is enough: the release
+    // is what settles the colour.
     if (IsKeyDown(VK_MENU) && tool_.tool != ccl::tool::Tool::Eyedropper) {
-        if (PickColorAt(client)) {
-            Draw();
-        }
+        SelectTool(ccl::tool::Tool::Eyedropper);
+        sampling_ = true;
+        PickColorAt(client);
         return;
     }
 
@@ -2117,7 +2176,10 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
     }
 
     if (sampling_) {
-        if (PickColorAt(client)) {
+        // Only read the colour here when the hook is not up. The hook passes
+        // movement through to this window as well as reporting it, so with one
+        // installed both paths would fire and the pixel would be read twice.
+        if (eyedropperHook_ == nullptr && PickColorAt(client)) {
             Draw();
         }
         return;
@@ -2779,12 +2841,21 @@ bool ClipWindow::PickColorAt(POINT client) noexcept {
 }
 
 void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
-    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    // Reaching for the eyedropper is not leaving what you were doing: it reads
+    // a colour and hands the tool straight back. Whatever was set up before it
+    // -- an area selected, an effect being tuned -- is still meant afterwards.
+    // Both directions count, since the way back is another call through here.
+    const bool eyedropperAside = tool == ccl::tool::Tool::Eyedropper ||
+                                 tool_.tool == ccl::tool::Tool::Eyedropper;
+
+    if (!eyedropperAside) {
+        adjustingEffectIndex_ = static_cast<size_t>(-1);
+    }
 
     // A selection belongs to the tool that draws it. Left behind, it would sit
     // there through a session of drawing and then act on whatever the next
     // command was, long after there was any reason to expect it.
-    if (tool != ccl::tool::Tool::Select) {
+    if (tool != ccl::tool::Tool::Select && !eyedropperAside) {
         hasSelection_ = false;
     }
 
@@ -2867,8 +2938,15 @@ LRESULT CALLBACK ClipWindow::EyedropperHookProc(int code, WPARAM wParam,
             return ::CallNextHookEx(nullptr, code, wParam, lParam);
 
         case WM_LBUTTONDOWN:
-            ::PostMessageW(window->hwnd_, kEyedropperPickMessage, x, y);
+            // The start of taking a colour rather than the whole of it. What
+            // settles it is letting go, which is what allows the sample to be
+            // aimed by dragging.
+            ::PostMessageW(window->hwnd_, kEyedropperPressMessage, x, y);
             return 1;  // swallowed, so the window underneath never sees it
+
+        case WM_LBUTTONUP:
+            ::PostMessageW(window->hwnd_, kEyedropperPickMessage, x, y);
+            return 1;
 
         case WM_RBUTTONDOWN:
             ::PostMessageW(window->hwnd_, kEyedropperCancelMessage, 0, 0);
@@ -2876,7 +2954,6 @@ LRESULT CALLBACK ClipWindow::EyedropperHookProc(int code, WPARAM wParam,
 
         // The presses above were taken, so their releases have to go too, or
         // the window underneath gets a button-up it never saw the down for.
-        case WM_LBUTTONUP:
         case WM_RBUTTONUP:
         case WM_MBUTTONDOWN:
         case WM_MBUTTONUP:

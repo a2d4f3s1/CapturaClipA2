@@ -275,6 +275,14 @@ private:
     POINT scrollOrigin_{};
     POINT scrollStart_{};
 
+    // Set between this window's own right press and its release.
+    //
+    // The menu opens on the release, so a release has to be told apart from one
+    // this window never saw the press for. That happens when the eyedropper's
+    // hook has swallowed the press, and when a press that began in another
+    // window is let go over this one -- neither is a click here.
+    bool rightButtonDown_ = false;
+
     // Set while the right button is down and assigned to a drag. A press that
     // never moved is still a click, and a click has to open the menu: it is
     // the only way to reach everything the keys do not cover.
