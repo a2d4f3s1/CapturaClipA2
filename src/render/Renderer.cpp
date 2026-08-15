@@ -878,7 +878,8 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active, const BrushCursor* cursor,
-                    const D2D1_RECT_F* highlight) noexcept {
+                    const D2D1_RECT_F* highlight,
+                    ID2D1Geometry* selection) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -965,6 +966,15 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         DrawStroke(*active, 0);
     }
     ccl::timing::AddSince(annotationStats_, annotationStart);
+
+    if (selection != nullptr && brush_) {
+        // Drawn on the boundary itself rather than outside it, so that the
+        // outline says exactly what is selected. The width is divided by the
+        // zoom because the transform would otherwise scale it too.
+        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        brush_->SetColor(D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
+        target_->DrawGeometry(selection, brush_.Get(), 1.0f / zoom);
+    }
 
     if (highlight != nullptr && brush_) {
         // Marks what a click would pick up. Drawn slightly outside the text so

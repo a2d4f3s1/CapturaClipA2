@@ -849,8 +849,7 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // was never let go of, so nothing here was settled on. Left set,
             // this went on following the pointer with no button held.
             if (selecting_) {
-                selecting_ = false;
-                hasSelection_ = false;
+                ClearSelection();
                 UpdateTitle();
                 Draw();
             }
@@ -949,18 +948,33 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 bool ClipWindow::HasSelection() const noexcept {
-    if (!hasSelection_) {
-        return false;
-    }
-    const D2D1_RECT_F area = SelectionRect();
-    return area.right - area.left >= 1.0f && area.bottom - area.top >= 1.0f;
+    // Asked of the area rather than of the box around it: a selection taken
+    // apart again still has a box, and it is a box of infinities.
+    return selectionGeometry_.Area() >= 1.0f;
 }
 
-D2D1_RECT_F ClipWindow::SelectionRect() const noexcept {
-    return D2D1::RectF(std::min(selectionAnchor_.x, selectionCursor_.x),
-                       std::min(selectionAnchor_.y, selectionCursor_.y),
-                       std::max(selectionAnchor_.x, selectionCursor_.x),
-                       std::max(selectionAnchor_.y, selectionCursor_.y));
+D2D1_RECT_F ClipWindow::SelectionBounds() const noexcept {
+    return selectionGeometry_.Bounds();
+}
+
+ccl::doc::SelectionShapes ClipWindow::CurrentShapes() const noexcept {
+    ccl::doc::SelectionShapes shapes = selection_;
+    if (selecting_) {
+        shapes.push_back(pending_);
+    }
+    return shapes;
+}
+
+void ClipWindow::RefreshSelection() noexcept {
+    selectionGeometry_.Rebuild(
+        context_ != nullptr ? context_->Factory() : nullptr, CurrentShapes());
+}
+
+void ClipWindow::ClearSelection() noexcept {
+    selection_.clear();
+    selecting_ = false;
+    pending_ = ccl::doc::SelectionShape{};
+    selectionGeometry_.Clear();
 }
 
 void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
@@ -970,7 +984,7 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
 
     history_.Record(document_->Annotations());
 
-    const D2D1_RECT_F area = SelectionRect();
+    const D2D1_RECT_F area = SelectionBounds();
 
     ccl::doc::Annotation annotation;
     annotation.id = ccl::doc::NextAnnotationId();
@@ -2081,16 +2095,24 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             }
             return;
 
-        case ccl::tool::Tool::Select:
+        case ccl::tool::Tool::Select: {
             // Placing a new selection ends adjustment of the previous effect.
             adjustingEffectIndex_ = static_cast<size_t>(-1);
+
+            const D2D1_POINT_2F start = ToImage(client);
+            pending_ = ccl::doc::SelectionShape{};
+            pending_.op = ccl::doc::SelectionOp::Replace;
+            pending_.left = start.x;
+            pending_.top = start.y;
+            pending_.right = start.x;
+            pending_.bottom = start.y;
             selecting_ = true;
-            hasSelection_ = true;
-            selectionAnchor_ = ToImage(client);
-            selectionCursor_ = selectionAnchor_;
+            RefreshSelection();
+
             ::SetCapture(hwnd_);
             Draw();
             return;
+        }
 
         case ccl::tool::Tool::Text: {
             // Pressing on existing text starts a drag. Whether that turns out
@@ -2157,7 +2179,10 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
     }
 
     if (selecting_) {
-        selectionCursor_ = ToImage(client);
+        const D2D1_POINT_2F at = ToImage(client);
+        pending_.right = at.x;
+        pending_.bottom = at.y;
+        RefreshSelection();
         Draw();
         return;
     }
@@ -2228,14 +2253,20 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 
 void ClipWindow::OnLeftUp() noexcept {
     if (selecting_) {
+        // Settled before the capture is let go of, not after: releasing it
+        // sends WM_CAPTURECHANGED straight back here, and that path drops a
+        // drag still in progress. Reaching it with the drag still marked as
+        // running threw the area away the instant it was finished.
+        selection_ = CurrentShapes();
         selecting_ = false;
+        pending_ = ccl::doc::SelectionShape{};
         ::ReleaseCapture();
+        RefreshSelection();
 
-        // A click without a drag clears the selection rather than leaving a
-        // zero-sized one behind.
-        const D2D1_RECT_F area = SelectionRect();
-        if (area.right - area.left < 1.0f || area.bottom - area.top < 1.0f) {
-            hasSelection_ = false;
+        // A click without a drag settles on nothing, rather than leaving an
+        // area with no size behind.
+        if (!HasSelection()) {
+            ClearSelection();
         }
         UpdateTitle();
         Draw();
@@ -2762,7 +2793,7 @@ void ClipWindow::UpdateTitle() noexcept {
                                  annotation.effect.strength);
                 }
             } else if (HasSelection()) {
-                const D2D1_RECT_F area = SelectionRect();
+                const D2D1_RECT_F area = SelectionBounds();
                 ::swprintf_s(title, L"%s  %d%%  Select %.0f x %.0f",
                              name.c_str(), zoom, area.right - area.left,
                              area.bottom - area.top);
@@ -2867,7 +2898,7 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     // there through a session of drawing and then act on whatever the next
     // command was, long after there was any reason to expect it.
     if (tool != ccl::tool::Tool::Select && !eyedropperAside) {
-        hasSelection_ = false;
+        ClearSelection();
     }
 
     if (tool != ccl::tool::Tool::Text) {
@@ -3451,7 +3482,7 @@ void ClipWindow::OnCommand(int command) noexcept {
             ApplyEffectToSelection(ccl::doc::EffectKind::Blur);
             return;
         case kMenuClearSelection:
-            hasSelection_ = false;
+            ClearSelection();
             UpdateTitle();
             Draw();
             return;
@@ -3571,7 +3602,7 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
     // gone, so its history would restore edits onto a different image.
     history_ = ccl::doc::History{};
     adjustingEffectIndex_ = static_cast<size_t>(-1);
-    hasSelection_ = false;
+    ClearSelection();
     saved_ = false;
     sourceTitle_ = title;
     // The anchor names a point of the old picture, which the new one has no
@@ -3601,7 +3632,7 @@ void ClipWindow::Undo() noexcept {
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
     if (reshaped) {
-        hasSelection_ = false;
+        ClearSelection();
         renderer_.SetDocument(document_);
         ResizeToImage();
         ClampScroll();
@@ -3622,7 +3653,7 @@ void ClipWindow::Redo() noexcept {
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
     if (reshaped) {
-        hasSelection_ = false;
+        ClearSelection();
         renderer_.SetDocument(document_);
         ResizeToImage();
         ClampScroll();
@@ -3650,7 +3681,7 @@ void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
-    hasSelection_ = false;
+    ClearSelection();
     saved_ = false;
 
     renderer_.SetDocument(document_);
@@ -3746,7 +3777,7 @@ void ClipWindow::CropToSelection() noexcept {
         return;
     }
 
-    const D2D1_RECT_F area = SelectionRect();
+    const D2D1_RECT_F area = SelectionBounds();
     const ccl::capture::DibBuffer flat = FlattenForTransform();
     if (!flat.IsValid()) {
         return;
@@ -3960,14 +3991,12 @@ void ClipWindow::Draw() noexcept {
     D2D1_RECT_F highlight{};
     bool hasHighlight = false;
 
-    // The selection uses the same outline as the "what would this click act
-    // on" marker, which is the same thing it means here.
+    ID2D1Geometry* selection = nullptr;
     if (tool_.tool == ccl::tool::Tool::Select && HasSelection()) {
-        highlight = SelectionRect();
-        hasHighlight = true;
+        selection = selectionGeometry_.Get();
     }
 
-    if (!hasHighlight && tool_.tool == ccl::tool::Tool::Text &&
+    if (tool_.tool == ccl::tool::Tool::Text &&
         editor_ == nullptr &&
         document_ != nullptr &&
         hoveredTextIndex_ < document_->Annotations().size()) {
@@ -3979,7 +4008,7 @@ void ClipWindow::Draw() noexcept {
 
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr,
-                   hasHighlight ? &highlight : nullptr);
+                   hasHighlight ? &highlight : nullptr, selection);
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.

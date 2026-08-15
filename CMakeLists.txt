@@ -26,6 +26,7 @@ set(APP_SOURCES
     src/capture/WindowPicker.cpp
     src/doc/Document.cpp
     src/doc/History.cpp
+    src/doc/Selection.cpp
     src/io/AutoSave.cpp
     src/io/Clipboard.cpp
     src/io/ImageCodec.cpp
@@ -33,6 +34,7 @@ set(APP_SOURCES
     src/overlay/SelectionOverlay.cpp
     src/render/D2DContext.cpp
     src/render/Renderer.cpp
+    src/render/SelectionGeometry.cpp
     src/ui/ClipWindow.cpp
     src/ui/ColorPopup.cpp
     src/ui/ColorPreview.cpp
@@ -52,6 +54,7 @@ set(APP_HEADERS
     src/doc/Annotation.h
     src/doc/Document.h
     src/doc/History.h
+    src/doc/Selection.h
     src/io/AutoSave.h
     src/io/Clipboard.h
     src/io/ImageCodec.h
@@ -59,6 +62,7 @@ set(APP_HEADERS
     src/overlay/SelectionOverlay.h
     src/render/D2DContext.h
     src/render/Renderer.h
+    src/render/SelectionGeometry.h
     src/ui/ClipWindow.h
     src/ui/ColorPopup.h
     src/ui/ColorPreview.h

@@ -7,7 +7,9 @@
 #include "app/Settings.h"
 #include "capture/DibBuffer.h"
 #include "doc/History.h"
+#include "doc/Selection.h"
 #include "render/Renderer.h"
+#include "render/SelectionGeometry.h"
 #include "tool/ToolState.h"
 #include "ui/ColorPreview.h"
 #include "util/Timing.h"
@@ -245,7 +247,17 @@ private:
     // result rather than guessed at in advance.
     void StepEffectStrength(int steps) noexcept;
     bool HasSelection() const noexcept;
-    D2D1_RECT_F SelectionRect() const noexcept;
+    // Smallest rectangle holding the selection. Only meaningful when there is
+    // one, which is what HasSelection answers: an area taken apart again
+    // reports a box of infinities rather than an empty one.
+    D2D1_RECT_F SelectionBounds() const noexcept;
+    // The pieces as they stand: those settled on, plus the one being dragged
+    // out, if any.
+    ccl::doc::SelectionShapes CurrentShapes() const noexcept;
+    // Folds those pieces into the shape everything else is asked of. Called
+    // wherever the pieces change, rather than on every frame.
+    void RefreshSelection() noexcept;
+    void ClearSelection() noexcept;
 
     // True when the left button should scroll rather than use the active tool.
     bool ScrollingWithLeftButton() const noexcept;
@@ -345,11 +357,14 @@ private:
     // placed, until something else is done.
     size_t adjustingEffectIndex_ = static_cast<size_t>(-1);
 
-    // Rectangular selection, in image coordinates.
+    // The selected area, in image coordinates: the pieces settled on so far,
+    // and the one being dragged out while the button is down. The two are kept
+    // apart so that letting go part way through can drop the one in hand
+    // without disturbing the rest.
+    ccl::doc::SelectionShapes selection_;
     bool selecting_ = false;
-    bool hasSelection_ = false;
-    D2D1_POINT_2F selectionAnchor_{};
-    D2D1_POINT_2F selectionCursor_{};
+    ccl::doc::SelectionShape pending_;
+    ccl::render::SelectionGeometry selectionGeometry_;
 
     bool spaceHeld_ = false;
     // Tool to return to once the eyedropper has taken a sample.

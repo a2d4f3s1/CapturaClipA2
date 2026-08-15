@@ -51,10 +51,16 @@ public:
     // `active` is the stroke currently being drawn, which is not yet part of
     // the document. `cursor` draws the brush size outline when set.
     // `highlight` outlines an annotation, marking what a click would act on.
+    // `selection` outlines the selected area.
+    //
+    // The last two are separate rather than one "outline this" parameter,
+    // because they answer different questions -- what a click would pick up,
+    // and what an area operation would act on -- and both can be true at once.
     void Draw(const ccl::view::ViewState& view,
               const ccl::doc::Stroke* active = nullptr,
               const BrushCursor* cursor = nullptr,
-              const D2D1_RECT_F* highlight = nullptr) noexcept;
+              const D2D1_RECT_F* highlight = nullptr,
+              ID2D1Geometry* selection = nullptr) noexcept;
 
     // Draws the picture and its annotations into a new buffer at full size,
     // producing the image as it is actually seen. Everything that leaves the
