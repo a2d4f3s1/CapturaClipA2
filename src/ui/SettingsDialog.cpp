@@ -145,6 +145,7 @@ enum ControlId : UINT {
     kIdSmoothScaling,
     kIdZoomStep,
     kIdZoomAnchor,
+    kIdRotateAnchor,
     kIdPaletteScale,
 
     kIdPenWidth,
@@ -456,6 +457,17 @@ void BuildGeneral(Dialog& dialog) noexcept {
             L"カーソルの位置を選ぶと、それを保つためにウィンドウ自体が動き、\n"
             L"画面の外へはみ出すことがあります。",
             true);
+
+    const HWND turning =
+        AddRow(dialog, L"回転で動かさない所", L"COMBOBOX",
+               CBS_DROPDOWNLIST | WS_VSCROLL, kIdRotateAnchor, kFieldWidth, 4);
+    ComboBox_AddString(turning, L"左上：ウィンドウは動きません");
+    ComboBox_AddString(turning, L"中央：四方へ均等に広がります");
+    AddNote(dialog,
+            L"「自由に回転」で画像が大きくなったときに効きます。\n"
+            L"90 度・180 度の回転には関係ありません。",
+            true);
+
     AddRow(dialog, L"パレットの大きさ (%)", L"EDIT",
            ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdPaletteScale, kNarrowField);
     EndPage(dialog);
@@ -990,6 +1002,8 @@ void Populate(Dialog& dialog) noexcept {
     SetNumber(dialog.Field(kIdZoomStep), values.zoomStepPercent);
     ComboBox_SetCurSel(dialog.Field(kIdZoomAnchor),
                        static_cast<int>(values.zoomAnchor));
+    ComboBox_SetCurSel(dialog.Field(kIdRotateAnchor),
+                       static_cast<int>(values.rotateAnchor));
     SetNumber(dialog.Field(kIdPaletteScale), values.paletteScalePercent);
 
     SetNumber(dialog.Field(kIdPenWidth), values.penWidth);
@@ -1056,6 +1070,10 @@ void Collect(Dialog& dialog) noexcept {
         case 1: values.zoomAnchor = ccl::app::ZoomAnchor::Cursor; break;
         case 2: values.zoomAnchor = ccl::app::ZoomAnchor::Center; break;
         default: values.zoomAnchor = ccl::app::ZoomAnchor::TopLeft; break;
+    }
+    switch (ComboBox_GetCurSel(dialog.Field(kIdRotateAnchor))) {
+        case 1: values.rotateAnchor = ccl::app::RotateAnchor::Center; break;
+        default: values.rotateAnchor = ccl::app::RotateAnchor::TopLeft; break;
     }
     values.paletteScalePercent =
         ReadInt(dialog.Field(kIdPaletteScale), values.paletteScalePercent);

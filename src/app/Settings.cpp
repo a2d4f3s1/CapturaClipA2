@@ -105,6 +105,21 @@ ZoomAnchor ParseAnchor(const std::wstring& name, ZoomAnchor fallback) noexcept {
     return fallback;
 }
 
+const wchar_t* RotateAnchorName(RotateAnchor anchor) noexcept {
+    switch (anchor) {
+        case RotateAnchor::TopLeft: return L"TopLeft";
+        case RotateAnchor::Center:
+        default: return L"Center";
+    }
+}
+
+RotateAnchor ParseRotateAnchor(const std::wstring& name,
+                               RotateAnchor fallback) noexcept {
+    if (::_wcsicmp(name.c_str(), L"TopLeft") == 0) return RotateAnchor::TopLeft;
+    if (::_wcsicmp(name.c_str(), L"Center") == 0) return RotateAnchor::Center;
+    return fallback;
+}
+
 const wchar_t* FormatName(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::Jpeg: return L"JPEG";
@@ -202,6 +217,10 @@ void Settings::Load() noexcept {
     zoomAnchor = ParseAnchor(
         ReadString(L"Appearance", L"ZoomAnchor", AnchorName(zoomAnchor), path_),
         zoomAnchor);
+    rotateAnchor = ParseRotateAnchor(
+        ReadString(L"Appearance", L"RotateAnchor",
+                   RotateAnchorName(rotateAnchor), path_),
+        rotateAnchor);
     hideDurationMs = ::GetPrivateProfileIntW(L"Appearance", L"HideDurationMs",
                                              static_cast<INT>(hideDurationMs),
                                              path_.c_str());
@@ -359,6 +378,12 @@ void Settings::Save() const noexcept {
                L"; The keyboard and menu zooms have no pointer to work from, so\n"
                L"; they use the middle of the view when this is Cursor.\n"
                L"ZoomAnchor=%s\n"
+               L"; What stays still when turning by a free angle makes the\n"
+               L"; picture larger.\n"
+               L";   TopLeft  the corner of the window; it grows down and right\n"
+               L";   Center   the middle of the window; it grows evenly, and may\n"
+               L";            end up over the screen edge\n"
+               L"RotateAnchor=%s\n"
                L"; How long the window stays hidden, in milliseconds. It comes\n"
                L"; back by itself: while hidden it has no keyboard focus, so\n"
                L"; nothing could tell it to.\n"
@@ -413,7 +438,8 @@ void Settings::Save() const noexcept {
                ColorText(quickColors[6]).c_str(),
                ColorText(quickColors[7]).c_str(), titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
-               FrameName(windowFrame), AnchorName(zoomAnchor), hideDurationMs,
+               FrameName(windowFrame), AnchorName(zoomAnchor),
+               RotateAnchorName(rotateAnchor), hideDurationMs,
                FormatName(defaultFormat),
                jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays,
                shortcuts.ToFileText().c_str(), mouse.ToFileText().c_str());

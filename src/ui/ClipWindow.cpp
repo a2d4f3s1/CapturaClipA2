@@ -3684,7 +3684,52 @@ void ClipWindow::RotateFreely() noexcept {
         return;
     }
 
+    // Where the middle of the picture sits on the desktop.
+    //
+    // The middle of the picture, not the middle of the window: the two are
+    // different points as soon as the picture is scrolled or larger than what
+    // shows. The turn works about the middle of the picture, so that is the
+    // point worth keeping still -- it is the one that was just watched staying
+    // put while the angle was chosen.
+    const auto middleOnScreen = [this]() noexcept {
+        POINT point{};
+        if (document_ != nullptr) {
+            const float zoom = view_.Zoom();
+            const POINT scroll = view_.Scroll();
+            const auto border = static_cast<float>(BorderWidth());
+            point.x = std::lround(document_->Width() * 0.5f * zoom + border) -
+                      scroll.x;
+            point.y = std::lround(document_->Height() * 0.5f * zoom + border) -
+                      scroll.y;
+        }
+        ::ClientToScreen(hwnd_, &point);
+        return point;
+    };
+
+    const POINT middleBefore = middleOnScreen();
+
     ApplyTransform(renderer_.RenderRotated(*degrees, fill, 1.0f));
+
+    if (settings_ == nullptr ||
+        settings_->rotateAnchor != ccl::app::RotateAnchor::Center) {
+        return;
+    }
+
+    // Measured on both sides rather than worked out from how much the picture
+    // grew. Growing is capped by the work area, and the scroll offset is
+    // re-clamped against the larger picture; either can shift the middle by an
+    // amount the size difference on its own does not account for.
+    const POINT middleAfter = middleOnScreen();
+    const LONG dx = middleAfter.x - middleBefore.x;
+    const LONG dy = middleAfter.y - middleBefore.y;
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+
+    RECT frame{};
+    ::GetWindowRect(hwnd_, &frame);
+    ::SetWindowPos(hwnd_, nullptr, frame.left - dx, frame.top - dy, 0, 0,
+                   SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void ClipWindow::CropToSelection() noexcept {

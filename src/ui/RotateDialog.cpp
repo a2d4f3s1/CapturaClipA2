@@ -277,29 +277,32 @@ std::optional<float> ShowRotateDialog(
         width - margin - buttonWidth, y, buttonWidth, rowHeight, IDCANCEL);
     y += rowHeight + margin;
 
-    // Sized to what was laid out, then put beside the owner rather than over
-    // it: the picture behind is what is being judged.
+    // Sized to what was laid out, then centred on the pointer. This is reached
+    // from the menu, so the pointer is where the eye already is. Covering the
+    // picture is fine -- the dialog can be dragged aside.
     RECT frame{0, 0, width, y};
     ::AdjustWindowRectEx(&frame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
                          WS_EX_DLGMODALFRAME);
-    RECT ownerBounds{};
-    ::GetWindowRect(owner, &ownerBounds);
     const int outerWidth = frame.right - frame.left;
     const int outerHeight = frame.bottom - frame.top;
 
-    int x = ownerBounds.right + scaled(kMargin);
-    int top = ownerBounds.top;
+    POINT cursor{};
+    if (!::GetCursorPos(&cursor)) {
+        RECT ownerBounds{};
+        ::GetWindowRect(owner, &ownerBounds);
+        cursor = POINT{ownerBounds.left, ownerBounds.top};
+    }
+
+    int x = cursor.x - outerWidth / 2;
+    int top = cursor.y - outerHeight / 2;
     if (const HMONITOR monitor =
-            ::MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+            ::MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
         monitor != nullptr) {
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         if (::GetMonitorInfoW(monitor, &info)) {
-            // Flipped to the other side when there is no room, and kept on the
-            // monitor either way.
-            if (x + outerWidth > info.rcWork.right) {
-                x = ownerBounds.left - scaled(kMargin) - outerWidth;
-            }
+            // Kept on the monitor the pointer is on, so a dialog opened near an
+            // edge slides back into view rather than hanging off it.
             x = std::clamp(x, static_cast<int>(info.rcWork.left),
                            static_cast<int>(info.rcWork.right) - outerWidth);
             top = std::clamp(top, static_cast<int>(info.rcWork.top),

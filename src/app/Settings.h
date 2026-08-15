@@ -28,6 +28,15 @@ enum class ZoomAnchor {
     Center,   // the middle of the visible area
 };
 
+// What stays still when turning the picture by a free angle makes it larger.
+//
+// No pointer option here, unlike the zoom: a turn is not aimed anywhere, so
+// there is nothing under the cursor for it to hold onto.
+enum class RotateAnchor {
+    TopLeft,  // the corner of the window; it grows down and to the right
+    Center,   // the middle of the window; it grows evenly on all sides
+};
+
 // How much of a window frame the capture gets. Applied when the window is
 // created, so a change takes effect on the next capture rather than this one.
 enum class WindowFrame {
@@ -91,6 +100,9 @@ public:
     int paletteScalePercent = 100;
     WindowFrame windowFrame = WindowFrame::NoTitleBar;
     ZoomAnchor zoomAnchor = ZoomAnchor::TopLeft;
+    // The middle by default: a turn works about the middle of the picture, so
+    // keeping that still is what matches what was just watched happening.
+    RotateAnchor rotateAnchor = RotateAnchor::Center;
 
     // Saving
     ImageFormat defaultFormat = ImageFormat::Png;
