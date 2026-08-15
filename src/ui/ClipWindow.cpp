@@ -845,6 +845,15 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 EndStroke();
             }
             erasing_ = false;
+            // An area being dragged out is dropped rather than kept: the button
+            // was never let go of, so nothing here was settled on. Left set,
+            // this went on following the pointer with no button held.
+            if (selecting_) {
+                selecting_ = false;
+                hasSelection_ = false;
+                UpdateTitle();
+                Draw();
+            }
             return 0;
 
         case WM_RBUTTONUP: {
