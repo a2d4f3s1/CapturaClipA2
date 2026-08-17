@@ -27,6 +27,7 @@ enum class Command {
     ToolEraser,
     ToolText,
     ToolSelect,
+    ToolLasso,
     Eyedropper,
     ColorPicker,
     Highlighter,

@@ -16,6 +16,10 @@ enum class Tool {
     Eyedropper,
     Text,
     Select,
+    // Selects by hand rather than by corner. A tool of its own rather than a
+    // mode of the one above, so that which of the two is in use is visible
+    // without looking for it -- the two share the area they select.
+    Lasso,
 };
 
 }  // namespace ccl::tool

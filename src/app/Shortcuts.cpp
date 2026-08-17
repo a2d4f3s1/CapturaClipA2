@@ -24,6 +24,10 @@ constexpr CommandInfo kCommands[] = {
     {L"ToolEraser", L"ツール: 消しゴム", {'E', false, false, false}},
     {L"ToolText", L"ツール: テキスト", {'T', false, false, false}},
     {L"ToolSelect", L"ツール: 範囲選択", {'W', false, false, false}},
+    // Kept next to the one above in both this table and the enum: the two are
+    // matched by position, and a name landing against the wrong entry would
+    // load someone's saved key onto a different command.
+    {L"ToolLasso", L"ツール: 投げ縄", {'L', false, false, false}},
     // Shift+I rather than I, which the palette already has. Both are about
     // choosing a colour, so they are kept on the same key.
     {L"Eyedropper", L"ツール: スポイト", {'I', false, true, false}},

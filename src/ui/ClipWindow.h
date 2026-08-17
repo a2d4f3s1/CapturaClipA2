@@ -284,6 +284,9 @@ private:
     // not SelectTool: that throws away a selected area on the way out of the
     // tool that made it, which would undo the area the same step just restored.
     void RestoreTool(ccl::tool::Tool tool) noexcept;
+    // Adds a point to the lasso being dragged, no nearer the last one than the
+    // spacing allows, and coarsens that spacing once the run gets long.
+    void ExtendLasso(POINT client) noexcept;
 
     // True when the left button should scroll rather than use the active tool.
     bool ScrollingWithLeftButton() const noexcept;
@@ -394,6 +397,12 @@ private:
     // plain drag throws the old area away there and then, leaving nothing to
     // step back to by the time the button comes up.
     ccl::doc::SelectionShapes selectionBeforeDrag_;
+    // How far apart a lasso's points are kept, in client pixels. Measured on
+    // screen rather than in the picture: how finely a hand moves is a fact
+    // about the screen, not about the zoom. Doubled while a very long lasso is
+    // being drawn, since what it costs to fold and to outline grows with the
+    // count and a drag that goes on must not slow down.
+    float lassoSpacing_ = 0.0f;
     ccl::render::SelectionGeometry selectionGeometry_;
     // The piece being dragged out while it is being taken away, shown on its
     // own so that what is disappearing is visible. Only built for that: adding
