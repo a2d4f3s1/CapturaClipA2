@@ -26,7 +26,11 @@ float DistanceToSegmentSquared(float px, float py, float ax, float ay, float bx,
 
 bool SelectionShape::ContainsPoint(float x, float y) const noexcept {
     if (!lasso) {
-        return x >= left && x < right && y >= top && y < bottom;
+        // Taken in whichever order it was dragged out: the corners are stored
+        // as the pointer left them, so a rectangle pulled leftwards or upwards
+        // has its sides the other way round.
+        return x >= (std::min)(left, right) && x < (std::max)(left, right) &&
+               y >= (std::min)(top, bottom) && y < (std::max)(top, bottom);
     }
 
     // Crossing count. A ray is cast to the right and the edges it passes
