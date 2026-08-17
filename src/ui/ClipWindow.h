@@ -276,6 +276,14 @@ private:
     // them keeps what is selected, since picking a different way to draw the
     // same area is not finishing with it.
     static bool IsSelectionTool(ccl::tool::Tool tool) noexcept;
+    // The tool an undo step should remember. While the eyedropper is armed it
+    // is the tool underneath, since the eyedropper is somewhere the program
+    // passes through rather than somewhere it is.
+    ccl::tool::Tool ToolForHistory() const noexcept;
+    // Puts a tool back as part of stepping through the history. Deliberately
+    // not SelectTool: that throws away a selected area on the way out of the
+    // tool that made it, which would undo the area the same step just restored.
+    void RestoreTool(ccl::tool::Tool tool) noexcept;
 
     // True when the left button should scroll rather than use the active tool.
     bool ScrollingWithLeftButton() const noexcept;
@@ -382,6 +390,10 @@ private:
     ccl::doc::SelectionShapes selection_;
     bool selecting_ = false;
     ccl::doc::SelectionShape pending_;
+    // What was selected when the drag began. Taken at the press because a
+    // plain drag throws the old area away there and then, leaving nothing to
+    // step back to by the time the button comes up.
+    ccl::doc::SelectionShapes selectionBeforeDrag_;
     ccl::render::SelectionGeometry selectionGeometry_;
     // The piece being dragged out while it is being taken away, shown on its
     // own so that what is disappearing is visible. Only built for that: adding

@@ -5,17 +5,9 @@
 #include <vector>
 
 #include "doc/Annotation.h"
+#include "tool/Tool.h"
 
 namespace ccl::tool {
-
-enum class Tool {
-    View,
-    Pen,
-    Eraser,
-    Eyedropper,
-    Text,
-    Select,
-};
 
 using ccl::doc::kDefaultQuickColors;
 using QuickColors = ccl::doc::QuickColors;

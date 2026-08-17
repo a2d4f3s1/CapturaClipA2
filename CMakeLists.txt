@@ -69,6 +69,7 @@ set(APP_HEADERS
     src/ui/RotateDialog.h
     src/res/Resources.h
     src/ui/SettingsDialog.h
+    src/tool/Tool.h
     src/tool/ToolState.h
     src/util/Dpi.h
     src/util/NameFormat.h

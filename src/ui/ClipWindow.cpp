@@ -852,7 +852,17 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // An area being dragged out is dropped rather than kept: the button
             // was never let go of, so nothing here was settled on. Left set,
             // this went on following the pointer with no button held.
+            //
+            // Recorded all the same. Losing the pointer part way through is not
+            // something that was asked for, so getting back what was there has
+            // to be possible.
             if (selecting_) {
+                if (document_ != nullptr) {
+                    history_.RecordSelection(document_->Annotations(),
+                                             selectionBeforeDrag_,
+                                             ToolForHistory());
+                }
+                selectionBeforeDrag_.clear();
                 ClearSelection();
                 UpdateTitle();
                 Draw();
@@ -1001,6 +1011,22 @@ bool ClipWindow::IsSelectionTool(ccl::tool::Tool tool) noexcept {
     return tool == ccl::tool::Tool::Select;
 }
 
+ccl::tool::Tool ClipWindow::ToolForHistory() const noexcept {
+    return tool_.tool == ccl::tool::Tool::Eyedropper ? toolBeforeEyedropper_
+                                                     : tool_.tool;
+}
+
+void ClipWindow::RestoreTool(ccl::tool::Tool tool) noexcept {
+    // Not while the eyedropper is armed: it holds a hook over the whole screen
+    // and hands the tool back itself when it is done. Cutting in front of that
+    // would leave the hook with nowhere to return to.
+    if (tool_.tool == ccl::tool::Tool::Eyedropper || tool_.tool == tool) {
+        return;
+    }
+    tool_.tool = tool;
+    UpdateCursor();
+}
+
 void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     if (!HasSelection() || document_ == nullptr) {
         return;
@@ -1027,7 +1053,7 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
 
     // Recorded once it is settled that something will be added, so that a
     // press which comes to nothing does not leave an undo step behind.
-    history_.Record(document_->Annotations());
+    history_.Record(document_->Annotations(), ToolForHistory());
 
     ccl::doc::Annotation annotation;
     annotation.id = ccl::doc::NextAnnotationId();
@@ -1175,7 +1201,7 @@ void ClipWindow::PaintSelection(float opacity, float width) noexcept {
         return;
     }
 
-    history_.Record(document_->Annotations());
+    history_.Record(document_->Annotations(), ToolForHistory());
 
     for (const ccl::doc::SelectionShapes& piece : pieces) {
         ccl::doc::Annotation annotation;
@@ -1472,7 +1498,7 @@ void ClipWindow::EditTextAt(size_t index) noexcept {
     // Lifted out of the document for the duration, so the old copy is not
     // drawn underneath the editor, and so undo returns to the state before
     // editing began.
-    history_.Record(document_->Annotations());
+    history_.Record(document_->Annotations(), ToolForHistory());
 
     editingOriginal_ = document_->Annotations()[index].text;
     editingExisting_ = true;
@@ -1949,7 +1975,7 @@ void ClipWindow::CommitText() noexcept {
 
     // Editing an existing piece already recorded the state it started from.
     if (!wasEditing) {
-        history_.Record(document_->Annotations());
+        history_.Record(document_->Annotations(), ToolForHistory());
     }
 
     ccl::doc::Annotation annotation;
@@ -2069,7 +2095,7 @@ void ClipWindow::EndStroke() noexcept {
     ::ReleaseCapture();
 
     if (document_ != nullptr && !activeStroke_.points.empty()) {
-        history_.Record(document_->Annotations());
+        history_.Record(document_->Annotations(), ToolForHistory());
 
         ccl::doc::Annotation annotation;
         annotation.id = ccl::doc::NextAnnotationId();
@@ -2126,7 +2152,7 @@ void ClipWindow::EraseAt(POINT client) noexcept {
 
     // One undo entry per erase drag, not per stroke removed.
     if (!erasedAny_) {
-        history_.Record(annotations);
+        history_.Record(annotations, ToolForHistory());
         erasedAny_ = true;
     }
 
@@ -2296,6 +2322,10 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             // Placing a new selection ends adjustment of the previous effect.
             adjustingEffectIndex_ = static_cast<size_t>(-1);
 
+            // Kept before anything is thrown away, so that the drag can be
+            // stepped back over whichever kind it turns out to be.
+            selectionBeforeDrag_ = selection_;
+
             // Shift adds to what is there, Alt takes away, neither starts
             // again. Ctrl is left out of it: it can be assigned to scrolling
             // or to moving the window, and taking it here would quietly
@@ -2409,7 +2439,7 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         }
         if (!textDragMoved_ && document_ != nullptr) {
             textDragMoved_ = true;
-            history_.Record(document_->Annotations());
+            history_.Record(document_->Annotations(), ToolForHistory());
         }
 
         if (document_ != nullptr &&
@@ -2480,6 +2510,18 @@ void ClipWindow::OnLeftUp() noexcept {
         if (!HasSelection()) {
             ClearSelection();
         }
+
+        // A step of its own, every time: whichever kind of drag it was, whether
+        // or not anything was selected before it, and whether or not the result
+        // looks any different. The press was made, so it belongs in the record
+        // of what was done -- which of them are worth stepping back over is not
+        // for this to decide.
+        if (document_ != nullptr) {
+            history_.RecordSelection(document_->Annotations(),
+                                     selectionBeforeDrag_, ToolForHistory());
+        }
+        selectionBeforeDrag_.clear();
+
         UpdateTitle();
         Draw();
         return;
@@ -3725,6 +3767,10 @@ void ClipWindow::OnCommand(int command) noexcept {
             ApplyEffectToSelection(ccl::doc::EffectKind::Blur);
             return;
         case kMenuClearSelection:
+            if (document_ != nullptr) {
+                history_.RecordSelection(document_->Annotations(), selection_,
+                                         ToolForHistory());
+            }
             ClearSelection();
             UpdateTitle();
             Draw();
@@ -3868,19 +3914,31 @@ void ClipWindow::Undo() noexcept {
     // Asked before the step is consumed: afterwards there is no way to tell
     // whether the picture was among what came back.
     const bool reshaped = history_.NextUndoChangesImage();
-    if (!history_.Undo(document_->Annotations(), document_->Image())) {
+    ccl::tool::Tool tool = ToolForHistory();
+    if (!history_.Undo(document_->Annotations(), document_->Image(), selection_,
+                       tool)) {
         return;
     }
+    RestoreTool(tool);
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
+    // The step may have put a different area back, and a step that carried
+    // none leaves the one in hand alone. Either way the folded shape has to
+    // be built again from what is there now.
+    RefreshSelection();
     if (reshaped) {
-        ClearSelection();
+        // The area is not thrown away here: the step carried the one that
+        // belonged to the picture it just put back, so it measures against it
+        // again.
         renderer_.SetDocument(document_);
         ResizeToImage();
         ClampScroll();
-        UpdateTitle();
     }
+    // Always, not only when the picture changed: what the title reports may
+    // have been stepped over too -- the area selected, or the effect the size
+    // keys were pointed at.
+    UpdateTitle();
     Draw();
 }
 
@@ -3889,19 +3947,28 @@ void ClipWindow::Redo() noexcept {
         return;
     }
     const bool reshaped = history_.NextRedoChangesImage();
-    if (!history_.Redo(document_->Annotations(), document_->Image())) {
+    ccl::tool::Tool tool = ToolForHistory();
+    if (!history_.Redo(document_->Annotations(), document_->Image(), selection_,
+                       tool)) {
         return;
     }
+    RestoreTool(tool);
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
+    RefreshSelection();
     if (reshaped) {
-        ClearSelection();
+        // The area is not thrown away here: the step carried the one that
+        // belonged to the picture it just put back, so it measures against it
+        // again.
         renderer_.SetDocument(document_);
         ResizeToImage();
         ClampScroll();
-        UpdateTitle();
     }
+    // Always, not only when the picture changed: what the title reports may
+    // have been stepped over too -- the area selected, or the effect the size
+    // keys were pointed at.
+    UpdateTitle();
     Draw();
 }
 
@@ -3917,7 +3984,8 @@ void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
         return;
     }
 
-    history_.RecordWithImage(document_->Annotations(), document_->Image());
+    history_.RecordWithImage(document_->Annotations(), document_->Image(),
+                             selection_, ToolForHistory());
 
     document_->Image() = std::move(transformed);
     document_->Annotations().clear();
