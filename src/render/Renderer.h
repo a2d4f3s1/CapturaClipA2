@@ -160,8 +160,15 @@ private:
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
     // The path a stroke traces, built once and kept. Null for a stroke whose
     // width varies, which Direct2D cannot express as a single path.
-    ID2D1PathGeometry* StrokeGeometry(const ccl::doc::Stroke& stroke,
-                                      unsigned int id) noexcept;
+    ID2D1Geometry* StrokeGeometry(const ccl::doc::Stroke& stroke,
+                                  unsigned int id) noexcept;
+    void DrawFill(const ccl::doc::FillAnnotation& fill,
+                  unsigned int id) noexcept;
+    // The shape a fill covers, folded from its pieces once and kept. A fill is
+    // never reshaped after it is placed, so the result stays good for as long
+    // as its id does.
+    ID2D1Geometry* FillGeometry(const ccl::doc::FillAnnotation& fill,
+                                unsigned int id) noexcept;
     void DrawText(const ccl::doc::TextAnnotation& text, unsigned int id) noexcept;
     // The laid-out glyphs of a piece of text. Text is never edited in place --
     // re-editing replaces the annotation -- so a layout stays good for as long
@@ -200,14 +207,17 @@ private:
     // processed result above, so that turning the strength up and down only
     // costs the processing and not another look at the picture.
     std::unordered_map<unsigned int, ccl::capture::DibBuffer> effectSource_;
-    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>>
+    // Worked-out shapes, whatever produced them: the path a stroke traces, the
+    // area a fill covers. Ids are handed out once and never reused, so the two
+    // can share the one map.
+    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Geometry>>
         geometryCache_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextLayout>>
         layoutCache_;
     // The stroke still being drawn changes shape with every mouse message, so
     // its path is rebuilt each frame. Held here only so it outlives the call
     // that draws with it.
-    Microsoft::WRL::ComPtr<ID2D1PathGeometry> transientGeometry_;
+    Microsoft::WRL::ComPtr<ID2D1Geometry> transientGeometry_;
     Microsoft::WRL::ComPtr<IDWriteTextLayout> transientLayout_;
     // One layer, reused by every highlighter stroke. Each PushLayer wants an
     // intermediate surface, and asking for a new one per stroke per frame is

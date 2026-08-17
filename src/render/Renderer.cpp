@@ -10,6 +10,7 @@
 
 #include "doc/Document.h"
 #include "render/D2DContext.h"
+#include "render/SelectionGeometry.h"
 #include "util/Timing.h"
 
 namespace ccl::render {
@@ -252,8 +253,8 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke,
     target_->PopLayer();
 }
 
-ID2D1PathGeometry* Renderer::StrokeGeometry(const ccl::doc::Stroke& stroke,
-                                            unsigned int id) noexcept {
+ID2D1Geometry* Renderer::StrokeGeometry(const ccl::doc::Stroke& stroke,
+                                        unsigned int id) noexcept {
     if (id != 0) {
         const auto cached = geometryCache_.find(id);
         if (cached != geometryCache_.end()) {
@@ -311,13 +312,51 @@ void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke,
         return;
     }
 
-    ID2D1PathGeometry* geometry = StrokeGeometry(stroke, id);
+    ID2D1Geometry* geometry = StrokeGeometry(stroke, id);
     if (geometry == nullptr) {
         return;
     }
 
     target_->DrawGeometry(geometry, brush_.Get(),
                           stroke.points.front().width, strokeStyle_.Get());
+}
+
+ID2D1Geometry* Renderer::FillGeometry(const ccl::doc::FillAnnotation& fill,
+                                      unsigned int id) noexcept {
+    const auto cached = geometryCache_.find(id);
+    if (cached != geometryCache_.end()) {
+        return cached->second.Get();
+    }
+    if (context_ == nullptr) {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1Geometry> geometry =
+        BuildSelectionGeometry(context_->Factory(), fill.shape);
+    if (!geometry) {
+        return nullptr;
+    }
+    return (geometryCache_[id] = geometry).Get();
+}
+
+void Renderer::DrawFill(const ccl::doc::FillAnnotation& fill,
+                        unsigned int id) noexcept {
+    if (!brush_) {
+        return;
+    }
+    ID2D1Geometry* geometry = FillGeometry(fill, id);
+    if (geometry == nullptr) {
+        return;
+    }
+
+    D2D1_COLOR_F color = ToD2D(fill.color);
+    color.a *= fill.opacity;
+
+    brush_->SetColor(color);
+    target_->SetAntialiasMode(fill.antialias
+                                  ? D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+                                  : D2D1_ANTIALIAS_MODE_ALIASED);
+    target_->FillGeometry(geometry, brush_.Get());
 }
 
 namespace {
@@ -614,6 +653,9 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
                     break;
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
+                    break;
+                case ccl::doc::AnnotationKind::Fill:
+                    DrawFill(annotation.fill, annotation.id);
                     break;
             }
         }
@@ -958,6 +1000,9 @@ void Renderer::Draw(const ccl::view::ViewState& view,
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
                     break;
+                case ccl::doc::AnnotationKind::Fill:
+                    DrawFill(annotation.fill, annotation.id);
+                    break;
             }
         }
     }
@@ -1215,6 +1260,9 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
                     break;
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
+                    break;
+                case ccl::doc::AnnotationKind::Fill:
+                    DrawFill(annotation.fill, annotation.id);
                     break;
             }
         }

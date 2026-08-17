@@ -243,6 +243,9 @@ private:
 
     // Obscures the selected area. Kept as an annotation so it can be undone.
     void ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept;
+    // Paints the selected area in the current colour. `opacity` is what tells
+    // the two menu entries apart: solid, or the wash a highlighter lays down.
+    void FillSelection(float opacity) noexcept;
     // Adjusts the effect just placed, so its strength can be judged against the
     // result rather than guessed at in advance.
     void StepEffectStrength(int steps) noexcept;

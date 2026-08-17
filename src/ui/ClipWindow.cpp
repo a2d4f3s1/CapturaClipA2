@@ -200,6 +200,8 @@ enum MenuId : UINT {
     kMenuStrikethrough,
     kMenuTextOutline,
     kMenuTextShadow,
+    kMenuFill,
+    kMenuFillMarker,
     kMenuMosaic,
     kMenuBlur,
     kMenuClearSelection,
@@ -1047,6 +1049,34 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     // wanted there -- a mosaic gets swapped for a blur, or a second pass goes
     // on top -- and redrawing the same rectangle each time to find out is
     // work the program can save.
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::FillSelection(float opacity) noexcept {
+    if (!HasSelection() || document_ == nullptr) {
+        return;
+    }
+
+    history_.Record(document_->Annotations());
+
+    ccl::doc::Annotation annotation;
+    annotation.id = ccl::doc::NextAnnotationId();
+    annotation.kind = ccl::doc::AnnotationKind::Fill;
+    annotation.fill.shape = CurrentShapes();
+    annotation.fill.color = tool_.Color();
+    annotation.fill.opacity = opacity;
+    annotation.fill.antialias = tool_.antialias;
+
+    document_->Annotations().push_back(std::move(annotation));
+
+    // The size keys have nothing to adjust on a fill, so whatever effect they
+    // were pointed at stops being the thing they act on. Left alone, they
+    // would go on changing something no longer on top.
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+
+    // The area stays selected, as it does after an effect: one pass of colour
+    // is rarely the end of what is wanted there.
     UpdateTitle();
     Draw();
 }
@@ -1943,8 +1973,18 @@ void ClipWindow::EraseAt(POINT client) noexcept {
 
     std::vector<size_t> victims;
     for (size_t i = 0; i < annotations.size(); ++i) {
-        if (annotations[i].kind == ccl::doc::AnnotationKind::Stroke &&
-            StrokeHit(annotations[i].stroke, point, radius)) {
+        const ccl::doc::Annotation& annotation = annotations[i];
+        if (annotation.kind == ccl::doc::AnnotationKind::Stroke &&
+            StrokeHit(annotation.stroke, point, radius)) {
+            victims.push_back(i);
+            continue;
+        }
+        // A fill goes as a whole rather than being worn away. Taken at the
+        // centre of the eraser, not across its width: brushing the edge of a
+        // large area of colour and having all of it vanish would be a shock.
+        if (annotation.kind == ccl::doc::AnnotationKind::Fill &&
+            ccl::doc::SelectionContains(annotation.fill.shape, point.x,
+                                        point.y)) {
             victims.push_back(i);
         }
     }
@@ -3299,6 +3339,13 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     // about would be worse than seeing why it cannot be used.
     const UINT cropState =
         SelectionIsSingleRect() ? plain : (plain | MF_GRAYED);
+    // Putting colour down and hiding what is there are different intentions,
+    // so they are kept in separate blocks. The order runs from adding, through
+    // hiding, to reshaping, to having done with it.
+    ::AppendMenuW(selection, selectionState, kMenuFill, L"塗りつぶし");
+    ::AppendMenuW(selection, selectionState, kMenuFillMarker,
+                  L"マーカー塗りつぶし");
+    ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
     ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
@@ -3523,6 +3570,12 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuCommitText:
             CommitText();
+            return;
+        case kMenuFill:
+            FillSelection(1.0f);
+            return;
+        case kMenuFillMarker:
+            FillSelection(ccl::doc::kHighlighterOpacity);
             return;
         case kMenuMosaic:
             ApplyEffectToSelection(ccl::doc::EffectKind::Mosaic);

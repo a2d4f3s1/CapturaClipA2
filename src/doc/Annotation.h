@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "doc/Selection.h"
+
 namespace ccl::doc {
 
 struct Color {
@@ -143,6 +145,25 @@ struct EffectAnnotation {
     float strength = 12.0f;
 };
 
+// An area of the image painted over in a flat colour.
+//
+// Kept apart from the obscuring effects rather than made another kind of one.
+// An effect exists to hold on to the pixels it covers, taken as they were the
+// moment it was placed; a fill has nothing underneath it to hold on to, and
+// folding it in would mean writing "except for fills" through every part of
+// that machinery.
+struct FillAnnotation {
+    // The shape as it was when the paint went down. It stays put afterwards,
+    // whatever happens to the selection it came from.
+    SelectionShapes shape;
+    Color color;
+    // Resolved when the paint goes down rather than looked up later, in the
+    // same way a stroke resolves pressure into a width: what draws it should
+    // not have to know which menu entry it came from.
+    float opacity = 1.0f;
+    bool antialias = true;
+};
+
 // Annotations are kept as objects instead of being burned into the image.
 //
 // This is the structural difference the whole tool hinges on: erasing a
@@ -155,6 +176,7 @@ enum class AnnotationKind {
     Stroke,
     Text,
     Effect,
+    Fill,
 };
 
 struct Annotation {
@@ -172,6 +194,7 @@ struct Annotation {
     Stroke stroke;
     TextAnnotation text;
     EffectAnnotation effect;
+    FillAnnotation fill;
 };
 
 // Handed out in order and never reused, so a cached result can never be taken
