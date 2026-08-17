@@ -202,6 +202,8 @@ enum MenuId : UINT {
     kMenuTextShadow,
     kMenuFill,
     kMenuFillMarker,
+    kMenuOutline,
+    kMenuOutlineMarker,
     kMenuMosaic,
     kMenuBlur,
     kMenuClearSelection,
@@ -1053,26 +1055,117 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     Draw();
 }
 
-void ClipWindow::FillSelection(float opacity) noexcept {
+std::vector<ccl::doc::SelectionShapes> ClipWindow::SelectionPieces()
+    const noexcept {
+    std::vector<ccl::doc::SelectionShapes> pieces;
+
+    // Each piece added starts a patch of its own, and each piece taken away
+    // applies to every patch standing at that moment -- which is how the
+    // folding treats them, so the patches together come to the same area.
+    for (const ccl::doc::SelectionShape& shape : CurrentShapes()) {
+        if (shape.op == ccl::doc::SelectionOp::Subtract) {
+            for (ccl::doc::SelectionShapes& piece : pieces) {
+                piece.push_back(shape);
+            }
+            continue;
+        }
+        if (shape.op == ccl::doc::SelectionOp::Replace) {
+            pieces.clear();
+        }
+        ccl::doc::SelectionShape first = shape;
+        first.op = ccl::doc::SelectionOp::Replace;
+        pieces.push_back({first});
+    }
+
+    ID2D1Factory* factory = context_ != nullptr ? context_->Factory() : nullptr;
+    if (factory == nullptr) {
+        return pieces;
+    }
+
+    const auto shapeOf = [factory](const ccl::doc::SelectionShapes& piece) {
+        return ccl::render::BuildSelectionGeometry(factory, piece);
+    };
+
+    // Anything left covering nothing -- a patch taken away again -- would only
+    // produce an annotation with nothing to draw.
+    for (size_t i = pieces.size(); i > 0; --i) {
+        const auto geometry = shapeOf(pieces[i - 1]);
+        float area = 0.0f;
+        if (!geometry ||
+            FAILED(geometry->ComputeArea(D2D1::Matrix3x2F::Identity(), &area)) ||
+            area <= 0.0f) {
+            pieces.erase(pieces.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        }
+    }
+
+    // Join the ones that meet, until none of them do.
+    for (bool joined = true; joined;) {
+        joined = false;
+        for (size_t i = 0; i < pieces.size() && !joined; ++i) {
+            for (size_t j = i + 1; j < pieces.size() && !joined; ++j) {
+                const auto left = shapeOf(pieces[i]);
+                const auto right = shapeOf(pieces[j]);
+                if (!left || !right) {
+                    continue;
+                }
+                D2D1_GEOMETRY_RELATION relation =
+                    D2D1_GEOMETRY_RELATION_UNKNOWN;
+                if (FAILED(left->CompareWithGeometry(
+                        right.Get(), D2D1::Matrix3x2F::Identity(),
+                        &relation)) ||
+                    relation == D2D1_GEOMETRY_RELATION_DISJOINT) {
+                    continue;
+                }
+
+                for (size_t k = 0; k < pieces[j].size(); ++k) {
+                    ccl::doc::SelectionShape shape = pieces[j][k];
+                    // Folded onto the end of the other patch rather than
+                    // replacing it.
+                    if (k == 0) {
+                        shape.op = ccl::doc::SelectionOp::Add;
+                    }
+                    pieces[i].push_back(shape);
+                }
+                pieces.erase(pieces.begin() + static_cast<std::ptrdiff_t>(j));
+                joined = true;
+            }
+        }
+    }
+
+    return pieces;
+}
+
+void ClipWindow::PaintSelection(float opacity, float width) noexcept {
     if (!HasSelection() || document_ == nullptr) {
+        return;
+    }
+
+    // One annotation per patch, so that paint laid over several places can be
+    // rubbed out one place at a time. Undo is unaffected: the state before is
+    // recorded once, however many patches go down.
+    const std::vector<ccl::doc::SelectionShapes> pieces = SelectionPieces();
+    if (pieces.empty()) {
         return;
     }
 
     history_.Record(document_->Annotations());
 
-    ccl::doc::Annotation annotation;
-    annotation.id = ccl::doc::NextAnnotationId();
-    annotation.kind = ccl::doc::AnnotationKind::Fill;
-    annotation.fill.shape = CurrentShapes();
-    annotation.fill.color = tool_.Color();
-    annotation.fill.opacity = opacity;
-    annotation.fill.antialias = tool_.antialias;
+    for (const ccl::doc::SelectionShapes& piece : pieces) {
+        ccl::doc::Annotation annotation;
+        annotation.id = ccl::doc::NextAnnotationId();
+        annotation.kind = ccl::doc::AnnotationKind::Area;
+        annotation.area.shape = piece;
+        annotation.area.color = tool_.Color();
+        annotation.area.opacity = opacity;
+        annotation.area.antialias = tool_.antialias;
+        annotation.area.width = width;
 
-    document_->Annotations().push_back(std::move(annotation));
+        document_->Annotations().push_back(std::move(annotation));
+    }
 
-    // The size keys have nothing to adjust on a fill, so whatever effect they
-    // were pointed at stops being the thing they act on. Left alone, they
-    // would go on changing something no longer on top.
+    // The size keys have nothing to adjust here, so whatever effect they were
+    // pointed at stops being the thing they act on. Left alone, they would go
+    // on changing something no longer on top.
     adjustingEffectIndex_ = static_cast<size_t>(-1);
 
     // The area stays selected, as it does after an effect: one pass of colour
@@ -1979,12 +2072,24 @@ void ClipWindow::EraseAt(POINT client) noexcept {
             victims.push_back(i);
             continue;
         }
-        // A fill goes as a whole rather than being worn away. Taken at the
+        if (annotation.kind != ccl::doc::AnnotationKind::Area) {
+            continue;
+        }
+        const ccl::doc::AreaAnnotation& area = annotation.area;
+        if (area.width > 0.0f) {
+            // A line round an area is rubbed out by touching the line, as any
+            // other line is -- reaching for the middle of a large ring and
+            // having it disappear would be the surprise.
+            if (ccl::doc::SelectionNearEdge(area.shape, point.x, point.y,
+                                            radius + area.width * 0.5f)) {
+                victims.push_back(i);
+            }
+            continue;
+        }
+        // Paint goes as a whole rather than being worn away. Taken at the
         // centre of the eraser, not across its width: brushing the edge of a
         // large area of colour and having all of it vanish would be a shock.
-        if (annotation.kind == ccl::doc::AnnotationKind::Fill &&
-            ccl::doc::SelectionContains(annotation.fill.shape, point.x,
-                                        point.y)) {
+        if (ccl::doc::SelectionContains(area.shape, point.x, point.y)) {
             victims.push_back(i);
         }
     }
@@ -3345,6 +3450,9 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(selection, selectionState, kMenuFill, L"塗りつぶし");
     ::AppendMenuW(selection, selectionState, kMenuFillMarker,
                   L"マーカー塗りつぶし");
+    ::AppendMenuW(selection, selectionState, kMenuOutline, L"境界線を描く");
+    ::AppendMenuW(selection, selectionState, kMenuOutlineMarker,
+                  L"マーカーで境界線を描く");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
     ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
@@ -3572,10 +3680,16 @@ void ClipWindow::OnCommand(int command) noexcept {
             CommitText();
             return;
         case kMenuFill:
-            FillSelection(1.0f);
+            PaintSelection(1.0f, 0.0f);
             return;
         case kMenuFillMarker:
-            FillSelection(ccl::doc::kHighlighterOpacity);
+            PaintSelection(ccl::doc::kHighlighterOpacity, 0.0f);
+            return;
+        case kMenuOutline:
+            PaintSelection(1.0f, tool_.Width());
+            return;
+        case kMenuOutlineMarker:
+            PaintSelection(ccl::doc::kHighlighterOpacity, tool_.Width());
             return;
         case kMenuMosaic:
             ApplyEffectToSelection(ccl::doc::EffectKind::Mosaic);

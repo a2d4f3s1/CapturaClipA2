@@ -321,7 +321,7 @@ void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke,
                           stroke.points.front().width, strokeStyle_.Get());
 }
 
-ID2D1Geometry* Renderer::FillGeometry(const ccl::doc::FillAnnotation& fill,
+ID2D1Geometry* Renderer::AreaGeometry(const ccl::doc::AreaAnnotation& area,
                                       unsigned int id) noexcept {
     const auto cached = geometryCache_.find(id);
     if (cached != geometryCache_.end()) {
@@ -332,30 +332,38 @@ ID2D1Geometry* Renderer::FillGeometry(const ccl::doc::FillAnnotation& fill,
     }
 
     Microsoft::WRL::ComPtr<ID2D1Geometry> geometry =
-        BuildSelectionGeometry(context_->Factory(), fill.shape);
+        BuildSelectionGeometry(context_->Factory(), area.shape);
     if (!geometry) {
         return nullptr;
     }
     return (geometryCache_[id] = geometry).Get();
 }
 
-void Renderer::DrawFill(const ccl::doc::FillAnnotation& fill,
+void Renderer::DrawArea(const ccl::doc::AreaAnnotation& area,
                         unsigned int id) noexcept {
     if (!brush_) {
         return;
     }
-    ID2D1Geometry* geometry = FillGeometry(fill, id);
+    ID2D1Geometry* geometry = AreaGeometry(area, id);
     if (geometry == nullptr) {
         return;
     }
 
-    D2D1_COLOR_F color = ToD2D(fill.color);
-    color.a *= fill.opacity;
+    D2D1_COLOR_F color = ToD2D(area.color);
+    color.a *= area.opacity;
 
     brush_->SetColor(color);
-    target_->SetAntialiasMode(fill.antialias
+    target_->SetAntialiasMode(area.antialias
                                   ? D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
                                   : D2D1_ANTIALIAS_MODE_ALIASED);
+
+    if (area.width > 0.0f) {
+        // Round joins and caps, as the pen uses, so a line round a hand-drawn
+        // shape does not sprout spikes at its corners.
+        target_->DrawGeometry(geometry, brush_.Get(), area.width,
+                              strokeStyle_.Get());
+        return;
+    }
     target_->FillGeometry(geometry, brush_.Get());
 }
 
@@ -654,8 +662,8 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
                     break;
-                case ccl::doc::AnnotationKind::Fill:
-                    DrawFill(annotation.fill, annotation.id);
+                case ccl::doc::AnnotationKind::Area:
+                    DrawArea(annotation.area, annotation.id);
                     break;
             }
         }
@@ -1000,8 +1008,8 @@ void Renderer::Draw(const ccl::view::ViewState& view,
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
                     break;
-                case ccl::doc::AnnotationKind::Fill:
-                    DrawFill(annotation.fill, annotation.id);
+                case ccl::doc::AnnotationKind::Area:
+                    DrawArea(annotation.area, annotation.id);
                     break;
             }
         }
@@ -1261,8 +1269,8 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
                 case ccl::doc::AnnotationKind::Effect:
                     DrawEffect(annotation.effect, annotation.id);
                     break;
-                case ccl::doc::AnnotationKind::Fill:
-                    DrawFill(annotation.fill, annotation.id);
+                case ccl::doc::AnnotationKind::Area:
+                    DrawArea(annotation.area, annotation.id);
                     break;
             }
         }

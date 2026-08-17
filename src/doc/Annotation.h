@@ -145,14 +145,18 @@ struct EffectAnnotation {
     float strength = 12.0f;
 };
 
-// An area of the image painted over in a flat colour.
+// An area of the image painted in, or drawn round, in a flat colour.
+//
+// The two are one thing rather than two: same shape, same colour, same rules
+// about when it goes away. Only the last step differs -- whether the shape is
+// filled or its edge is traced.
 //
 // Kept apart from the obscuring effects rather than made another kind of one.
 // An effect exists to hold on to the pixels it covers, taken as they were the
-// moment it was placed; a fill has nothing underneath it to hold on to, and
-// folding it in would mean writing "except for fills" through every part of
+// moment it was placed; paint has nothing underneath it to hold on to, and
+// folding it in would mean writing "except for these" through every part of
 // that machinery.
-struct FillAnnotation {
+struct AreaAnnotation {
     // The shape as it was when the paint went down. It stays put afterwards,
     // whatever happens to the selection it came from.
     SelectionShapes shape;
@@ -162,6 +166,9 @@ struct FillAnnotation {
     // not have to know which menu entry it came from.
     float opacity = 1.0f;
     bool antialias = true;
+    // Zero fills the shape. Anything else traces its edge at that width, in
+    // image pixels.
+    float width = 0.0f;
 };
 
 // Annotations are kept as objects instead of being burned into the image.
@@ -176,7 +183,7 @@ enum class AnnotationKind {
     Stroke,
     Text,
     Effect,
-    Fill,
+    Area,
 };
 
 struct Annotation {
@@ -194,7 +201,7 @@ struct Annotation {
     Stroke stroke;
     TextAnnotation text;
     EffectAnnotation effect;
-    FillAnnotation fill;
+    AreaAnnotation area;
 };
 
 // Handed out in order and never reused, so a cached result can never be taken

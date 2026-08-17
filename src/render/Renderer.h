@@ -162,12 +162,12 @@ private:
     // width varies, which Direct2D cannot express as a single path.
     ID2D1Geometry* StrokeGeometry(const ccl::doc::Stroke& stroke,
                                   unsigned int id) noexcept;
-    void DrawFill(const ccl::doc::FillAnnotation& fill,
+    void DrawArea(const ccl::doc::AreaAnnotation& area,
                   unsigned int id) noexcept;
-    // The shape a fill covers, folded from its pieces once and kept. A fill is
+    // The shape an area covers, folded from its pieces once and kept. It is
     // never reshaped after it is placed, so the result stays good for as long
     // as its id does.
-    ID2D1Geometry* FillGeometry(const ccl::doc::FillAnnotation& fill,
+    ID2D1Geometry* AreaGeometry(const ccl::doc::AreaAnnotation& area,
                                 unsigned int id) noexcept;
     void DrawText(const ccl::doc::TextAnnotation& text, unsigned int id) noexcept;
     // The laid-out glyphs of a piece of text. Text is never edited in place --

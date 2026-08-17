@@ -53,6 +53,16 @@ using SelectionShapes = std::vector<SelectionShape>;
 bool SelectionContains(const SelectionShapes& shapes, float x,
                        float y) noexcept;
 
+// True when the point is within `distance` of an edge of any of the pieces,
+// which is how something drawn along the edge is picked out.
+//
+// The pieces are taken one by one rather than folded first: an edge that the
+// folding removed -- a piece taken away from somewhere nothing was selected --
+// would count here although nothing was drawn along it. That costs a stray hit
+// in a corner case, against having to fold a shape to answer at all.
+bool SelectionNearEdge(const SelectionShapes& shapes, float x, float y,
+                       float distance) noexcept;
+
 // True when the selection is exactly one rectangle, which is what the
 // operations that can only produce a rectangle are offered for.
 bool IsSingleRect(const SelectionShapes& shapes) noexcept;

@@ -243,9 +243,17 @@ private:
 
     // Obscures the selected area. Kept as an annotation so it can be undone.
     void ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept;
-    // Paints the selected area in the current colour. `opacity` is what tells
-    // the two menu entries apart: solid, or the wash a highlighter lays down.
-    void FillSelection(float opacity) noexcept;
+    // Puts the current colour down over the selected area. `width` of zero
+    // fills it, anything else draws round its edge at that width; `opacity`
+    // tells the plain entries from the highlighter ones.
+    void PaintSelection(float opacity, float width) noexcept;
+    // The selection broken into the separate patches it covers, so that paint
+    // laid over several places can be rubbed out one place at a time.
+    //
+    // Patches that touch are kept together: laid down separately, the overlap
+    // would take the colour twice, and a highlighter that darkens where it
+    // crosses itself is not a highlighter.
+    std::vector<ccl::doc::SelectionShapes> SelectionPieces() const noexcept;
     // Adjusts the effect just placed, so its strength can be judged against the
     // result rather than guessed at in advance.
     void StepEffectStrength(int steps) noexcept;
