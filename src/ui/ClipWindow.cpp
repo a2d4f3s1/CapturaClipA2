@@ -1006,9 +1006,28 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
         return;
     }
 
-    history_.Record(document_->Annotations());
+    // Held to whole pixels and to the inside of the picture, and the same
+    // numbers used from here on. The piece cut out is clamped whether or not
+    // this is, so leaving it unclamped means cutting out less than is drawn
+    // back -- which arrives stretched, its blocks a different size from
+    // everywhere else. Rounded outwards so nothing selected is left out.
+    const D2D1_RECT_F bounds = SelectionBounds();
+    const auto width = static_cast<float>(document_->Width());
+    const auto height = static_cast<float>(document_->Height());
 
-    const D2D1_RECT_F area = SelectionBounds();
+    const D2D1_RECT_F area = D2D1::RectF(
+        std::clamp(std::floor(bounds.left), 0.0f, width),
+        std::clamp(std::floor(bounds.top), 0.0f, height),
+        std::clamp(std::ceil(bounds.right), 0.0f, width),
+        std::clamp(std::ceil(bounds.bottom), 0.0f, height));
+
+    if (area.right - area.left < 1.0f || area.bottom - area.top < 1.0f) {
+        return;
+    }
+
+    // Recorded once it is settled that something will be added, so that a
+    // press which comes to nothing does not leave an undo step behind.
+    history_.Record(document_->Annotations());
 
     ccl::doc::Annotation annotation;
     annotation.id = ccl::doc::NextAnnotationId();
@@ -1019,6 +1038,11 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     annotation.effect.right = area.right;
     annotation.effect.bottom = area.bottom;
 
+    // A plain rectangle needs no mask: the box is the shape.
+    if (!SelectionIsSingleRect()) {
+        annotation.effect.mask = CurrentShapes();
+    }
+
     // Reuses the strength last chosen for this effect. The first time round
     // there is none, so it is scaled to the area instead -- a small region
     // must not collapse into a single block.
@@ -1028,8 +1052,11 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
     if (remembered >= 0.0f) {
         annotation.effect.strength = remembered;
     } else {
-        const float span =
-            std::min(area.right - area.left, area.bottom - area.top);
+        // Taken from how much is covered rather than from the box around it.
+        // A thin band drawn corner to corner fills a large box while covering
+        // very little, and sizing blocks to the box would hide it under two or
+        // three of them. For a square the two agree.
+        const float span = std::sqrt(selectionGeometry_.Area());
         annotation.effect.strength = mosaic
                                          ? std::clamp(span / 12.0f, 3.0f, 48.0f)
                                          : std::clamp(span / 16.0f, 2.0f, 24.0f);

@@ -35,6 +35,7 @@ void Renderer::SetDocument(const ccl::doc::Document* document) noexcept {
     // the new one's.
     effectCache_.clear();
     effectSource_.clear();
+    effectMask_.clear();
     geometryCache_.clear();
     layoutCache_.clear();
 }
@@ -86,6 +87,11 @@ void Renderer::PruneCaches() noexcept {
     // all, and they are the largest thing kept here.
     if (effectSource_.size() > limit) {
         effectSource_.clear();
+    }
+    // The shapes are taken at the same moment as the sources and are no use
+    // without them, so they go on the same terms.
+    if (effectMask_.size() > limit) {
+        effectMask_.clear();
     }
     if (geometryCache_.size() > limit) {
         geometryCache_.clear();
@@ -727,7 +733,93 @@ void Renderer::CaptureEffectSources() noexcept {
         // Stored either way. Retrying every frame is how a failure here turned
         // into the effect never appearing at all.
         effectSource_[annotation.id] = std::move(region);
+
+        // Worked out alongside the source and kept for as long: what the
+        // effect hides is settled when it is placed.
+        effectMask_[annotation.id] = BuildEffectMask(effect);
     }
+}
+
+std::vector<unsigned char> Renderer::BuildEffectMask(
+    const ccl::doc::EffectAnnotation& effect) noexcept {
+    std::vector<unsigned char> mask;
+    if (context_ == nullptr || effect.mask.empty()) {
+        return mask;
+    }
+
+    IWICImagingFactory* imaging = context_->Imaging();
+    ID2D1Factory* factory = context_->Factory();
+    if (imaging == nullptr || factory == nullptr) {
+        return mask;
+    }
+
+    const auto width = static_cast<UINT>(effect.right - effect.left);
+    const auto height = static_cast<UINT>(effect.bottom - effect.top);
+    if (width == 0 || height == 0) {
+        return mask;
+    }
+
+    const Microsoft::WRL::ComPtr<ID2D1Geometry> shape =
+        BuildSelectionGeometry(factory, effect.mask);
+    if (!shape) {
+        return mask;
+    }
+
+    // Drawn on a surface of its own, the size of the effect's box. This runs
+    // before the frame opens, for the same reason the sources are taken then:
+    // Direct2D will not be told to draw somewhere else part way through.
+    Microsoft::WRL::ComPtr<IWICBitmap> surface;
+    if (FAILED(imaging->CreateBitmap(width, height,
+                                     GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, &surface))) {
+        return mask;
+    }
+
+    const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> offscreen;
+    if (FAILED(factory->CreateWicBitmapRenderTarget(surface.Get(), properties,
+                                                    &offscreen))) {
+        return mask;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(offscreen->CreateSolidColorBrush(
+            D2D1::ColorF(D2D1::ColorF::White), &brush))) {
+        return mask;
+    }
+
+    offscreen->BeginDraw();
+    offscreen->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    // The shape is in image coordinates and the surface starts at the corner
+    // of the box, so the one goes over to the other here. This is the only
+    // place the two coordinate systems meet.
+    offscreen->SetTransform(
+        D2D1::Matrix3x2F::Translation(-effect.left, -effect.top));
+    offscreen->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    offscreen->FillGeometry(shape.Get(), brush.Get());
+    offscreen->SetTransform(D2D1::Matrix3x2F::Identity());
+    if (FAILED(offscreen->EndDraw())) {
+        return mask;
+    }
+
+    std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4u);
+    if (FAILED(surface->CopyPixels(nullptr, width * 4u,
+                                   static_cast<UINT>(pixels.size()),
+                                   pixels.data()))) {
+        return mask;
+    }
+
+    // Only the coverage is wanted; the colour was never anything but white.
+    mask.resize(static_cast<size_t>(width) * height);
+    for (size_t i = 0; i < mask.size(); ++i) {
+        mask[i] = pixels[i * 4u + 3u];
+    }
+    return mask;
 }
 
 ID2D1Bitmap* Renderer::EffectBitmap(const ccl::doc::EffectAnnotation& effect,
@@ -771,8 +863,30 @@ ID2D1Bitmap* Renderer::EffectBitmap(const ccl::doc::EffectAnnotation& effect,
         ApplyBlur(pixels, width, height, static_cast<int>(effect.strength));
     }
 
+    // Alpha is written here and never read. What these pixels came from has
+    // none worth having -- a screen grab leaves it at zero -- so taking it as
+    // it stands would make the whole area vanish. The shape is the only thing
+    // that gets to say what shows.
+    const auto shape = effectMask_.find(id);
+    const bool masked = shape != effectMask_.end() &&
+                        shape->second.size() ==
+                            static_cast<size_t>(width) * height;
+
+    for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
+        const unsigned int coverage = masked ? shape->second[i] : 255u;
+        unsigned char* pixel = pixels.data() + i * 4u;
+        // Premultiplied, so the colour is scaled by the coverage: at a soft
+        // edge the two have to agree or the join shows as a bright fringe.
+        for (int channel = 0; channel < 3; ++channel) {
+            pixel[channel] =
+                static_cast<unsigned char>(pixel[channel] * coverage / 255u);
+        }
+        pixel[3] = static_cast<unsigned char>(coverage);
+    }
+
     const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f, 96.0f);
 
     Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;

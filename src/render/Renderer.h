@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 
 #include <unordered_map>
+#include <vector>
 
 #include "capture/DibBuffer.h"
 #include "doc/Annotation.h"
@@ -183,6 +184,11 @@ private:
     // before the frame starts, because Direct2D cannot be asked to draw
     // somewhere else in the middle of drawing here.
     void CaptureEffectSources() noexcept;
+    // Rasterises the shape an effect hides at the size of its box: one byte a
+    // pixel, full inside and nothing outside. Empty for an effect that covers
+    // the whole of its box.
+    std::vector<unsigned char> BuildEffectMask(
+        const ccl::doc::EffectAnnotation& effect) noexcept;
     // Processes those pixels once and keeps the result; what an effect
     // obscures is settled when it is placed and does not change after.
     ID2D1Bitmap* EffectBitmap(const ccl::doc::EffectAnnotation& effect,
@@ -207,6 +213,11 @@ private:
     // processed result above, so that turning the strength up and down only
     // costs the processing and not another look at the picture.
     std::unordered_map<unsigned int, ccl::capture::DibBuffer> effectSource_;
+    // The shape each effect hides within its box, a byte a pixel. Kept apart
+    // from the processed pixels for the same reason as the sources: the shape
+    // does not change when the strength does, and working it out again on
+    // every press of the size keys would be paid for nothing.
+    std::unordered_map<unsigned int, std::vector<unsigned char>> effectMask_;
     // Worked-out shapes, whatever produced them: the path a stroke traces, the
     // area a fill covers. Ids are handed out once and never reused, so the two
     // can share the one map.

@@ -136,13 +136,19 @@ enum class EffectKind {
 // until the capture is saved.
 struct EffectAnnotation {
     EffectKind kind = EffectKind::Mosaic;
-    // Image coordinates at 100% zoom.
+    // Image coordinates at 100% zoom, held to whole pixels and inside the
+    // picture. Whole pixels because the same numbers say which pixels to take
+    // and where to put them back: left as fractions, the piece cut out and the
+    // place it is drawn are not quite the same size and it arrives stretched.
     float left = 0.0f;
     float top = 0.0f;
     float right = 0.0f;
     float bottom = 0.0f;
     // Mosaic block size, or blur radius, in image pixels.
     float strength = 12.0f;
+    // The shape hidden within that box. Empty means the whole of it, which is
+    // what an area selected as a plain rectangle comes to.
+    SelectionShapes mask;
 };
 
 // An area of the image painted in, or drawn round, in a flat colour.
