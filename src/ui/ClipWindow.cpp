@@ -966,8 +966,19 @@ ccl::doc::SelectionShapes ClipWindow::CurrentShapes() const noexcept {
 }
 
 void ClipWindow::RefreshSelection() noexcept {
-    selectionGeometry_.Rebuild(
-        context_ != nullptr ? context_->Factory() : nullptr, CurrentShapes());
+    ID2D1Factory* factory = context_ != nullptr ? context_->Factory() : nullptr;
+    selectionGeometry_.Rebuild(factory, CurrentShapes());
+
+    if (selecting_ && pending_.op == ccl::doc::SelectionOp::Subtract) {
+        // On its own, so it has a shape even where it reaches outside what is
+        // selected. Taken as a piece in its own right rather than as a
+        // subtraction, which is what "Replace" means to the folding.
+        ccl::doc::SelectionShape shown = pending_;
+        shown.op = ccl::doc::SelectionOp::Replace;
+        removingGeometry_.Rebuild(factory, {shown});
+    } else {
+        removingGeometry_.Clear();
+    }
 }
 
 void ClipWindow::ClearSelection() noexcept {
@@ -975,6 +986,15 @@ void ClipWindow::ClearSelection() noexcept {
     selecting_ = false;
     pending_ = ccl::doc::SelectionShape{};
     selectionGeometry_.Clear();
+    removingGeometry_.Clear();
+}
+
+bool ClipWindow::SelectionIsSingleRect() const noexcept {
+    return HasSelection() && ccl::doc::IsSingleRect(CurrentShapes());
+}
+
+bool ClipWindow::IsSelectionTool(ccl::tool::Tool tool) noexcept {
+    return tool == ccl::tool::Tool::Select;
 }
 
 void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
@@ -2051,7 +2071,12 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
     // The press has already happened by the time the hook goes up, so the hook
     // only ever sees the movement and the release. That is enough: the release
     // is what settles the colour.
-    if (IsKeyDown(VK_MENU) && tool_.tool != ccl::tool::Tool::Eyedropper) {
+    //
+    // Not while selecting an area: there Alt means "take this piece away
+    // again", which is the one place a colour cannot be used anyway -- nothing
+    // there draws with it.
+    if (IsKeyDown(VK_MENU) && tool_.tool != ccl::tool::Tool::Eyedropper &&
+        !IsSelectionTool(tool_.tool)) {
         SelectTool(ccl::tool::Tool::Eyedropper);
         sampling_ = true;
         PickColorAt(client);
@@ -2099,9 +2124,24 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             // Placing a new selection ends adjustment of the previous effect.
             adjustingEffectIndex_ = static_cast<size_t>(-1);
 
+            // Shift adds to what is there, Alt takes away, neither starts
+            // again. Ctrl is left out of it: it can be assigned to scrolling
+            // or to moving the window, and taking it here would quietly
+            // override that for this tool alone.
+            ccl::doc::SelectionOp op = ccl::doc::SelectionOp::Replace;
+            if (IsKeyDown(VK_SHIFT)) {
+                op = ccl::doc::SelectionOp::Add;
+            } else if (IsKeyDown(VK_MENU)) {
+                op = ccl::doc::SelectionOp::Subtract;
+            } else {
+                // Starting again: the settled pieces go, rather than being
+                // left underneath where they would pile up unseen.
+                selection_.clear();
+            }
+
             const D2D1_POINT_2F start = ToImage(client);
             pending_ = ccl::doc::SelectionShape{};
-            pending_.op = ccl::doc::SelectionOp::Replace;
+            pending_.op = op;
             pending_.left = start.x;
             pending_.top = start.y;
             pending_.right = start.x;
@@ -2792,11 +2832,16 @@ void ClipWindow::UpdateTitle() noexcept {
                                  name.c_str(), zoom, effectName,
                                  annotation.effect.strength);
                 }
-            } else if (HasSelection()) {
+            } else if (SelectionIsSingleRect()) {
                 const D2D1_RECT_F area = SelectionBounds();
                 ::swprintf_s(title, L"%s  %d%%  Select %.0f x %.0f",
                              name.c_str(), zoom, area.right - area.left,
                              area.bottom - area.top);
+            } else if (HasSelection()) {
+                // Several pieces have no one width and height to report, so
+                // how much is covered is what gets said instead.
+                ::swprintf_s(title, L"%s  %d%%  Select %.0fpx", name.c_str(),
+                             zoom, selectionGeometry_.Area());
             } else {
                 ::swprintf_s(title, L"%s  %d%%  Select", name.c_str(), zoom);
             }
@@ -2897,7 +2942,7 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     // A selection belongs to the tool that draws it. Left behind, it would sit
     // there through a session of drawing and then act on whatever the next
     // command was, long after there was any reason to expect it.
-    if (tool != ccl::tool::Tool::Select && !eyedropperAside) {
+    if (!IsSelectionTool(tool) && !eyedropperAside) {
         ClearSelection();
     }
 
@@ -3249,11 +3294,15 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     // Only offered when there is something selected to obscure.
     const HMENU selection = ::CreatePopupMenu();
     const UINT selectionState = HasSelection() ? plain : (plain | MF_GRAYED);
+    // Cropping can only produce a rectangle, so it is not offered for an area
+    // made of several pieces. Greyed out rather than hidden: the entry moving
+    // about would be worse than seeing why it cannot be used.
+    const UINT cropState =
+        SelectionIsSingleRect() ? plain : (plain | MF_GRAYED);
     ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
     ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(selection, selectionState, kMenuCrop,
-                  L"この範囲で切り抜く");
+    ::AppendMenuW(selection, cropState, kMenuCrop, L"この範囲で切り抜く");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(selection, selectionState, kMenuClearSelection,
                   L"選択を解除");
@@ -3773,7 +3822,9 @@ void ClipWindow::RotateFreely() noexcept {
 }
 
 void ClipWindow::CropToSelection() noexcept {
-    if (!HasSelection()) {
+    // Checked here as well as on the menu entry: a greyed entry can still be
+    // reached, and an area of several pieces has no one rectangle to cut to.
+    if (!SelectionIsSingleRect()) {
         return;
     }
 
@@ -3992,8 +4043,12 @@ void ClipWindow::Draw() noexcept {
     bool hasHighlight = false;
 
     ID2D1Geometry* selection = nullptr;
-    if (tool_.tool == ccl::tool::Tool::Select && HasSelection()) {
-        selection = selectionGeometry_.Get();
+    ID2D1Geometry* removing = nullptr;
+    if (IsSelectionTool(tool_.tool)) {
+        if (HasSelection()) {
+            selection = selectionGeometry_.Get();
+        }
+        removing = removingGeometry_.Get();
     }
 
     if (tool_.tool == ccl::tool::Tool::Text &&
@@ -4008,7 +4063,7 @@ void ClipWindow::Draw() noexcept {
 
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr,
-                   hasHighlight ? &highlight : nullptr, selection);
+                   hasHighlight ? &highlight : nullptr, selection, removing);
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.

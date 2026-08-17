@@ -258,6 +258,13 @@ private:
     // wherever the pieces change, rather than on every frame.
     void RefreshSelection() noexcept;
     void ClearSelection() noexcept;
+    // True when the selection is one rectangle and nothing else, which is what
+    // the operations that can only produce a rectangle are offered for.
+    bool SelectionIsSingleRect() const noexcept;
+    // Tools whose business is the selected area. They share it: moving between
+    // them keeps what is selected, since picking a different way to draw the
+    // same area is not finishing with it.
+    static bool IsSelectionTool(ccl::tool::Tool tool) noexcept;
 
     // True when the left button should scroll rather than use the active tool.
     bool ScrollingWithLeftButton() const noexcept;
@@ -365,6 +372,10 @@ private:
     bool selecting_ = false;
     ccl::doc::SelectionShape pending_;
     ccl::render::SelectionGeometry selectionGeometry_;
+    // The piece being dragged out while it is being taken away, shown on its
+    // own so that what is disappearing is visible. Only built for that: adding
+    // shows itself, since the outline grows to include what is being dragged.
+    ccl::render::SelectionGeometry removingGeometry_;
 
     bool spaceHeld_ = false;
     // Tool to return to once the eyedropper has taken a sample.

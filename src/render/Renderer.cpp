@@ -878,8 +878,8 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active, const BrushCursor* cursor,
-                    const D2D1_RECT_F* highlight,
-                    ID2D1Geometry* selection) noexcept {
+                    const D2D1_RECT_F* highlight, ID2D1Geometry* selection,
+                    ID2D1Geometry* removing) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -967,13 +967,21 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     }
     ccl::timing::AddSince(annotationStats_, annotationStart);
 
-    if (selection != nullptr && brush_) {
+    if ((selection != nullptr || removing != nullptr) && brush_) {
         // Drawn on the boundary itself rather than outside it, so that the
         // outline says exactly what is selected. The width is divided by the
         // zoom because the transform would otherwise scale it too.
+        const float lineWidth = 1.0f / zoom;
         target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        brush_->SetColor(D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
-        target_->DrawGeometry(selection, brush_.Get(), 1.0f / zoom);
+
+        if (selection != nullptr) {
+            brush_->SetColor(D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
+            target_->DrawGeometry(selection, brush_.Get(), lineWidth);
+        }
+        if (removing != nullptr) {
+            brush_->SetColor(D2D1::ColorF(1.0f, 0.3f, 0.3f, 0.9f));
+            target_->DrawGeometry(removing, brush_.Get(), lineWidth);
+        }
     }
 
     if (highlight != nullptr && brush_) {
