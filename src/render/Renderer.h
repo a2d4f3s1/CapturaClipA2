@@ -155,9 +155,15 @@ private:
     // result is kept against. Zero for the stroke still being drawn: it grows
     // with every mouse message, so there is nothing about it worth keeping.
     void DrawStroke(const ccl::doc::Stroke& stroke, unsigned int id) noexcept;
-    // The line itself, without the highlighter's layer around it.
+    // The stroke itself, without the highlighter's layer around it.
     void DrawStrokeShape(const ccl::doc::Stroke& stroke,
                          unsigned int id) noexcept;
+    // Just the line. Kept apart from the above because it has three ways of
+    // being drawn -- a dot, a run of segments each at its own width, or one
+    // path -- and each leaves as soon as it is done, so anything added after
+    // the last of them would only ever run for that one case.
+    void DrawStrokeLine(const ccl::doc::Stroke& stroke,
+                        unsigned int id) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
     // The path a stroke traces, built once and kept. Null for a stroke whose
     // width varies, which Direct2D cannot express as a single path.

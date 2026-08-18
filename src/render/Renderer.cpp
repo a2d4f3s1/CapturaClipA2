@@ -303,6 +303,14 @@ void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke,
                                   ? D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
                                   : D2D1_ANTIALIAS_MODE_ALIASED);
 
+    // The line first, then whatever is placed along it. Split in two because
+    // the line has three ways of being drawn, each leaving early, and anything
+    // added after the last of them would never be reached by the other two.
+    DrawStrokeLine(stroke, id);
+}
+
+void Renderer::DrawStrokeLine(const ccl::doc::Stroke& stroke,
+                              unsigned int id) noexcept {
     // A press without movement should still leave a mark.
     if (stroke.points.size() == 1) {
         const auto& point = stroke.points.front();
