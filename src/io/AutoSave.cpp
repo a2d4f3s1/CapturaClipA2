@@ -31,33 +31,29 @@ std::wstring JoinPath(const std::wstring& folder, const std::wstring& name) {
     return path;
 }
 
-bool Exists(const std::wstring& path) noexcept {
-    return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-// Timestamped name, with a counter appended if that name is taken.
-std::wstring UniqueFileName(const std::wstring& folder,
-                            const wchar_t* extension) noexcept {
+// The moment the picture is being written out, to the second.
+std::wstring TimeStamp() noexcept {
     SYSTEMTIME now{};
     ::GetLocalTime(&now);
 
     wchar_t stamp[64];
     ::swprintf_s(stamp, L"%04d%02d%02d-%02d%02d%02d", now.wYear, now.wMonth,
                  now.wDay, now.wHour, now.wMinute, now.wSecond);
+    return stamp;
+}
 
-    for (int attempt = 0; attempt < 1000; ++attempt) {
-        wchar_t name[96];
-        if (attempt == 0) {
-            ::swprintf_s(name, L"%s.%s", stamp, extension);
-        } else {
-            ::swprintf_s(name, L"%s-%d.%s", stamp, attempt + 1, extension);
-        }
-        const std::wstring path = JoinPath(folder, name);
-        if (!Exists(path)) {
-            return path;
-        }
+// The name a given attempt would use: the time, with a counter appended once
+// that name turns out to be spoken for.
+std::wstring CandidateName(const std::wstring& folder,
+                           const std::wstring& stamp, const wchar_t* extension,
+                           int attempt) noexcept {
+    wchar_t name[96];
+    if (attempt == 0) {
+        ::swprintf_s(name, L"%s.%s", stamp.c_str(), extension);
+    } else {
+        ::swprintf_s(name, L"%s-%d.%s", stamp.c_str(), attempt + 1, extension);
     }
-    return std::wstring{};
+    return JoinPath(folder, name);
 }
 
 }  // namespace
@@ -65,7 +61,8 @@ std::wstring UniqueFileName(const std::wstring& folder,
 std::wstring AutoSaveImage(ccl::render::D2DContext& context,
                            const ccl::capture::DibBuffer& image,
                            const ccl::app::Settings& settings,
-                           const std::wstring& title) noexcept {
+                           const std::wstring& title,
+                           HistoryCleanup cleanup) noexcept {
     if (settings.autoSaveFolder.empty() || !image.IsValid()) {
         return std::wstring{};
     }
@@ -83,18 +80,30 @@ std::wstring AutoSaveImage(ccl::render::D2DContext& context,
     }
 
     const wchar_t* extension = ExtensionFor(settings.defaultFormat);
-    const std::wstring path = UniqueFileName(folder, extension);
-    if (path.empty()) {
-        return std::wstring{};
-    }
+    const std::wstring stamp = TimeStamp();
 
-    if (!SaveImage(context, image, path, settings.defaultFormat,
-                   settings.jpegQuality)) {
-        return std::wstring{};
+    // Which name to use is settled by creating the file, not by looking to see
+    // whether it is free. Several of these programs closing at the same
+    // instant -- which is what happens when a whole group is closed from the
+    // taskbar, or when the session ends -- would otherwise all decide on the
+    // same second and write over one another.
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+        const std::wstring path =
+            CandidateName(folder, stamp, extension, attempt);
+        const NewFileResult result = SaveImageAsNewFile(
+            context, image, path, settings.defaultFormat, settings.jpegQuality);
+        if (result == NewFileResult::AlreadyExists) {
+            continue;
+        }
+        if (result == NewFileResult::Failed) {
+            return std::wstring{};
+        }
+        if (cleanup == HistoryCleanup::Prune) {
+            PruneAutoSaveHistory(settings, folder);
+        }
+        return path;
     }
-
-    PruneAutoSaveHistory(settings, folder);
-    return path;
+    return std::wstring{};
 }
 
 void PruneAutoSaveHistory(const ccl::app::Settings& settings,

@@ -1,5 +1,6 @@
 #include "io/ImageCodec.h"
 
+#include <shlwapi.h>
 #include <wrl/client.h>
 
 #include "render/D2DContext.h"
@@ -89,18 +90,15 @@ const wchar_t* ExtensionFor(ccl::app::ImageFormat format) noexcept {
     }
 }
 
-bool SaveImage(ccl::render::D2DContext& context,
-               const ccl::capture::DibBuffer& image, const std::wstring& path,
-               ccl::app::ImageFormat format, int jpegQuality) noexcept {
-    if (!image.IsValid() || path.empty()) {
-        return false;
-    }
+namespace {
 
-    IWICImagingFactory* factory = context.Imaging();
-    if (factory == nullptr) {
-        return false;
-    }
-
+// Writes the image into a stream that is already open. Both ways of saving
+// share this; they differ only in how the file behind the stream is opened,
+// which is the whole of the difference between replacing a file and refusing
+// to touch one that is already there.
+bool EncodeTo(IWICImagingFactory* factory, IStream* stream,
+              const ccl::capture::DibBuffer& image,
+              ccl::app::ImageFormat format, int jpegQuality) noexcept {
     // 32bppBGR rather than BGRA: the screen grab leaves the alpha channel at
     // zero, so treating it as alpha would save a fully transparent image.
     const UINT width = static_cast<UINT>(image.Width());
@@ -127,15 +125,9 @@ bool SaveImage(ccl::render::D2DContext& context,
         return false;
     }
 
-    ComPtr<IWICStream> stream;
-    if (FAILED(factory->CreateStream(&stream)) ||
-        FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE))) {
-        return false;
-    }
-
     ComPtr<IWICBitmapEncoder> encoder;
     if (FAILED(factory->CreateEncoder(ContainerFor(format), nullptr, &encoder)) ||
-        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache))) {
+        FAILED(encoder->Initialize(stream, WICBitmapEncoderNoCache))) {
         return false;
     }
 
@@ -172,6 +164,69 @@ bool SaveImage(ccl::render::D2DContext& context,
     }
 
     return SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+
+}  // namespace
+
+bool SaveImage(ccl::render::D2DContext& context,
+               const ccl::capture::DibBuffer& image, const std::wstring& path,
+               ccl::app::ImageFormat format, int jpegQuality) noexcept {
+    if (!image.IsValid() || path.empty()) {
+        return false;
+    }
+
+    IWICImagingFactory* factory = context.Imaging();
+    if (factory == nullptr) {
+        return false;
+    }
+
+    ComPtr<IWICStream> stream;
+    if (FAILED(factory->CreateStream(&stream)) ||
+        FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE))) {
+        return false;
+    }
+    return EncodeTo(factory, stream.Get(), image, format, jpegQuality);
+}
+
+NewFileResult SaveImageAsNewFile(ccl::render::D2DContext& context,
+                                 const ccl::capture::DibBuffer& image,
+                                 const std::wstring& path,
+                                 ccl::app::ImageFormat format,
+                                 int jpegQuality) noexcept {
+    if (!image.IsValid() || path.empty()) {
+        return NewFileResult::Failed;
+    }
+
+    IWICImagingFactory* factory = context.Imaging();
+    if (factory == nullptr) {
+        return NewFileResult::Failed;
+    }
+
+    // STGM_FAILIFTHERE together with a request to create is CREATE_NEW: either
+    // this call brings the file into being, or it fails because someone else
+    // already has. Nothing in between, which is the point.
+    ComPtr<IStream> stream;
+    const HRESULT opened = ::SHCreateStreamOnFileEx(
+        path.c_str(), STGM_WRITE | STGM_SHARE_EXCLUSIVE | STGM_FAILIFTHERE,
+        FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &stream);
+    if (opened == HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) ||
+        opened == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
+        return NewFileResult::AlreadyExists;
+    }
+    if (FAILED(opened)) {
+        return NewFileResult::Failed;
+    }
+
+    if (EncodeTo(factory, stream.Get(), image, format, jpegQuality)) {
+        return NewFileResult::Written;
+    }
+
+    // Nothing was at this path before, since the open above would have failed;
+    // so removing the remains of a write that went wrong cannot take anything
+    // that was already there.
+    stream.Reset();
+    ::DeleteFileW(path.c_str());
+    return NewFileResult::Failed;
 }
 
 }  // namespace ccl::io

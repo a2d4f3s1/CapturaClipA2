@@ -110,6 +110,7 @@ target_link_libraries(CapturaClipA2 PRIVATE
     ole32
     oleaut32
     shell32
+    shlwapi
     comdlg32
     comctl32
     user32
