@@ -59,6 +59,27 @@ enum class RowKind {
     Key,
     Drag,
     Wheel,
+    // A key whose meaning depends on what is happening at the time, so it
+    // belongs to no one command and cannot be moved. Listed all the same:
+    // otherwise the only way to find out these keys exist is to read the
+    // documentation, and a list of what the keys do that leaves some of them
+    // out is a list you cannot trust.
+    Fixed,
+};
+
+// The keys that are always what they are.
+struct FixedKey {
+    const wchar_t* label;
+    const wchar_t* keys;
+};
+
+// Indexed by the `command` field of a Fixed row.
+constexpr FixedKey kFixedKeys[] = {
+    {L"太さ・効果の強さを変える", L"[ ]"},
+    {L"クイックカラー", L"Shift + 1〜8"},
+    {L"倍率を 100〜500% にする", L"1〜5"},
+    {L"スクロール", L"矢印キー"},
+    {L"押している間だけスクロール", L"Space + 左ドラッグ"},
 };
 
 struct AssignRow {
@@ -87,6 +108,8 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::ColorPicker), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Highlighter), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Antialias), kGroupDraw},
+    {RowKind::Fixed, 0, kGroupDraw},
+    {RowKind::Fixed, 1, kGroupDraw},
 
     {RowKind::Key, static_cast<int>(ccl::app::Command::FillSelection),
      kGroupSelection},
@@ -105,6 +128,9 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Opacity),
      kGroupView},
     {RowKind::Key, static_cast<int>(ccl::app::Command::FitToImage), kGroupView},
+    {RowKind::Fixed, 2, kGroupView},
+    {RowKind::Fixed, 3, kGroupView},
+    {RowKind::Fixed, 4, kGroupView},
 
     {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::MoveWindow),
      kGroupWindow},
@@ -132,7 +158,11 @@ constexpr bool EveryCommandListed() noexcept {
     for (int i = 0; i < static_cast<int>(ccl::app::MouseCommand::Count); ++i) {
         int seen = 0;
         for (const AssignRow& row : kAssignRows) {
-            if (row.kind != RowKind::Key && row.command == i) {
+            // Named rather than "everything that is not a key": the fixed rows
+            // number themselves from zero as well, and counting those here
+            // would make a mouse command look listed twice.
+            if ((row.kind == RowKind::Drag || row.kind == RowKind::Wheel) &&
+                row.command == i) {
                 ++seen;
             }
         }
@@ -823,16 +853,17 @@ void BuildAssignments(Dialog& dialog) noexcept {
             L"割り当てにない修飾キーを押している間は、何も起きません。",
             false);
     AddNote(dialog,
-            L"サイズ変更の [ ]、ズームの 1〜5、色の Shift+1〜8、"
-            L"スクロールのスペースと矢印は、\n"
-            L"押している間や描いている最中で意味が変わるため、"
-            L"割り当ては変えられません。",
+            L"灰色の行は、押している間や描いている最中で意味が変わるキーです。\n"
+            L"何に使われているかを見るために載せてあり、割り当ては変えられません。",
             false);
     EndPage(dialog);
 }
 
 // What a row currently reads as in the second column.
 std::wstring RowAssignment(const Dialog& dialog, const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Fixed) {
+        return kFixedKeys[row.command].keys;
+    }
     if (row.kind == RowKind::Key) {
         return ccl::app::BindingText(dialog.working.shortcuts.For(
             static_cast<ccl::app::Command>(row.command)));
@@ -842,6 +873,9 @@ std::wstring RowAssignment(const Dialog& dialog, const AssignRow& row) noexcept 
 }
 
 const wchar_t* RowLabel(const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Fixed) {
+        return kFixedKeys[row.command].label;
+    }
     if (row.kind == RowKind::Key) {
         return ccl::app::CommandLabel(
             static_cast<ccl::app::Command>(row.command));
@@ -851,6 +885,11 @@ const wchar_t* RowLabel(const AssignRow& row) noexcept {
 }
 
 bool RowConflicts(const Dialog& dialog, const AssignRow& row) noexcept {
+    // A key that cannot be moved cannot clash with one that can: it is never
+    // handed out, so nothing else can be given it.
+    if (row.kind == RowKind::Fixed) {
+        return false;
+    }
     if (row.kind == RowKind::Key) {
         return dialog.working.shortcuts.Conflicts(
             static_cast<ccl::app::Command>(row.command));
@@ -965,6 +1004,12 @@ void ChangeAssignment(Dialog& dialog, bool clear) noexcept {
         return;
     }
     const AssignRow& row = kAssignRows[selected];
+
+    // These are listed so they can be looked up, not chosen. The buttons are
+    // greyed for them as well; this is the second line of that.
+    if (row.kind == RowKind::Fixed) {
+        return;
+    }
 
     if (clear) {
         switch (row.kind) {
@@ -1281,12 +1326,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                     const auto row = static_cast<int>(draw->nmcd.dwItemSpec);
-                    if (row >= 0 && row < kAssignRowCount &&
-                        dialog->conflicting[row]) {
-                        draw->clrTextBk = kConflictColor;
+                    if (row >= 0 && row < kAssignRowCount) {
+                        if (dialog->conflicting[row]) {
+                            draw->clrTextBk = kConflictColor;
+                        }
+                        // Greyed, as a control that cannot be used is: these
+                        // rows are here to be read, not chosen.
+                        if (kAssignRows[row].kind == RowKind::Fixed) {
+                            draw->clrText = ::GetSysColor(COLOR_GRAYTEXT);
+                        }
                     }
                 }
                 return CDRF_DODEFAULT;
+            }
+
+            // The buttons follow what is picked, so a row that cannot be
+            // changed says so before it is tried rather than after.
+            if (header->idFrom == kIdAssignList &&
+                header->code == LVN_ITEMCHANGED) {
+                const int selected = ListView_GetNextItem(
+                    dialog->Field(kIdAssignList), -1, LVNI_SELECTED);
+                const bool changeable =
+                    selected >= 0 && selected < kAssignRowCount &&
+                    kAssignRows[selected].kind != RowKind::Fixed;
+                ::EnableWindow(dialog->Field(kIdAssignChange), changeable);
+                ::EnableWindow(dialog->Field(kIdAssignClear), changeable);
+                return 0;
             }
 
             // Double-clicking a row is the same as pressing the button, which
