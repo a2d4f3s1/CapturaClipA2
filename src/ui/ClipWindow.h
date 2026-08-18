@@ -224,6 +224,17 @@ private:
     // nothing unless a line is being drawn and has somewhere to point: the
     // first point of a stroke has nothing behind it to give it a direction.
     void InsertArrowhead() noexcept;
+    // Turns the head just placed, in steps of the angle set for it. Points at
+    // the line being drawn, or at the one just finished.
+    void TurnArrowhead(int steps) noexcept;
+    // True while there is a head for the arrow keys to turn.
+    bool HasAdjustableArrow() const noexcept;
+    // Forgets the line just drawn, which is what makes R and the arrow keys
+    // stop pointing at it. Called wherever something else has been done.
+    void ForgetRecentStroke() noexcept;
+    // The stroke R and the arrow keys act on, or null when there is none. The
+    // line being drawn takes precedence over the one just finished.
+    ccl::doc::Stroke* RecentStroke() noexcept;
     void EraseAt(POINT client) noexcept;
 
     // Pen input arrives as pointer messages, which carry pressure. Returns
@@ -368,6 +379,11 @@ private:
     // Tool to restore after drawing with the eraser end of a pen.
     ccl::tool::Tool toolBeforePenEraser_ = ccl::tool::Tool::Pen;
     bool penEraserActive_ = false;
+
+    // The line just finished, which R can still put a head on and the arrow
+    // keys can still turn one on -- until anything but moving the mouse is
+    // done. The same idea as the effect the size keys stay pointed at.
+    size_t recentStrokeIndex_ = static_cast<size_t>(-1);
 
     bool erasing_ = false;
     bool erasedAny_ = false;

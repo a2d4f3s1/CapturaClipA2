@@ -88,6 +88,9 @@ public:
     float arrowScale = 3.0f;
     float arrowAspect = 1.2f;
     float arrowRounding = 0.15f;
+    // How far one press of Ctrl with an up or down arrow turns the head just
+    // placed.
+    float arrowTurnDegrees = 5.0f;
 
     // Colours
     ccl::doc::QuickColors quickColors = ccl::doc::kDefaultQuickColors;

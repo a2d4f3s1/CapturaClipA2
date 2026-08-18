@@ -200,6 +200,8 @@ void Settings::Load() noexcept {
     arrowAspect = ReadFloat(L"Drawing", L"ArrowAspect", arrowAspect, path_);
     arrowRounding =
         ReadFloat(L"Drawing", L"ArrowRounding", arrowRounding, path_);
+    arrowTurnDegrees =
+        ReadFloat(L"Drawing", L"ArrowTurnDegrees", arrowTurnDegrees, path_);
 
     for (size_t i = 0; i < quickColors.size(); ++i) {
         wchar_t key[16];
@@ -277,6 +279,10 @@ void Settings::Clamp() noexcept {
     // Past half the width the corners meet and there is nothing left to round.
     if (arrowRounding < 0.0f) arrowRounding = 0.0f;
     if (arrowRounding > 0.5f) arrowRounding = 0.5f;
+    // Below half a degree a press does nothing anyone can see; past a quarter
+    // turn it stops being a nudge.
+    if (arrowTurnDegrees < 0.5f) arrowTurnDegrees = 0.5f;
+    if (arrowTurnDegrees > 90.0f) arrowTurnDegrees = 90.0f;
 
     // Same bounds the brush enforces at runtime.
     const auto clampWidth = [](float& width) {
@@ -359,6 +365,9 @@ void Settings::Save() const noexcept {
                L"ArrowScale=%g\n"
                L"ArrowAspect=%g\n"
                L"ArrowRounding=%g\n"
+               L"; How far one press of Ctrl with an up or down arrow turns the\n"
+               L"; head just placed, in degrees.\n"
+               L"ArrowTurnDegrees=%g\n"
                L"\n"
                L"[Colors]\n"
                L"; The eight colours on Shift+1..8, which are also the fixed\n"
@@ -453,7 +462,7 @@ void Settings::Save() const noexcept {
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
                ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
-               arrowScale, arrowAspect, arrowRounding,
+               arrowScale, arrowAspect, arrowRounding, arrowTurnDegrees,
                ColorText(quickColors[0]).c_str(),
                ColorText(quickColors[1]).c_str(),
                ColorText(quickColors[2]).c_str(),

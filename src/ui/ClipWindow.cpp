@@ -2141,21 +2141,78 @@ void ClipWindow::ContinueStroke(POINT client, float pressure) noexcept {
     Draw();
 }
 
+ccl::doc::Stroke* ClipWindow::RecentStroke() noexcept {
+    if (drawing_) {
+        return &activeStroke_;
+    }
+    if (document_ == nullptr ||
+        recentStrokeIndex_ >= document_->Annotations().size()) {
+        return nullptr;
+    }
+    ccl::doc::Annotation& annotation =
+        document_->Annotations()[recentStrokeIndex_];
+    return annotation.kind == ccl::doc::AnnotationKind::Stroke
+               ? &annotation.stroke
+               : nullptr;
+}
+
+void ClipWindow::ForgetRecentStroke() noexcept {
+    recentStrokeIndex_ = static_cast<size_t>(-1);
+}
+
+bool ClipWindow::HasAdjustableArrow() const noexcept {
+    return const_cast<ClipWindow*>(this)->RecentStroke() != nullptr &&
+           !const_cast<ClipWindow*>(this)->RecentStroke()->arrows.empty();
+}
+
 void ClipWindow::InsertArrowhead() noexcept {
-    if (!drawing_ || activeStroke_.points.size() < 2) {
+    ccl::doc::Stroke* stroke = RecentStroke();
+    // Nothing to point along: the first point of a line has nothing behind it.
+    if (stroke == nullptr || stroke->points.size() < 2) {
         return;
     }
 
-    const auto at =
-        static_cast<unsigned int>(activeStroke_.points.size() - 1);
+    const auto at = static_cast<unsigned int>(stroke->points.size() - 1);
 
     // Pressing again without having moved would stack a second head on the
     // first, which only makes the edges harsher.
-    if (!activeStroke_.arrowAt.empty() && activeStroke_.arrowAt.back() == at) {
+    if (!stroke->arrows.empty() && stroke->arrows.back().at == at) {
         return;
     }
 
-    activeStroke_.arrowAt.push_back(at);
+    // A line already finished is being edited, so it is a step of its own.
+    // One still being drawn is not: it goes into the history whole when the
+    // button comes up.
+    if (!drawing_ && document_ != nullptr) {
+        history_.Record(document_->Annotations(), ToolForHistory());
+        // Recorded before the change, so the pointer has to be taken again.
+        stroke = RecentStroke();
+        if (stroke == nullptr) {
+            return;
+        }
+    }
+
+    ccl::doc::StrokeArrow arrow;
+    arrow.at = at;
+    stroke->arrows.push_back(arrow);
+
+    // The size keys were pointed at an effect; they are not now.
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::TurnArrowhead(int steps) noexcept {
+    ccl::doc::Stroke* stroke = RecentStroke();
+    if (stroke == nullptr || stroke->arrows.empty() || settings_ == nullptr) {
+        return;
+    }
+
+    // Not a step of its own, as adjusting an effect just placed is not: undo
+    // takes back the head, or the line, rather than the nudges to it.
+    stroke->arrows.back().turn +=
+        static_cast<float>(steps) * settings_->arrowTurnDegrees;
+    UpdateTitle();
     Draw();
 }
 
@@ -2175,6 +2232,11 @@ void ClipWindow::EndStroke() noexcept {
         annotation.kind = ccl::doc::AnnotationKind::Stroke;
         annotation.stroke = std::move(activeStroke_);
         document_->Annotations().push_back(std::move(annotation));
+
+        // Kept in reach: a line is often finished before it is clear that it
+        // wanted an arrow on the end, and having to draw it again for that
+        // would be a poor answer.
+        recentStrokeIndex_ = document_->Annotations().size() - 1;
     }
 
     activeStroke_ = ccl::doc::Stroke{};
@@ -2334,6 +2396,10 @@ bool ClipWindow::HandlePointerMessage(UINT msg, WPARAM wParam) noexcept {
 }
 
 void ClipWindow::OnLeftDown(POINT client) noexcept {
+    // Pressing a button is doing something else, whatever it turns out to be.
+    // Only moving the mouse leaves the line just drawn still in reach.
+    ForgetRecentStroke();
+
     // Alt reaches for the eyedropper without leaving the current tool, matching
     // the shortcut image editors use. It is the same eyedropper the key opens
     // -- magnifier, the whole screen to sample from, all of it -- and letting
@@ -2777,7 +2843,15 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
     const ccl::app::Binding pressed{static_cast<UINT>(key), IsKeyDown(VK_CONTROL),
                                     IsKeyDown(VK_SHIFT), IsKeyDown(VK_MENU)};
 
-    switch (settings_->shortcuts.Lookup(pressed)) {
+    const ccl::app::Command command = settings_->shortcuts.Lookup(pressed);
+
+    // Every command except putting a head on it counts as having done
+    // something else, which takes R and the arrow keys off the line just drawn.
+    if (command != ccl::app::Command::InsertArrowhead) {
+        ForgetRecentStroke();
+    }
+
+    switch (command) {
         case ccl::app::Command::Undo: Undo(); return true;
         case ccl::app::Command::Redo: Redo(); return true;
         case ccl::app::Command::Save: SaveAs(); return true;
@@ -2856,9 +2930,31 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
 }
 
 void ClipWindow::OnKeyDown(WPARAM key) noexcept {
+    // A modifier on its own is not doing something else -- it is the first
+    // half of doing something. Left to fall through, reaching for Ctrl would
+    // take the arrow keys off the line just drawn before the arrow arrived.
+    if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU) {
+        return;
+    }
+
+    // Turning the head just placed. Taken before anything else so that Ctrl
+    // with an up or down arrow means this while there is a head to turn, and
+    // goes back to scrolling the rest of the time.
+    if (IsKeyDown(VK_CONTROL) && (key == VK_UP || key == VK_DOWN) &&
+        HasAdjustableArrow()) {
+        // Up turns it the way up looks: anticlockwise, since the picture's
+        // vertical runs downwards.
+        TurnArrowhead(key == VK_DOWN ? 1 : -1);
+        return;
+    }
+
     if (RunShortcut(key)) {
         return;
     }
+
+    // Anything else that is a key is something else being done, which is what
+    // takes R and the arrow keys off the line just drawn.
+    ForgetRecentStroke();
 
     // Shift+digit picks a quick colour; the digits alone are zoom presets.
     if (IsKeyDown(VK_SHIFT) && key >= '1' && key <= '8') {
@@ -3124,6 +3220,16 @@ void ClipWindow::UpdateTitle() noexcept {
                 ::swprintf_s(title, L"%s  %d%%  Line %.0f → %.0fpx", name.c_str(),
                              zoom, activeStroke_.points[last - 1].width,
                              activeStroke_.points[last].width);
+                break;
+            }
+            // While a head can still be turned, that is what the arrow keys
+            // are for, so it is what gets reported.
+            if (HasAdjustableArrow()) {
+                ::swprintf_s(title,
+                             L"%s  %d%%  %s %.0fpx  (Ctrl+↑ ↓ で矢印の向き)",
+                             name.c_str(), zoom,
+                             tool_.highlighter ? L"Marker" : L"Pen",
+                             tool_.Width());
                 break;
             }
             ::swprintf_s(title, L"%s  %d%%  %s %.0fpx%s", name.c_str(), zoom,

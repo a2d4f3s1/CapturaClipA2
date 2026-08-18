@@ -204,6 +204,7 @@ enum ControlId : UINT {
     kIdArrowScale,
     kIdArrowAspect,
     kIdArrowRounding,
+    kIdArrowTurn,
 
     kIdFontFamily,
     kIdFontSize,
@@ -548,9 +549,12 @@ void BuildDrawing(Dialog& dialog) noexcept {
            kIdArrowAspect, kNarrowField);
     AddRow(dialog, L"矢印の角の丸み (幅の何倍)", L"EDIT",
            ES_AUTOHSCROLL | WS_BORDER, kIdArrowRounding, kNarrowField);
+    AddRow(dialog, L"矢印の向きの刻み (度)", L"EDIT", ES_AUTOHSCROLL | WS_BORDER,
+           kIdArrowTurn, kNarrowField);
     AddNote(dialog,
-            L"描いている最中に矢印の頭を付けるキーの形です。"
-            L"線の太さに比例します");
+            L"描いている最中に矢印の頭を付けるキーの形です。大きさは線の太さに"
+            L"比例します。\n"
+            L"刻みは、置いた直後に Ctrl + 上下キーで向きを変えるときの 1 回分です");
     EndPage(dialog);
 }
 
@@ -1090,6 +1094,7 @@ void Populate(Dialog& dialog) noexcept {
     SetNumber(dialog.Field(kIdArrowScale), values.arrowScale);
     SetNumber(dialog.Field(kIdArrowAspect), values.arrowAspect);
     SetNumber(dialog.Field(kIdArrowRounding), values.arrowRounding);
+    SetNumber(dialog.Field(kIdArrowTurn), values.arrowTurnDegrees);
 
     dialog.penColor = values.penColor;
     dialog.quickColors = values.quickColors;
@@ -1174,6 +1179,8 @@ void Collect(Dialog& dialog) noexcept {
         ReadFloat(dialog.Field(kIdArrowAspect), values.arrowAspect);
     values.arrowRounding =
         ReadFloat(dialog.Field(kIdArrowRounding), values.arrowRounding);
+    values.arrowTurnDegrees =
+        ReadFloat(dialog.Field(kIdArrowTurn), values.arrowTurnDegrees);
 
     values.quickColors = dialog.quickColors;
 

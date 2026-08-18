@@ -226,7 +226,7 @@ D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke,
     // it by the head's length, and out to either side by half its width. The
     // highlighter draws into a layer bounded by this, so a box that only
     // allowed for the line would cut the heads off.
-    if (!stroke.arrowAt.empty()) {
+    if (!stroke.arrows.empty()) {
         margin = (std::max)(margin, widest * arrowReach + 1.0f);
     }
 
@@ -461,7 +461,7 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> SizedArrowGeometry(
 }  // namespace
 
 void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
-    if (stroke.arrowAt.empty() || context_ == nullptr || !brush_ || !target_) {
+    if (stroke.arrows.empty() || context_ == nullptr || !brush_ || !target_) {
         return;
     }
     ID2D1Factory* factory = context_->Factory();
@@ -471,7 +471,8 @@ void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
 
     // The colour and the antialias mode are the line's; whoever called has
     // already set them, and a head is part of the same mark.
-    for (const unsigned int index : stroke.arrowAt) {
+    for (const ccl::doc::StrokeArrow& arrow : stroke.arrows) {
+        const unsigned int index = arrow.at;
         if (index == 0 || index >= stroke.points.size()) {
             continue;
         }
@@ -499,8 +500,10 @@ void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
         D2D1_MATRIX_3X2_F view{};
         target_->GetTransform(&view);
 
+        // The way the line was going, plus however far the head has been
+        // nudged from it.
         const float degrees =
-            std::atan2(dy, dx) * 180.0f / std::numbers::pi_v<float>;
+            std::atan2(dy, dx) * 180.0f / std::numbers::pi_v<float> + arrow.turn;
         target_->SetTransform(
             D2D1::Matrix3x2F::Rotation(degrees, D2D1::Point2F(0.0f, 0.0f)) *
             D2D1::Matrix3x2F::Translation(at.x, at.y) * view);

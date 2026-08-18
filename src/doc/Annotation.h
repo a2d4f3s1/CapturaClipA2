@@ -46,6 +46,21 @@ struct StrokePoint {
 // strokes go down at a fixed transparency rather than a chosen one.
 inline constexpr float kHighlighterOpacity = 0.4f;
 
+// An arrowhead sitting on one of a line's points.
+struct StrokeArrow {
+    // Which point it sits on. A position in the list rather than a coordinate:
+    // while a straight line is being aimed its last point is rebuilt on every
+    // mouse message, and a head kept by position follows the end where one
+    // kept by coordinate would be left behind in mid air.
+    unsigned int at = 0;
+    // How far it is turned from the way the line was going, in degrees.
+    //
+    // Held as a difference rather than as an angle of its own, for the same
+    // reason: swing the end of a line being aimed and the head swings with it,
+    // keeping whatever it was nudged by.
+    float turn = 0.0f;
+};
+
 // A single drawn line, in image coordinates at 100% zoom.
 struct Stroke {
     std::vector<StrokePoint> points;
@@ -56,14 +71,8 @@ struct Stroke {
     // not look like a highlighter.
     bool highlighter = false;
 
-    // Which of the points carry an arrowhead, pointing the way the line was
-    // going when it got there.
-    //
-    // Held as positions in the list rather than as coordinates. While a
-    // straight line is being aimed its last point is rebuilt on every mouse
-    // message, and a head at that position follows the end, where a copied
-    // coordinate would be left behind in mid air.
-    std::vector<unsigned int> arrowAt;
+    // The arrowheads placed along it.
+    std::vector<StrokeArrow> arrows;
 
     // True when the width changes along the stroke, which means it has to be
     // drawn segment by segment rather than as a single path.
