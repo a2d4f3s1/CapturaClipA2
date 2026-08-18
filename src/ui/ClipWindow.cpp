@@ -4144,6 +4144,14 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
         return;
     }
 
+    // Text still being typed belongs to the picture on its way out: committing
+    // it here puts it into whatever is written out and takes the editor off a
+    // picture it was never about. Not left to the automatic save, which has
+    // several reasons to do nothing at all.
+    if (EditingText()) {
+        CommitText();
+    }
+
     // The capture on screen is written out first if auto-saving is on, since
     // replacing it discards it. If that write fails the replacement is called
     // off: the picture on screen is still the only copy there is.
