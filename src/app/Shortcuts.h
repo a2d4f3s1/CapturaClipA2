@@ -43,6 +43,9 @@ enum class Command {
     OutlineSelectionMarker,
     Mosaic,
     Blur,
+    // Puts an arrowhead on the line being drawn, at the point it has reached.
+    // Quiet unless a line is actually being drawn.
+    InsertArrowhead,
     Count,
 };
 

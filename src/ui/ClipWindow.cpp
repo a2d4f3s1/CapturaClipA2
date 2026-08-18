@@ -2141,6 +2141,24 @@ void ClipWindow::ContinueStroke(POINT client, float pressure) noexcept {
     Draw();
 }
 
+void ClipWindow::InsertArrowhead() noexcept {
+    if (!drawing_ || activeStroke_.points.size() < 2) {
+        return;
+    }
+
+    const auto at =
+        static_cast<unsigned int>(activeStroke_.points.size() - 1);
+
+    // Pressing again without having moved would stack a second head on the
+    // first, which only makes the edges harsher.
+    if (!activeStroke_.arrowAt.empty() && activeStroke_.arrowAt.back() == at) {
+        return;
+    }
+
+    activeStroke_.arrowAt.push_back(at);
+    Draw();
+}
+
 void ClipWindow::EndStroke() noexcept {
     if (!drawing_) {
         return;
@@ -2805,6 +2823,9 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
             return true;
         case ccl::app::Command::Blur:
             OnCommand(kMenuBlur);
+            return true;
+        case ccl::app::Command::InsertArrowhead:
+            InsertArrowhead();
             return true;
         case ccl::app::Command::Eyedropper:
             OnCommand(kMenuEyedropper);

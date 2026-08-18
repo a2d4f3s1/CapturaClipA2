@@ -108,6 +108,8 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::ColorPicker), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Highlighter), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Antialias), kGroupDraw},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::InsertArrowhead),
+     kGroupDraw},
     {RowKind::Fixed, 0, kGroupDraw},
     {RowKind::Fixed, 1, kGroupDraw},
 

@@ -164,6 +164,10 @@ private:
     // the last of them would only ever run for that one case.
     void DrawStrokeLine(const ccl::doc::Stroke& stroke,
                         unsigned int id) noexcept;
+    // The arrowheads placed along it, drawn after the line so they sit on top
+    // of it, and inside the highlighter's layer so a head that overlaps the
+    // line does not come out twice as dark.
+    void DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept;
     void DrawVariableStroke(const ccl::doc::Stroke& stroke) noexcept;
     // The path a stroke traces, built once and kept. Null for a stroke whose
     // width varies, which Direct2D cannot express as a single path.

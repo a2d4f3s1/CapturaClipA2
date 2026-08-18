@@ -56,6 +56,15 @@ struct Stroke {
     // not look like a highlighter.
     bool highlighter = false;
 
+    // Which of the points carry an arrowhead, pointing the way the line was
+    // going when it got there.
+    //
+    // Held as positions in the list rather than as coordinates. While a
+    // straight line is being aimed its last point is rebuilt on every mouse
+    // message, and a head at that position follows the end, where a copied
+    // coordinate would be left behind in mid air.
+    std::vector<unsigned int> arrowAt;
+
     // True when the width changes along the stroke, which means it has to be
     // drawn segment by segment rather than as a single path.
     bool HasVariableWidth() const noexcept {

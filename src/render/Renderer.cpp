@@ -20,6 +20,11 @@ D2D1_COLOR_F ToD2D(const ccl::doc::Color& color) noexcept {
     return D2D1::ColorF(color.r, color.g, color.b, color.a);
 }
 
+// How much wider than the line an arrowhead is, and how long it is for its
+// width. Fixed for now; these become settings.
+constexpr float kArrowScale = 3.0f;
+constexpr float kArrowAspect = 1.2f;
+
 }  // namespace
 
 void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
@@ -216,7 +221,17 @@ D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke) noexcept {
         widest = (std::max)(widest, point.width);
     }
 
-    const float margin = widest * 0.5f + 1.0f;
+    float margin = widest * 0.5f + 1.0f;
+
+    // An arrowhead reaches further from its point than the line does: ahead of
+    // it by the head's length, and out to either side by half its width. The
+    // highlighter draws into a layer bounded by this, so a box that only
+    // allowed for the line would cut the heads off.
+    if (!stroke.arrowAt.empty()) {
+        const float reach = widest * kArrowScale * (std::max)(1.0f, kArrowAspect);
+        margin = (std::max)(margin, reach + 1.0f);
+    }
+
     return D2D1::RectF(left - margin, top - margin, right + margin,
                        bottom + margin);
 }
@@ -307,6 +322,84 @@ void Renderer::DrawStrokeShape(const ccl::doc::Stroke& stroke,
     // the line has three ways of being drawn, each leaving early, and anything
     // added after the last of them would never be reached by the other two.
     DrawStrokeLine(stroke, id);
+    DrawStrokeArrows(stroke);
+}
+
+namespace {
+
+// The head at the origin, pointing along +x: the base sits on the point it
+// was placed at and the tip reaches ahead of it, the way the line was going.
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> ArrowGeometry(ID2D1Factory* factory,
+                                                        float width,
+                                                        float length) noexcept {
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+    if (factory == nullptr || FAILED(factory->CreatePathGeometry(&path))) {
+        return nullptr;
+    }
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(path->Open(&sink))) {
+        return nullptr;
+    }
+
+    const float half = width * 0.5f;
+    sink->BeginFigure(D2D1::Point2F(length, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(0.0f, -half));
+    sink->AddLine(D2D1::Point2F(0.0f, half));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) {
+        return nullptr;
+    }
+    return path;
+}
+
+}  // namespace
+
+void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
+    if (stroke.arrowAt.empty() || context_ == nullptr || !brush_ || !target_) {
+        return;
+    }
+    ID2D1Factory* factory = context_->Factory();
+    if (factory == nullptr) {
+        return;
+    }
+
+    // The colour and the antialias mode are the line's; whoever called has
+    // already set them, and a head is part of the same mark.
+    for (const unsigned int index : stroke.arrowAt) {
+        if (index == 0 || index >= stroke.points.size()) {
+            continue;
+        }
+        const ccl::doc::StrokePoint& at = stroke.points[index];
+        const ccl::doc::StrokePoint& behind = stroke.points[index - 1];
+
+        const float dx = at.x - behind.x;
+        const float dy = at.y - behind.y;
+        const float travelled = std::sqrt(dx * dx + dy * dy);
+        if (travelled < 0.001f) {
+            continue;
+        }
+
+        const float width = at.width * kArrowScale;
+        const Microsoft::WRL::ComPtr<ID2D1PathGeometry> head =
+            ArrowGeometry(factory, width, width * kArrowAspect);
+        if (!head) {
+            continue;
+        }
+
+        // Composed with whatever is already in place rather than replacing it:
+        // the zoom and the scroll live in that transform, and a head drawn
+        // outside them would sit at the wrong size in the wrong place.
+        D2D1_MATRIX_3X2_F view{};
+        target_->GetTransform(&view);
+
+        const float degrees =
+            std::atan2(dy, dx) * 180.0f / std::numbers::pi_v<float>;
+        target_->SetTransform(
+            D2D1::Matrix3x2F::Rotation(degrees, D2D1::Point2F(0.0f, 0.0f)) *
+            D2D1::Matrix3x2F::Translation(at.x, at.y) * view);
+        target_->FillGeometry(head.Get(), brush_.Get());
+        target_->SetTransform(view);
+    }
 }
 
 void Renderer::DrawStrokeLine(const ccl::doc::Stroke& stroke,

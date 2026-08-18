@@ -220,6 +220,10 @@ private:
     void BeginStroke(POINT client, float pressure) noexcept;
     void ContinueStroke(POINT client, float pressure) noexcept;
     void EndStroke() noexcept;
+    // Puts an arrowhead on the line being drawn, where it has got to. Does
+    // nothing unless a line is being drawn and has somewhere to point: the
+    // first point of a stroke has nothing behind it to give it a direction.
+    void InsertArrowhead() noexcept;
     void EraseAt(POINT client) noexcept;
 
     // Pen input arrives as pointer messages, which carry pressure. Returns
