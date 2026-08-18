@@ -120,6 +120,14 @@ public:
 
     // Smooth interpolation looks better for photographs and text, nearest
     // neighbour is what you want when inspecting individual pixels.
+    // The shape of the arrowhead a line can be given, all measured against the
+    // head's own width so that the brush size carries them along.
+    void SetArrowShape(float scale, float aspect, float rounding) noexcept {
+        arrowScale_ = scale;
+        arrowAspect_ = aspect;
+        arrowRounding_ = rounding;
+    }
+
     void SetSmoothScaling(bool smooth) noexcept { smoothScaling_ = smooth; }
     bool SmoothScaling() const noexcept { return smoothScaling_; }
 
@@ -250,6 +258,11 @@ private:
     ccl::doc::Color previewFill_{};
 
     int border_ = kWindowBorder;
+    // Seeded from the settings file; the defaults here only stand until it is
+    // read.
+    float arrowScale_ = 3.0f;
+    float arrowAspect_ = 1.2f;
+    float arrowRounding_ = 0.15f;
     bool smoothScaling_ = true;
     bool measuredFirstDraw_ = false;
 

@@ -4268,6 +4268,8 @@ void ClipWindow::OpenSettings() noexcept {
     // settings, and the text defaults, which only apply to text placed from
     // here on -- takes effect the next time it is used.
     renderer_.SetSmoothScaling(settings_->smoothScaling);
+    renderer_.SetArrowShape(settings_->arrowScale, settings_->arrowAspect,
+                            settings_->arrowRounding);
     view_.SetZoomStepPercent(settings_->zoomStepPercent);
     tool_.usePressure = settings_->usePenPressure;
     tool_.quickColors = settings_->quickColors;
@@ -4492,6 +4494,8 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     sourceTitle_ = sourceTitle;
     view_.SetZoomStepPercent(settings.zoomStepPercent);
     renderer_.SetSmoothScaling(settings.smoothScaling);
+    renderer_.SetArrowShape(settings.arrowScale, settings.arrowAspect,
+                            settings.arrowRounding);
     renderer_.SetBorderWidth(BorderWidth());
     tool_.usePressure = settings.usePenPressure;
     tool_.textShadow = settings.textShadow;

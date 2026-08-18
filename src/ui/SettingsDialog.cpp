@@ -201,6 +201,9 @@ enum ControlId : UINT {
     kIdUsePressure,
     kIdPressureMin,
     kIdLineSnap,
+    kIdArrowScale,
+    kIdArrowAspect,
+    kIdArrowRounding,
 
     kIdFontFamily,
     kIdFontSize,
@@ -539,6 +542,15 @@ void BuildDrawing(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"直線を引いている間に Alt を押すと、この角度ずつに揃います。"
             L"0 にすると揃えません");
+    AddRow(dialog, L"矢印の大きさ (線の太さの何倍)", L"EDIT",
+           ES_AUTOHSCROLL | WS_BORDER, kIdArrowScale, kNarrowField);
+    AddRow(dialog, L"矢印の長さ (幅の何倍)", L"EDIT", ES_AUTOHSCROLL | WS_BORDER,
+           kIdArrowAspect, kNarrowField);
+    AddRow(dialog, L"矢印の角の丸み (幅の何倍)", L"EDIT",
+           ES_AUTOHSCROLL | WS_BORDER, kIdArrowRounding, kNarrowField);
+    AddNote(dialog,
+            L"描いている最中に矢印の頭を付けるキーの形です。"
+            L"線の太さに比例します");
     EndPage(dialog);
 }
 
@@ -1075,6 +1087,9 @@ void Populate(Dialog& dialog) noexcept {
     SetNumber(dialog.Field(kIdPressureMin),
               static_cast<int>(values.pressureMinScale * 100.0f + 0.5f));
     SetNumber(dialog.Field(kIdLineSnap), values.lineSnapDegrees);
+    SetNumber(dialog.Field(kIdArrowScale), values.arrowScale);
+    SetNumber(dialog.Field(kIdArrowAspect), values.arrowAspect);
+    SetNumber(dialog.Field(kIdArrowRounding), values.arrowRounding);
 
     dialog.penColor = values.penColor;
     dialog.quickColors = values.quickColors;
@@ -1153,6 +1168,12 @@ void Collect(Dialog& dialog) noexcept {
         100.0f;
     values.lineSnapDegrees =
         ReadFloat(dialog.Field(kIdLineSnap), values.lineSnapDegrees);
+    values.arrowScale =
+        ReadFloat(dialog.Field(kIdArrowScale), values.arrowScale);
+    values.arrowAspect =
+        ReadFloat(dialog.Field(kIdArrowAspect), values.arrowAspect);
+    values.arrowRounding =
+        ReadFloat(dialog.Field(kIdArrowRounding), values.arrowRounding);
 
     values.quickColors = dialog.quickColors;
 

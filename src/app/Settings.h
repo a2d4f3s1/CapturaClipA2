@@ -80,6 +80,14 @@ public:
     // a real value: it leaves the line free at any angle, which is what it does
     // without Alt anyway.
     float lineSnapDegrees = 15.0f;
+    // The arrowhead R puts on a line, measured against its own width so that
+    // changing the brush moves all three together.
+    //   scale     how much wider than the line the head is
+    //   aspect    how long the head is for its width
+    //   rounding  how far its corners are taken off
+    float arrowScale = 3.0f;
+    float arrowAspect = 1.2f;
+    float arrowRounding = 0.15f;
 
     // Colours
     ccl::doc::QuickColors quickColors = ccl::doc::kDefaultQuickColors;

@@ -20,14 +20,6 @@ D2D1_COLOR_F ToD2D(const ccl::doc::Color& color) noexcept {
     return D2D1::ColorF(color.r, color.g, color.b, color.a);
 }
 
-// How much wider than the line an arrowhead is, how long it is for its width,
-// and how far its corners are taken off. All three measured against the head's
-// own width, so changing the brush moves them together. Fixed for now; these
-// become settings.
-constexpr float kArrowScale = 3.0f;
-constexpr float kArrowAspect = 1.2f;
-constexpr float kArrowRounding = 0.15f;
-
 }  // namespace
 
 void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
@@ -209,7 +201,11 @@ namespace {
 
 // The area a stroke covers, in image coordinates, widened by the thickest it
 // gets so that nothing is clipped off the ends or the sides.
-D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke) noexcept {
+// `arrowReach` is how far an arrowhead extends from the point it sits on, as a
+// multiple of the width there. Passed in because it comes from the settings,
+// which this has no way of its own to reach.
+D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke,
+                         float arrowReach) noexcept {
     float left = stroke.points.front().x;
     float top = stroke.points.front().y;
     float right = left;
@@ -231,8 +227,7 @@ D2D1_RECT_F StrokeBounds(const ccl::doc::Stroke& stroke) noexcept {
     // highlighter draws into a layer bounded by this, so a box that only
     // allowed for the line would cut the heads off.
     if (!stroke.arrowAt.empty()) {
-        const float reach = widest * kArrowScale * (std::max)(1.0f, kArrowAspect);
-        margin = (std::max)(margin, reach + 1.0f);
+        margin = (std::max)(margin, widest * arrowReach + 1.0f);
     }
 
     return D2D1::RectF(left - margin, top - margin, right + margin,
@@ -268,7 +263,10 @@ void Renderer::DrawStroke(const ccl::doc::Stroke& stroke,
     }
 
     target_->PushLayer(
-        D2D1::LayerParameters(StrokeBounds(stroke), nullptr,
+        D2D1::LayerParameters(
+            StrokeBounds(stroke,
+                         arrowScale_ * (std::max)(1.0f, arrowAspect_)),
+            nullptr,
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                               D2D1::IdentityMatrix(),
                               ccl::doc::kHighlighterOpacity),
@@ -487,10 +485,10 @@ void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
             continue;
         }
 
-        const float width = at.width * kArrowScale;
+        const float width = at.width * arrowScale_;
         const Microsoft::WRL::ComPtr<ID2D1PathGeometry> head =
-            SizedArrowGeometry(factory, width, width * kArrowAspect,
-                               width * kArrowRounding);
+            SizedArrowGeometry(factory, width, width * arrowAspect_,
+                               width * arrowRounding_);
         if (!head) {
             continue;
         }

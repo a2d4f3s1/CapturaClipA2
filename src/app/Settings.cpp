@@ -196,6 +196,10 @@ void Settings::Load() noexcept {
     eraserWidth = ReadFloat(L"Drawing", L"EraserWidth", eraserWidth, path_);
     lineSnapDegrees =
         ReadFloat(L"Drawing", L"LineSnapDegrees", lineSnapDegrees, path_);
+    arrowScale = ReadFloat(L"Drawing", L"ArrowScale", arrowScale, path_);
+    arrowAspect = ReadFloat(L"Drawing", L"ArrowAspect", arrowAspect, path_);
+    arrowRounding =
+        ReadFloat(L"Drawing", L"ArrowRounding", arrowRounding, path_);
 
     for (size_t i = 0; i < quickColors.size(); ++i) {
         wchar_t key[16];
@@ -262,6 +266,17 @@ void Settings::Clamp() noexcept {
     // half a turn the steps stop being distinct from one another.
     if (lineSnapDegrees < 0.0f) lineSnapDegrees = 0.0f;
     if (lineSnapDegrees > 180.0f) lineSnapDegrees = 180.0f;
+
+    // A head narrower than its line would disappear into it; ten times over is
+    // already far larger than anything drawn with it.
+    if (arrowScale < 1.0f) arrowScale = 1.0f;
+    if (arrowScale > 10.0f) arrowScale = 10.0f;
+    // Shorter than half its width stops reading as a point at all.
+    if (arrowAspect < 0.5f) arrowAspect = 0.5f;
+    if (arrowAspect > 3.0f) arrowAspect = 3.0f;
+    // Past half the width the corners meet and there is nothing left to round.
+    if (arrowRounding < 0.0f) arrowRounding = 0.0f;
+    if (arrowRounding > 0.5f) arrowRounding = 0.5f;
 
     // Same bounds the brush enforces at runtime.
     const auto clampWidth = [](float& width) {
@@ -335,6 +350,15 @@ void Settings::Save() const noexcept {
                L"; Angle a straight line is pulled to while Alt is held, in\n"
                L"; degrees. 0 leaves it free at any angle.\n"
                L"LineSnapDegrees=%g\n"
+               L"; The arrowhead R puts on a line while it is being drawn.\n"
+               L"; All three are measured against the head's own width, so\n"
+               L"; changing the brush size moves them together.\n"
+               L";   ArrowScale     how much wider than the line it is (1-10)\n"
+               L";   ArrowAspect    how long it is for its width (0.5-3)\n"
+               L";   ArrowRounding  how far its corners come off (0-0.5)\n"
+               L"ArrowScale=%g\n"
+               L"ArrowAspect=%g\n"
+               L"ArrowRounding=%g\n"
                L"\n"
                L"[Colors]\n"
                L"; The eight colours on Shift+1..8, which are also the fixed\n"
@@ -429,6 +453,7 @@ void Settings::Save() const noexcept {
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
                ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
+               arrowScale, arrowAspect, arrowRounding,
                ColorText(quickColors[0]).c_str(),
                ColorText(quickColors[1]).c_str(),
                ColorText(quickColors[2]).c_str(),
