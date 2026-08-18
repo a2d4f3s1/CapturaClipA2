@@ -2784,6 +2784,28 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
         case ccl::app::Command::ToolLasso:
             SelectTool(ccl::tool::Tool::Lasso);
             return true;
+        // Routed through the menu commands so there is one path to each of
+        // these, whether it was reached by key or by menu. Each does nothing
+        // without an area selected, which is the whole of the condition: an
+        // area only exists while a tool that selects is in use.
+        case ccl::app::Command::FillSelection:
+            OnCommand(kMenuFill);
+            return true;
+        case ccl::app::Command::FillSelectionMarker:
+            OnCommand(kMenuFillMarker);
+            return true;
+        case ccl::app::Command::OutlineSelection:
+            OnCommand(kMenuOutline);
+            return true;
+        case ccl::app::Command::OutlineSelectionMarker:
+            OnCommand(kMenuOutlineMarker);
+            return true;
+        case ccl::app::Command::Mosaic:
+            OnCommand(kMenuMosaic);
+            return true;
+        case ccl::app::Command::Blur:
+            OnCommand(kMenuBlur);
+            return true;
         case ccl::app::Command::Eyedropper:
             OnCommand(kMenuEyedropper);
             return true;
@@ -3235,7 +3257,16 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     // A selection belongs to the tool that draws it. Left behind, it would sit
     // there through a session of drawing and then act on whatever the next
     // command was, long after there was any reason to expect it.
+    //
+    // Losing it is a step, though. Without one, coming back to the tool leaves
+    // nothing to act on and no way to get it back except by drawing it again --
+    // and the marks made with it cannot be redone over the same area at all.
+    // The switch itself is still not a step: only what it does to the area is.
     if (!IsSelectionTool(tool) && !eyedropperAside) {
+        if (!selection_.empty() && document_ != nullptr) {
+            history_.RecordSelection(document_->Annotations(), selection_,
+                                     ToolForHistory());
+        }
         ClearSelection();
     }
 
@@ -3597,15 +3628,25 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     // Putting colour down and hiding what is there are different intentions,
     // so they are kept in separate blocks. The order runs from adding, through
     // hiding, to reshaping, to having done with it.
-    ::AppendMenuW(selection, selectionState, kMenuFill, L"塗りつぶし");
+    ::AppendMenuW(
+        selection, selectionState, kMenuFill,
+        withKey(L"塗りつぶし", ccl::app::Command::FillSelection).c_str());
     ::AppendMenuW(selection, selectionState, kMenuFillMarker,
-                  L"マーカー塗りつぶし");
-    ::AppendMenuW(selection, selectionState, kMenuOutline, L"境界線を描く");
+                  withKey(L"マーカー塗りつぶし",
+                          ccl::app::Command::FillSelectionMarker)
+                      .c_str());
+    ::AppendMenuW(
+        selection, selectionState, kMenuOutline,
+        withKey(L"境界線を描く", ccl::app::Command::OutlineSelection).c_str());
     ::AppendMenuW(selection, selectionState, kMenuOutlineMarker,
-                  L"マーカーで境界線を描く");
+                  withKey(L"マーカーで境界線を描く",
+                          ccl::app::Command::OutlineSelectionMarker)
+                      .c_str());
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(selection, selectionState, kMenuMosaic, L"モザイク");
-    ::AppendMenuW(selection, selectionState, kMenuBlur, L"ぼかし");
+    ::AppendMenuW(selection, selectionState, kMenuMosaic,
+                  withKey(L"モザイク", ccl::app::Command::Mosaic).c_str());
+    ::AppendMenuW(selection, selectionState, kMenuBlur,
+                  withKey(L"ぼかし", ccl::app::Command::Blur).c_str());
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(selection, cropState, kMenuCrop, L"この範囲で切り抜く");
     ::AppendMenuW(selection, MF_SEPARATOR, 0, nullptr);

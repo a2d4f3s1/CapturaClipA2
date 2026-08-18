@@ -36,6 +36,16 @@ constexpr CommandInfo kCommands[] = {
     {L"Antialias", L"なめらかにする", {'A', false, false, false}},
     {L"FitToImage", L"画像サイズに合わせる", {'F', false, false, false}},
     {L"HideWindow", L"しばらく隠す", {'X', false, false, false}},
+    // Shift is the lighter of each pair, as it is on the pen: the same colour
+    // laid down as a wash rather than solid.
+    {L"FillSelection", L"塗りつぶし", {'G', false, false, false}},
+    {L"FillSelectionMarker", L"マーカー塗りつぶし", {'G', false, true, false}},
+    {L"OutlineSelection", L"境界線を描く", {'O', false, false, false}},
+    {L"OutlineSelectionMarker",
+     L"マーカーで境界線を描く",
+     {'O', false, true, false}},
+    {L"Mosaic", L"モザイク", {'M', false, false, false}},
+    {L"Blur", L"ぼかし", {'M', false, true, false}},
 };
 
 static_assert(ARRAYSIZE(kCommands) == static_cast<size_t>(Command::Count),

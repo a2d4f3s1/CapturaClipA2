@@ -34,6 +34,15 @@ enum class Command {
     Antialias,
     FitToImage,
     HideWindow,
+    // What can be done with a selected area. These do nothing without one, and
+    // an area only exists while one of the tools that select is in use, so they
+    // are quiet everywhere else without having to be told about tools.
+    FillSelection,
+    FillSelectionMarker,
+    OutlineSelection,
+    OutlineSelectionMarker,
+    Mosaic,
+    Blur,
     Count,
 };
 

@@ -41,13 +41,15 @@ enum Group : int {
     kGroupFile,
     kGroupTool,
     kGroupDraw,
+    kGroupSelection,
     kGroupView,
     kGroupWindow,
     kGroupCount,
 };
 
 const wchar_t* const kGroupNames[kGroupCount] = {
-    L"編集", L"ファイル", L"ツール", L"描く", L"表示", L"ウィンドウ",
+    L"編集",   L"ファイル", L"ツール",     L"描く",
+    L"選択範囲", L"表示",     L"ウィンドウ",
 };
 
 // What a row of the list is assigned from. The three are separate spaces: a
@@ -85,6 +87,18 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::ColorPicker), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Highlighter), kGroupDraw},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Antialias), kGroupDraw},
+
+    {RowKind::Key, static_cast<int>(ccl::app::Command::FillSelection),
+     kGroupSelection},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::FillSelectionMarker),
+     kGroupSelection},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::OutlineSelection),
+     kGroupSelection},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::OutlineSelectionMarker),
+     kGroupSelection},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Mosaic),
+     kGroupSelection},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::Blur), kGroupSelection},
 
     {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::Scroll), kGroupView},
     {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Zoom), kGroupView},
