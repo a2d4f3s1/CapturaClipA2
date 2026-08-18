@@ -20,10 +20,13 @@ D2D1_COLOR_F ToD2D(const ccl::doc::Color& color) noexcept {
     return D2D1::ColorF(color.r, color.g, color.b, color.a);
 }
 
-// How much wider than the line an arrowhead is, and how long it is for its
-// width. Fixed for now; these become settings.
+// How much wider than the line an arrowhead is, how long it is for its width,
+// and how far its corners are taken off. All three measured against the head's
+// own width, so changing the brush moves them together. Fixed for now; these
+// become settings.
 constexpr float kArrowScale = 3.0f;
 constexpr float kArrowAspect = 1.2f;
+constexpr float kArrowRounding = 0.15f;
 
 }  // namespace
 
@@ -329,9 +332,15 @@ namespace {
 
 // The head at the origin, pointing along +x: the base sits on the point it
 // was placed at and the tip reaches ahead of it, the way the line was going.
+//
+// `radius` takes the corners off with an arc tangent to both edges. Done that
+// way rather than by tracing the outline with a thick round-jointed pen: that
+// pushes every edge outward, not just the corners, and what comes out is a
+// fatter head rather than a blunter one.
 Microsoft::WRL::ComPtr<ID2D1PathGeometry> ArrowGeometry(ID2D1Factory* factory,
                                                         float width,
-                                                        float length) noexcept {
+                                                        float length,
+                                                        float radius) noexcept {
     Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
     if (factory == nullptr || FAILED(factory->CreatePathGeometry(&path))) {
         return nullptr;
@@ -342,14 +351,113 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> ArrowGeometry(ID2D1Factory* factory,
     }
 
     const float half = width * 0.5f;
-    sink->BeginFigure(D2D1::Point2F(length, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
-    sink->AddLine(D2D1::Point2F(0.0f, -half));
-    sink->AddLine(D2D1::Point2F(0.0f, half));
-    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-    if (FAILED(sink->Close())) {
-        return nullptr;
+    const D2D1_POINT_2F corners[3] = {D2D1::Point2F(length, 0.0f),
+                                      D2D1::Point2F(0.0f, half),
+                                      D2D1::Point2F(0.0f, -half)};
+
+    if (radius <= 0.0f) {
+        sink->BeginFigure(corners[0], D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(corners[2]);
+        sink->AddLine(corners[1]);
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        return SUCCEEDED(sink->Close()) ? path : nullptr;
     }
-    return path;
+
+    // Where each corner's arc meets the two edges running into it.
+    struct Cut {
+        D2D1_POINT_2F from;
+        D2D1_POINT_2F to;
+    };
+    Cut cuts[3];
+
+    for (int i = 0; i < 3; ++i) {
+        const D2D1_POINT_2F& here = corners[i];
+        const D2D1_POINT_2F& previous = corners[(i + 2) % 3];
+        const D2D1_POINT_2F& next = corners[(i + 1) % 3];
+
+        const auto toward = [&here](const D2D1_POINT_2F& target) {
+            const float dx = target.x - here.x;
+            const float dy = target.y - here.y;
+            const float span = std::sqrt(dx * dx + dy * dy);
+            return span > 0.0f ? D2D1::Point2F(dx / span, dy / span)
+                               : D2D1::Point2F(0.0f, 0.0f);
+        };
+        const auto spanTo = [&here](const D2D1_POINT_2F& target) {
+            const float dx = target.x - here.x;
+            const float dy = target.y - here.y;
+            return std::sqrt(dx * dx + dy * dy);
+        };
+
+        const D2D1_POINT_2F back = toward(previous);
+        const D2D1_POINT_2F ahead = toward(next);
+
+        const float cosine = std::clamp(back.x * ahead.x + back.y * ahead.y,
+                                        -1.0f, 1.0f);
+        const float tangent = std::tan(std::acos(cosine) * 0.5f);
+        float distance = tangent > 0.0001f ? radius / tangent : 0.0f;
+
+        // Never past the middle of either edge, so two corners cannot eat into
+        // one another and turn the head inside out.
+        distance = (std::min)(distance, spanTo(previous) * 0.5f);
+        distance = (std::min)(distance, spanTo(next) * 0.5f);
+
+        cuts[i].from = D2D1::Point2F(here.x + back.x * distance,
+                                     here.y + back.y * distance);
+        cuts[i].to = D2D1::Point2F(here.x + ahead.x * distance,
+                                   here.y + ahead.y * distance);
+    }
+
+    sink->BeginFigure(cuts[0].to, D2D1_FIGURE_BEGIN_FILLED);
+    for (int i = 1; i <= 3; ++i) {
+        const Cut& cut = cuts[i % 3];
+        sink->AddLine(cut.from);
+        sink->AddArc(D2D1::ArcSegment(cut.to, D2D1::SizeF(radius, radius), 0.0f,
+                                      D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                      D2D1_ARC_SIZE_SMALL));
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    return SUCCEEDED(sink->Close()) ? path : nullptr;
+}
+
+// The same head, grown until it measures `width` by `length` on the outside.
+//
+// Taking the corners off pulls them back, and the tip is sharp enough that it
+// moves a long way -- so the size asked for and the size drawn come apart, and
+// the two settings start interfering with one another. Measured rather than
+// worked out with trigonometry, because the angles change as the core grows.
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> SizedArrowGeometry(
+    ID2D1Factory* factory, float width, float length, float radius) noexcept {
+    if (radius <= 0.0f) {
+        return ArrowGeometry(factory, width, length, 0.0f);
+    }
+
+    float coreWidth = width;
+    float coreLength = length;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> head;
+
+    // Three passes settle it to within a fraction of a pixel.
+    for (int pass = 0; pass < 3; ++pass) {
+        head = ArrowGeometry(factory, coreWidth, coreLength, radius);
+        if (!head) {
+            return nullptr;
+        }
+        D2D1_RECT_F bounds{};
+        if (FAILED(head->GetBounds(nullptr, &bounds))) {
+            return head;
+        }
+        const float drawnLength = bounds.right - bounds.left;
+        const float drawnWidth = bounds.bottom - bounds.top;
+        if (drawnLength <= 0.0f || drawnWidth <= 0.0f) {
+            return head;
+        }
+        if (std::abs(drawnLength - length) < 0.25f &&
+            std::abs(drawnWidth - width) < 0.25f) {
+            break;
+        }
+        coreLength += length - drawnLength;
+        coreWidth += width - drawnWidth;
+    }
+    return head;
 }
 
 }  // namespace
@@ -381,7 +489,8 @@ void Renderer::DrawStrokeArrows(const ccl::doc::Stroke& stroke) noexcept {
 
         const float width = at.width * kArrowScale;
         const Microsoft::WRL::ComPtr<ID2D1PathGeometry> head =
-            ArrowGeometry(factory, width, width * kArrowAspect);
+            SizedArrowGeometry(factory, width, width * kArrowAspect,
+                               width * kArrowRounding);
         if (!head) {
             continue;
         }
