@@ -939,6 +939,11 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CLOSE:
+            // Before anything is taken apart, since a write that fails leaves
+            // the window open and everything has to still work.
+            if (!AutoSaveBeforeClosing(Departure::Window)) {
+                return 0;
+            }
             // Only the timer is dropped, not the hiding: bringing the window
             // back for the instant before it is destroyed would just flash it.
             if (hideTimer_ != 0) {
@@ -952,8 +957,17 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             CommitText();
             ccl::timing::ReportFrames(L"clip window draw", drawStats_);
             renderer_.ReportStats();
-            AutoSaveBeforeClosing();
             ::DestroyWindow(hwnd_);
+            return 0;
+
+        // Ending the session does not close windows: WM_CLOSE never arrives,
+        // so without this the capture would go with the shutdown unwritten.
+        // Tested against wParam != FALSE, since anything non-zero means the
+        // session really is ending; FALSE is a shutdown someone called off.
+        case WM_ENDSESSION:
+            if (wParam != FALSE) {
+                AutoSaveBeforeClosing(Departure::SessionEnd);
+            }
             return 0;
 
         case WM_DESTROY:
@@ -4131,8 +4145,11 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
     }
 
     // The capture on screen is written out first if auto-saving is on, since
-    // replacing it discards it.
-    AutoSaveBeforeClosing();
+    // replacing it discards it. If that write fails the replacement is called
+    // off: the picture on screen is still the only copy there is.
+    if (!AutoSaveBeforeClosing(Departure::Window)) {
+        return;
+    }
 
     *document_ = ccl::doc::Document(std::move(image));
 
@@ -4521,14 +4538,23 @@ void ClipWindow::CopyImage() noexcept {
     ccl::io::CopyToClipboard(hwnd_, flat.IsValid() ? flat : document_->Image());
 }
 
-void ClipWindow::AutoSaveBeforeClosing() noexcept {
+bool ClipWindow::AutoSaveBeforeClosing(Departure departure) noexcept {
     if (saved_ || discarding_ || context_ == nullptr || document_ == nullptr ||
         settings_ == nullptr) {
-        return;
+        return true;
     }
-    // Holding Shift while closing skips the automatic save.
-    if (IsKeyDown(VK_SHIFT)) {
-        return;
+    // Nothing to fail at, and nothing to warn about either: an empty folder is
+    // how auto-saving is switched off.
+    if (settings_->autoSaveFolder.empty()) {
+        return true;
+    }
+    // Holding Shift while closing skips the automatic save -- but only for the
+    // window in front, the one whose closing the hand on the keyboard is about.
+    // Closing a whole group from the taskbar sends the same message to every
+    // window at once, and Shift is how that menu is reached, so honouring it
+    // there would throw away every capture on the screen.
+    if (IsKeyDown(VK_SHIFT) && ::GetForegroundWindow() == hwnd_) {
+        return true;
     }
 
     if (EditingText()) {
@@ -4536,9 +4562,31 @@ void ClipWindow::AutoSaveBeforeClosing() noexcept {
     }
 
     const ccl::capture::DibBuffer flat = renderer_.Flatten();
-    ccl::io::AutoSaveImage(*context_,
-                           flat.IsValid() ? flat : document_->Image(),
-                           *settings_, sourceTitle_);
+    const bool written =
+        !ccl::io::AutoSaveImage(
+             *context_, flat.IsValid() ? flat : document_->Image(), *settings_,
+             sourceTitle_,
+             departure == Departure::SessionEnd ? ccl::io::HistoryCleanup::Skip
+                                                : ccl::io::HistoryCleanup::Prune)
+             .empty();
+    if (written) {
+        // Counts as saved, so a close arriving after the session-end write does
+        // not put a second copy of the same picture on disk.
+        saved_ = true;
+        return true;
+    }
+
+    if (departure == Departure::SessionEnd) {
+        return true;
+    }
+
+    // Losing the capture without a word is the one outcome worth interrupting
+    // for: the window is the only place the picture still exists.
+    ::MessageBoxW(hwnd_,
+                  L"自動保存に失敗しました。保存先を確認してください。\n"
+                  L"画像を失わないよう、ウィンドウは閉じません。",
+                  L"CapturaClipA2", MB_ICONWARNING | MB_OK);
+    return false;
 }
 
 void ClipWindow::Draw() noexcept {

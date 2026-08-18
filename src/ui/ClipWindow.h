@@ -171,9 +171,21 @@ private:
     // Joins the image on the clipboard onto the right or the bottom.
     void ConcatenateClipboard(bool toRight) noexcept;
 
+    // Why the picture is about to go away, which decides how much the program
+    // is allowed to do about a save that fails.
+    enum class Departure {
+        Window,      // this window is being closed or its picture replaced
+        SessionEnd,  // Windows is ending the session and will not wait long
+    };
+
     // Saves automatically before the capture is discarded, unless the image has
     // already been saved or Shift is held to skip it.
-    void AutoSaveBeforeClosing() noexcept;
+    //
+    // Returns false when the picture could not be written and the window should
+    // stay open rather than take it with it. Always true when the session is
+    // ending: refusing to go would not save anything and would hold up the
+    // shutdown.
+    bool AutoSaveBeforeClosing(Departure departure) noexcept;
 
     // Client pixels to image coordinates, undoing zoom and scroll.
     D2D1_POINT_2F ToImage(POINT client) const noexcept;
