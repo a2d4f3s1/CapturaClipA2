@@ -73,6 +73,110 @@ void Renderer::DiscardDeviceResources() noexcept {
     windowTarget_.Reset();
 }
 
+bool Renderer::EnsureScene(const ccl::view::ViewState& view) noexcept {
+    if (!target_ || document_ == nullptr || !document_->IsValid()) {
+        return false;
+    }
+
+    const D2D1_SIZE_F size = target_->GetSize();
+    if (size.width <= 0.0f || size.height <= 0.0f) {
+        return false;
+    }
+
+    const float zoom = view.Zoom();
+    const POINT scroll = view.Scroll();
+    const unsigned int revision = document_->Revision();
+
+    const bool sameShape = sceneTarget_ && sceneBitmap_ &&
+                           sceneSize_.width == size.width &&
+                           sceneSize_.height == size.height;
+    if (sameShape && sceneRevision_ == revision && sceneZoom_ == zoom &&
+        sceneScroll_.x == scroll.x && sceneScroll_.y == scroll.y &&
+        sceneBorder_ == border_ && sceneSmooth_ == smoothScaling_) {
+        return true;
+    }
+
+    if (!sameShape) {
+        sceneBitmap_.Reset();
+        sceneTarget_.Reset();
+        // A surface larger than the device will hand out is refused here rather
+        // than failing later; the frame then draws the long way round, which is
+        // what it did before any of this.
+        if (FAILED(target_->CreateCompatibleRenderTarget(size, &sceneTarget_)) ||
+            !sceneTarget_) {
+            sceneTarget_.Reset();
+            return false;
+        }
+        sceneSize_ = size;
+    }
+
+    if (!EnsureImageBitmap()) {
+        return false;
+    }
+
+    // The same transform the frame is about to use, so that what is baked lines
+    // up exactly with what gets drawn on top of it.
+    const auto inset = static_cast<float>(border_);
+    const D2D1_MATRIX_3X2_F transform =
+        D2D1::Matrix3x2F::Scale(zoom, zoom) *
+        D2D1::Matrix3x2F::Translation(inset - static_cast<float>(scroll.x),
+                                      inset - static_cast<float>(scroll.y));
+
+    // The drawing helpers all work through target_, so the scene's takes its
+    // place while it is filled. Unlike the off-screen render used for saving,
+    // this one is on the same device, so nothing has to be set aside.
+    auto saved = target_;
+    target_ = sceneTarget_;
+
+    target_->BeginDraw();
+    target_->Clear(D2D1::ColorF(0.29f, 0.29f, 0.29f));
+    target_->SetTransform(transform);
+
+    if (image_) {
+        const D2D1_SIZE_F picture = image_->GetSize();
+        const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
+            smoothScaling_ ? D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+                           : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+        target_->DrawBitmap(
+            image_.Get(), D2D1::RectF(0.0f, 0.0f, picture.width, picture.height),
+            1.0f, interpolation);
+    }
+
+    for (const auto& annotation : document_->Annotations()) {
+        switch (annotation.kind) {
+            case ccl::doc::AnnotationKind::Stroke:
+                DrawStroke(annotation.stroke, annotation.id);
+                break;
+            case ccl::doc::AnnotationKind::Text:
+                DrawText(annotation.text, annotation.id);
+                break;
+            case ccl::doc::AnnotationKind::Effect:
+                DrawEffect(annotation.effect, annotation.id);
+                break;
+            case ccl::doc::AnnotationKind::Area:
+                DrawArea(annotation.area, annotation.id);
+                break;
+        }
+    }
+
+    target_->SetTransform(D2D1::Matrix3x2F::Identity());
+    const HRESULT drawn = target_->EndDraw();
+    target_ = saved;
+
+    if (FAILED(drawn) ||
+        FAILED(sceneTarget_->GetBitmap(&sceneBitmap_)) || !sceneBitmap_) {
+        sceneBitmap_.Reset();
+        return false;
+    }
+
+    sceneRevision_ = revision;
+    sceneZoom_ = zoom;
+    sceneScroll_ = scroll;
+    sceneBorder_ = border_;
+    sceneSmooth_ = smoothScaling_;
+    return true;
+}
+
 void Renderer::PruneCaches() noexcept {
     if (document_ == nullptr) {
         return;
@@ -1278,6 +1382,12 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     // be done once BeginDraw below has been called.
     CaptureEffectSources();
 
+    // The same goes for the scene, which is filled through a target of its own.
+    // Skipped while a turn is being previewed: the transform changes on every
+    // frame then, so there would be nothing to reuse.
+    const bool previewing = previewRotation_ != 0.0f;
+    const bool scened = !previewing && EnsureScene(view);
+
     target_->BeginDraw();
 
     // Clearing to the outline colour and insetting the content by the border
@@ -1285,7 +1395,6 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     //
     // While a turn is being previewed the padding colour takes over, so that
     // what shows around the picture is what committing would fill in.
-    const bool previewing = previewRotation_ != 0.0f;
     target_->Clear(previewing ? ToD2D(previewFill_)
                               : D2D1::ColorF(0.29f, 0.29f, 0.29f));
 
@@ -1313,7 +1422,16 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     target_->SetTransform(transform);
 
     const LONGLONG pictureStart = ccl::timing::Mark();
-    if (image_) {
+    if (scened) {
+        // One blit stands in for the picture and every settled annotation on
+        // it. Drawn untransformed and at its own size, so nothing is resampled.
+        const D2D1_SIZE_F surface = target_->GetSize();
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        target_->DrawBitmap(
+            sceneBitmap_.Get(),
+            D2D1::RectF(0.0f, 0.0f, surface.width, surface.height));
+        target_->SetTransform(transform);
+    } else if (image_) {
         const D2D1_SIZE_F size = image_->GetSize();
         const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
             smoothScaling_ ? D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
@@ -1325,7 +1443,7 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     ccl::timing::AddSince(pictureStats_, pictureStart);
 
     const LONGLONG annotationStart = ccl::timing::Mark();
-    if (document_ != nullptr) {
+    if (!scened && document_ != nullptr) {
         for (const auto& annotation : document_->Annotations()) {
             switch (annotation.kind) {
                 case ccl::doc::AnnotationKind::Stroke:

@@ -218,6 +218,15 @@ private:
                               unsigned int id) noexcept;
     // Throws away cached results for annotations that are no longer there.
     void PruneCaches() noexcept;
+    // Makes sure the picture and the settled annotations are sitting ready in
+    // a bitmap of their own, and says whether they are. A frame where only the
+    // pointer has moved then draws that one bitmap instead of laying out every
+    // piece of text and tracing every stroke again -- which was costing their
+    // full price on every mouse move.
+    //
+    // Rebuilt when anything it was made from moves on: the document's revision,
+    // the zoom, the scroll, the window's size, the border or the smoothing.
+    bool EnsureScene(const ccl::view::ViewState& view) noexcept;
 
     D2DContext* context_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -253,6 +262,20 @@ private:
     // that draws with it.
     Microsoft::WRL::ComPtr<ID2D1Geometry> transientGeometry_;
     Microsoft::WRL::ComPtr<IDWriteTextLayout> transientLayout_;
+
+    // The picture and the settled annotations, kept between frames. Both belong
+    // to the same device as the window's target, so the image, the brushes and
+    // the cached geometry carry over into it untouched.
+    Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> sceneTarget_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> sceneBitmap_;
+    // What it was built from. A frame compares against these to decide whether
+    // it can be used as it stands.
+    D2D1_SIZE_F sceneSize_{0.0f, 0.0f};
+    unsigned int sceneRevision_ = 0;
+    float sceneZoom_ = 0.0f;
+    POINT sceneScroll_{0, 0};
+    int sceneBorder_ = -1;
+    bool sceneSmooth_ = false;
     // One layer, reused by every highlighter stroke. Each PushLayer wants an
     // intermediate surface, and asking for a new one per stroke per frame is
     // the one cost here that grows with the size of the capture.
