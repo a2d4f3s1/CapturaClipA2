@@ -1705,9 +1705,22 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
             CHARFORMAT2W format{};
             format.cbSize = sizeof(format);
-            format.dwMask = CFM_COLOR | CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE |
-                            CFM_STRIKEOUT;
+            // Size and face belong here as much as the rest. Left out, a piece
+            // of text with one word made bigger came back all one size, and
+            // committing it again wrote that flattening into the picture.
+            format.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD |
+                            CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
             format.crTextColor = ToColorRef(run.color);
+            const float runSize = run.fontSize > 0.0f
+                                      ? run.fontSize
+                                      : editingOriginal_.fontSize;
+            format.yHeight = PixelsToTwips(runSize * view_.Zoom(),
+                                           ccl::dpi::ForWindow(hwnd_));
+            ::wcsncpy_s(format.szFaceName,
+                        (run.fontFamily.empty() ? editingOriginal_.fontFamily
+                                                : run.fontFamily)
+                            .c_str(),
+                        _TRUNCATE);
             format.dwEffects = (run.bold ? CFE_BOLD : 0) |
                                (run.italic ? CFE_ITALIC : 0) |
                                (run.underline ? CFE_UNDERLINE : 0) |
@@ -1843,6 +1856,31 @@ void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
                    reinterpret_cast<LPARAM>(&format));
 }
 
+size_t ClipWindow::ColourTargetText() const noexcept {
+    if (tool_.tool != ccl::tool::Tool::Text || editor_ != nullptr ||
+        document_ == nullptr ||
+        hoveredTextIndex_ >= document_->Annotations().size()) {
+        return static_cast<size_t>(-1);
+    }
+    return document_->Annotations()[hoveredTextIndex_].kind ==
+                   ccl::doc::AnnotationKind::Text
+               ? hoveredTextIndex_
+               : static_cast<size_t>(-1);
+}
+
+void ClipWindow::PaintText(size_t index, const ccl::doc::Color& colour) noexcept {
+    if (document_ == nullptr || index >= document_->Annotations().size()) {
+        return;
+    }
+    ccl::doc::TextAnnotation& text = document_->Annotations()[index].text;
+    text.color = colour;
+    // Ranges hold a colour of their own with no way to say "the one above", so
+    // they are painted too rather than left behind.
+    for (ccl::doc::TextRun& run : text.runs) {
+        run.color = colour;
+    }
+}
+
 void ClipWindow::ResizeHoveredText(int steps) noexcept {
     if (document_ == nullptr ||
         hoveredTextIndex_ >= document_->Annotations().size()) {
@@ -1868,10 +1906,13 @@ void ClipWindow::ResizeHoveredText(int steps) noexcept {
     }
 
     annotation.text.fontSize = size;
-    // A range carrying a size of its own would keep it, and only part of the
-    // text would move. Zero hands those ranges back to the size above.
+    // Ranges with a size of their own are stepped from that size, so a word
+    // made bigger than the rest stays bigger by the same proportion. Ranges
+    // carrying zero follow the size above and need no stepping.
     for (ccl::doc::TextRun& run : annotation.text.runs) {
-        run.fontSize = 0.0f;
+        if (run.fontSize > 0.0f) {
+            run.fontSize = SteppedFontSize(run.fontSize, steps);
+        }
     }
 
     // The glyphs in the cache were laid out at the old size.
@@ -3378,6 +3419,15 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
 
     const ccl::doc::Color original = tool_.Color();
 
+    // Pointing at a piece of text makes it the target: the colour lands on it
+    // rather than on whatever is typed next. What it looked like beforehand is
+    // kept so that dragging across the gradient can be undone by walking away.
+    const size_t target = ColourTargetText();
+    ccl::doc::TextAnnotation before;
+    if (target != static_cast<size_t>(-1)) {
+        before = document_->Annotations()[target].text;
+    }
+
     // Same reason as the styling menu: the palette takes focus, and that must
     // not end the edit in progress.
     ++suppressCommitDepth_;
@@ -3386,7 +3436,7 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
     const auto chosen = popup.Show(
         hwnd_, screen, original, tool_.quickColors, tool_.RecentColors(),
         settings_ != nullptr ? settings_->paletteScalePercent : 100,
-        [this](const ccl::doc::Color& colour) {
+        [this, target](const ccl::doc::Color& colour) {
             // Applied without recording it: dragging across a gradient would
             // otherwise fill the recent list with every shade passed over.
             tool_.SetColor(colour);
@@ -3396,9 +3446,27 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
             // repainting behind it made dragging crawl and the palette flicker;
             // the colour is applied once, on commit.
             if (editor_ == nullptr) {
+                // A piece of text being pointed at is repainted as the colour
+                // moves, which costs nothing extra: this path already redraws
+                // the window for every shade passed over.
+                if (target != static_cast<size_t>(-1)) {
+                    PaintText(target, colour);
+                }
                 Draw();
             }
         });
+
+    if (target != static_cast<size_t>(-1) &&
+        target < document_->Annotations().size()) {
+        // Put back what the preview painted over. Accepting then repaints it
+        // for good, with the state before the drag recorded first, so the whole
+        // business is one step to undo and a walk away leaves no step at all.
+        document_->Annotations()[target].text = before;
+        if (chosen.has_value()) {
+            history_.Record(document_->Annotations(), ToolForHistory());
+            PaintText(target, *chosen);
+        }
+    }
 
     if (chosen.has_value()) {
         tool_.UseColor(*chosen);

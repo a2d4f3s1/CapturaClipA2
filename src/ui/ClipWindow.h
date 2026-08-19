@@ -224,6 +224,11 @@ private:
     // outline round it. A run of steps counts as one thing done: the state
     // before the first is what undo returns to.
     void ResizeHoveredText(int steps) noexcept;
+    // Paints the whole of one piece of text, ranges included. Whole rather
+    // than partly: outside the editor there is no selection to aim at.
+    void PaintText(size_t index, const ccl::doc::Color& colour) noexcept;
+    // The text a colour chosen now would land on, or -1 for none.
+    size_t ColourTargetText() const noexcept;
     void SetTextFont(const std::wstring& family) noexcept;
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
