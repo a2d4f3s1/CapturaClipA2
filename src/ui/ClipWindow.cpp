@@ -1705,6 +1705,21 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
     // the drawing about where the lines were.
     ::SendMessageW(editor_, EM_SETTARGETDEVICE, 0, 1000000);
 
+    // Left to itself, the control picks a font of its own for each stretch of
+    // characters -- one face for kana, another for symbols -- and then reports
+    // those faces back as though they had been chosen. Committed text ended up
+    // carrying fonts nobody asked for, and reopening it wrote every one of
+    // those stretches back in turn: measured, a plain 530-character note came
+    // back as 82 stretches and took five seconds to reopen.
+    //
+    // The font the picture will draw with is the one that was chosen, so the
+    // box is told to leave it alone. Characters the chosen font has no glyph
+    // for are the drawing's problem to solve, as they already were.
+    const LRESULT languageOptions =
+        ::SendMessageW(editor_, EM_GETLANGOPTIONS, 0, 0);
+    ::SendMessageW(editor_, EM_SETLANGOPTIONS, 0,
+                   languageOptions & ~(IMF_AUTOFONT | IMF_DUALFONT));
+
     // Only changes are of interest. The size the control says it needs is not:
     // measured, it never grew in height and grew a little in width every time
     // it was asked, so the box is fitted from the text instead.
@@ -1755,15 +1770,6 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
             MoveRuns(editingOriginal_.runs, EditorOffsets(editingOriginal_.text));
 
         const UINT editorDpi = ccl::dpi::ForWindow(hwnd_);
-
-        // Held still while the styling goes in. Each format written is a
-        // reason for the control to lay the text out again, and it does so at
-        // once: measured, sixty ranges took 160ms and two hundred took 519ms,
-        // which is the pause between the box appearing and the text looking
-        // right. Asked to hold, the same work takes about a millisecond.
-        long frozen = 0;
-        const bool held =
-            editorDoc_ != nullptr && SUCCEEDED(editorDoc_->Freeze(&frozen));
 
         for (const ccl::doc::TextRun& run : restored) {
             const float runSize = run.fontSize > 0.0f
@@ -1834,10 +1840,6 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
         // Caret at the end, which is where editing usually continues.
         ::SendMessageW(editor_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
-
-        if (held) {
-            editorDoc_->Unfreeze(&frozen);
-        }
     } else {
         ApplyCharFormat(true);
     }
