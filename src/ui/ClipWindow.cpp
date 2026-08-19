@@ -1621,8 +1621,9 @@ void ClipWindow::EditTextAt(size_t index) noexcept {
     tool_.textItalic = editingOriginal_.italic;
     tool_.textUnderline = editingOriginal_.underline;
     tool_.textStrikethrough = editingOriginal_.strikethrough;
-    tool_.textShadow = editingOriginal_.shadow;
-    tool_.textOutline = editingOriginal_.outline;
+    // The outline and the shadow are deliberately not taken. They cannot be
+    // switched while typing, so carrying them into the current value would only
+    // move the setting for the next piece of text about for no reason.
 
     auto& annotations = document_->MutableAnnotations();
     annotations.erase(annotations.begin() +
@@ -2014,7 +2015,7 @@ void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
                    reinterpret_cast<LPARAM>(&format));
 }
 
-size_t ClipWindow::ColourTargetText() const noexcept {
+size_t ClipWindow::HoveredTextTarget() const noexcept {
     if (tool_.tool != ccl::tool::Tool::Text || editor_ != nullptr ||
         document_ == nullptr ||
         hoveredTextIndex_ >= document_->Annotations().size()) {
@@ -2024,6 +2025,55 @@ size_t ClipWindow::ColourTargetText() const noexcept {
                    ccl::doc::AnnotationKind::Text
                ? hoveredTextIndex_
                : static_cast<size_t>(-1);
+}
+
+void ClipWindow::RefreshHoveredText() noexcept {
+    if (tool_.tool != ccl::tool::Tool::Text || editor_ != nullptr ||
+        document_ == nullptr) {
+        return;
+    }
+
+    const size_t hovered = FindTextAt(ToImage(lastCursor_));
+    if (hovered == hoveredTextIndex_) {
+        return;
+    }
+
+    // Kept in step with the outline drawn around it: what a change is about to
+    // land on has to be the thing the picture says it will land on.
+    hoveredTextIndex_ = hovered;
+    resizingTextId_ = 0;
+    UpdateCursor();
+    Draw();
+}
+
+void ClipWindow::ToggleTextOutline() noexcept {
+    const size_t target = HoveredTextTarget();
+    if (target == static_cast<size_t>(-1)) {
+        // Nothing pointed at: this is the setting the next piece of text will
+        // be given.
+        tool_.textOutline = !tool_.textOutline;
+        return;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    ccl::doc::TextAnnotation& text =
+        document_->MutableAnnotations()[target].text;
+    text.outline = !text.outline;
+    Draw();
+}
+
+void ClipWindow::ToggleTextShadow() noexcept {
+    const size_t target = HoveredTextTarget();
+    if (target == static_cast<size_t>(-1)) {
+        tool_.textShadow = !tool_.textShadow;
+        return;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    ccl::doc::TextAnnotation& text =
+        document_->MutableAnnotations()[target].text;
+    text.shadow = !text.shadow;
+    Draw();
 }
 
 void ClipWindow::PaintText(size_t index, const ccl::doc::Color& colour) noexcept {
@@ -2546,8 +2596,14 @@ void ClipWindow::CommitText() noexcept {
     annotation.text.italic = tool_.textItalic;
     annotation.text.underline = tool_.textUnderline;
     annotation.text.strikethrough = tool_.textStrikethrough;
-    annotation.text.shadow = tool_.textShadow;
-    annotation.text.outline = tool_.textOutline;
+    // Left as the piece already had them when it is being reopened. These two
+    // are switched from outside the box, on the text being pointed at, so the
+    // box has no say in them: taking them from the current value here would
+    // undo, on commit, whatever had been set from outside.
+    if (!wasEditing) {
+        annotation.text.shadow = tool_.textShadow;
+        annotation.text.outline = tool_.textOutline;
+    }
     annotation.text.runs = std::move(runs);
 
     document_->MutableAnnotations().push_back(std::move(annotation));
@@ -3836,7 +3892,7 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
     // Pointing at a piece of text makes it the target: the colour lands on it
     // rather than on whatever is typed next. What it looked like beforehand is
     // kept so that dragging across the gradient can be undone by walking away.
-    const size_t target = ColourTargetText();
+    const size_t target = HoveredTextTarget();
     ccl::doc::TextAnnotation before;
     if (target != static_cast<size_t>(-1)) {
         before = document_->Annotations()[target].text;
@@ -4139,10 +4195,14 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     ::AppendMenuW(menu, tool_.textStrikethrough ? checked : plain,
                   kMenuStrikethrough, L"打ち消し線");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, tool_.textOutline ? checked : plain, kMenuTextOutline,
-                  L"縁取り");
-    ::AppendMenuW(menu, tool_.textShadow ? checked : plain, kMenuTextShadow,
-                  L"影");
+    // Offered but not usable from in here. The outline and the shadow are drawn
+    // when the text is, not while it is being typed, so switching one now would
+    // change nothing on screen; they are changed from outside instead, on the
+    // text being pointed at. Left visible rather than removed, so that looking
+    // for them finds them, greyed, where they have always been.
+    const UINT locked = MF_STRING | MF_GRAYED;
+    ::AppendMenuW(menu, locked, kMenuTextOutline, L"縁取り");
+    ::AppendMenuW(menu, locked, kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, plain, kMenuCommitText, L"確定\tEsc");
 
@@ -4169,6 +4229,10 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
 }
 
 void ClipWindow::ShowContextMenu(POINT screen) noexcept {
+    // Settled before the menu is built, because some of what goes in it depends
+    // on what is being pointed at.
+    RefreshHoveredText();
+
     const HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr) {
         return;
@@ -4286,10 +4350,26 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(textStyle, tool_.textStrikethrough ? checked : plain,
                   kMenuStrikethrough, L"打ち消し線");
     ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(textStyle, tool_.textOutline ? checked : plain,
-                  kMenuTextOutline, L"縁取り");
-    ::AppendMenuW(textStyle, tool_.textShadow ? checked : plain,
-                  kMenuTextShadow, L"影");
+    // Pointing at a piece of text makes these say what that text is, because
+    // that is what switching them would change. With nothing pointed at they
+    // say what the next piece of text will be given. While the box is open they
+    // are shown but cannot be used: what is being typed is drawn by the box,
+    // which has neither an outline nor a shadow to switch.
+    const size_t styleTarget = HoveredTextTarget();
+    const bool hasOutline =
+        styleTarget != static_cast<size_t>(-1)
+            ? document_->Annotations()[styleTarget].text.outline
+            : tool_.textOutline;
+    const bool hasShadow =
+        styleTarget != static_cast<size_t>(-1)
+            ? document_->Annotations()[styleTarget].text.shadow
+            : tool_.textShadow;
+    const UINT outlineFlags =
+        (hasOutline ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
+    const UINT shadowFlags =
+        (hasShadow ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
+    ::AppendMenuW(textStyle, outlineFlags, kMenuTextOutline, L"縁取り");
+    ::AppendMenuW(textStyle, shadowFlags, kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
                   L"文字\tCtrl+B I U");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -4537,12 +4617,10 @@ void ClipWindow::OnCommand(int command) noexcept {
                             tool_.textStrikethrough);
             return;
         case kMenuTextOutline:
-            tool_.textOutline = !tool_.textOutline;
-            Draw();
+            ToggleTextOutline();
             return;
         case kMenuTextShadow:
-            tool_.textShadow = !tool_.textShadow;
-            Draw();
+            ToggleTextShadow();
             return;
         case kMenuCommitText:
             CommitText();

@@ -231,8 +231,18 @@ private:
     // Paints the whole of one piece of text, ranges included. Whole rather
     // than partly: outside the editor there is no selection to aim at.
     void PaintText(size_t index, const ccl::doc::Color& colour) noexcept;
-    // The text a colour chosen now would land on, or -1 for none.
-    size_t ColourTargetText() const noexcept;
+    // The text being pointed at, which is what a change made from outside the
+    // editor lands on -- a colour, a size, an outline. -1 for none.
+    size_t HoveredTextTarget() const noexcept;
+    // Works out afresh what is under the pointer. Undo and redo drop what was
+    // being pointed at, and nothing puts it back until the pointer moves, so a
+    // menu opened in between would otherwise find no target while the text sits
+    // right under the cursor.
+    void RefreshHoveredText() noexcept;
+    // Turns the outline or the shadow on the text being pointed at, or -- with
+    // nothing pointed at -- on whatever is typed next.
+    void ToggleTextOutline() noexcept;
+    void ToggleTextShadow() noexcept;
     void SetTextFont(const std::wstring& family) noexcept;
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
