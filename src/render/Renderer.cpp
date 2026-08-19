@@ -1238,6 +1238,44 @@ void Renderer::DrawEffect(const ccl::doc::EffectAnnotation& effect,
         1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 }
 
+bool Renderer::MeasureLines(const ccl::doc::TextAnnotation& text,
+                            std::vector<float>& heights) noexcept {
+    heights.clear();
+    if (context_ == nullptr) {
+        return false;
+    }
+
+    ccl::doc::TextAnnotation probe = text;
+    // An empty box still sits on a line, and that line still has a height.
+    if (probe.text.empty()) {
+        probe.text = L"A";
+        probe.runs.clear();
+    }
+
+    const auto layout = BuildLayout(context_->Text(), probe);
+    if (!layout) {
+        return false;
+    }
+
+    UINT32 count = 0;
+    // Asked for nothing first, which reports how many there are.
+    layout->GetLineMetrics(nullptr, 0, &count);
+    if (count == 0) {
+        return false;
+    }
+
+    std::vector<DWRITE_LINE_METRICS> lines(count);
+    if (FAILED(layout->GetLineMetrics(lines.data(), count, &count))) {
+        return false;
+    }
+
+    heights.reserve(count);
+    for (UINT32 i = 0; i < count; ++i) {
+        heights.push_back(lines[i].height);
+    }
+    return true;
+}
+
 bool Renderer::MeasureLine(const ccl::doc::TextAnnotation& text,
                            float& lineHeight, float& baseline) noexcept {
     if (context_ == nullptr) {

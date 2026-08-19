@@ -107,6 +107,11 @@ public:
     // Height of one line and the distance from its top to the baseline, in
     // image pixels. The editor is told to use these so that typed and drawn
     // text sit on the same lines.
+    // The height each line of a piece of text needs, in the order they are
+    // drawn. A line is as tall as the largest thing on it, so these differ from
+    // one another as soon as part of the text is a different size.
+    bool MeasureLines(const ccl::doc::TextAnnotation& text,
+                      std::vector<float>& heights) noexcept;
     bool MeasureLine(const ccl::doc::TextAnnotation& text, float& lineHeight,
                      float& baseline) noexcept;
 

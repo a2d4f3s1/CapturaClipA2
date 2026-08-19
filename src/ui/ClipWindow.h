@@ -239,7 +239,7 @@ private:
     // default, which do not exist in the drawn result.
     // Pins the line pitch to what the picture will use for text of this size.
     // The size is the largest in the box, so the tallest line is not cut off.
-    void ApplyParagraphFormat(float lineSize) noexcept;
+    void ApplyParagraphFormat(const ccl::doc::TextAnnotation& shown) noexcept;
     // What is in the editor, shaped like the annotation it will become, so it
     // can be measured with the same code that will draw it.
     ccl::doc::TextAnnotation EditorSnapshot() noexcept;
@@ -507,7 +507,9 @@ private:
     // The size the editor's line pitch is currently pinned to. Pinning it runs
     // through a select-all, which throws away the format waiting for the next
     // character typed, so it is only done when the size actually changes.
-    float pinnedLineSize_ = 0.0f;
+    // The line heights the editing box was last given, so a keystroke that
+    // leaves them alone does not set them all again.
+    std::vector<float> pinnedLineHeights_;
 
     size_t movingTextIndex_ = static_cast<size_t>(-1);
     POINT textDragStart_{};

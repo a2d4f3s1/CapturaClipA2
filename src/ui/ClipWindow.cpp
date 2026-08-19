@@ -80,6 +80,11 @@ LONG PixelsToTwips(float pixels, UINT dpi) noexcept {
                                          static_cast<float>(dpi)));
 }
 
+// The Text Object Model works in points where the messages work in twips.
+float TwipsToPoints(LONG twips) noexcept {
+    return static_cast<float>(twips) / 20.0f;
+}
+
 float TwipsToPixels(LONG twips, UINT dpi) noexcept {
     return static_cast<float>(twips) * static_cast<float>(dpi) / 1440.0f;
 }
@@ -325,6 +330,67 @@ std::wstring ToStoredLineEndings(const std::wstring& text) {
         }
     }
     return result;
+}
+
+// Where each character of what the control returns ends up once the text is
+// stored. A line break comes back as CRLF -- two characters -- and is kept as a
+// single LF, so everything past one sits a character earlier than it did.
+//
+// Styling positions are taken in the control's own coordinates, which is why
+// this is needed: without it, a run in the second line of a piece of text was
+// written down one character to the right of where it belonged, and two lines
+// down it was two characters out.
+std::vector<unsigned int> StoredOffsets(const std::wstring& raw) {
+    std::vector<unsigned int> map(raw.size() + 1, 0);
+    unsigned int stored = 0;
+    size_t i = 0;
+    while (i < raw.size()) {
+        map[i] = stored;
+        if (raw[i] == L'\r' && i + 1 < raw.size() && raw[i + 1] == L'\n') {
+            // The pair becomes one character, so both halves point at it.
+            map[i + 1] = stored;
+            i += 2;
+        } else {
+            ++i;
+        }
+        ++stored;
+    }
+    map[raw.size()] = stored;
+    return map;
+}
+
+// The way back, for text being opened again: every stored line break takes two
+// characters once it is in the control.
+std::vector<unsigned int> EditorOffsets(const std::wstring& stored) {
+    std::vector<unsigned int> map(stored.size() + 1, 0);
+    unsigned int editor = 0;
+    for (size_t i = 0; i < stored.size(); ++i) {
+        map[i] = editor;
+        editor += (stored[i] == L'\n') ? 2u : 1u;
+    }
+    map[stored.size()] = editor;
+    return map;
+}
+
+std::vector<ccl::doc::TextRun> MoveRuns(
+    const std::vector<ccl::doc::TextRun>& runs,
+    const std::vector<unsigned int>& map) {
+    std::vector<ccl::doc::TextRun> moved;
+    moved.reserve(runs.size());
+    const auto last = map.empty() ? 0u : static_cast<unsigned int>(map.size() - 1);
+    for (const ccl::doc::TextRun& run : runs) {
+        const auto from = std::min<unsigned int>(run.start, last);
+        const auto to = std::min<unsigned int>(run.start + run.length, last);
+        ccl::doc::TextRun shifted = run;
+        shifted.start = map[from];
+        shifted.length = map[to] - map[from];
+        // A run covering only the second half of a line break has nothing left
+        // to describe once the pair has become one character.
+        if (shifted.length > 0) {
+            moved.push_back(shifted);
+        }
+    }
+    return moved;
 }
 
 std::wstring ToEditorLineEndings(const std::wstring& text) {
@@ -1629,9 +1695,15 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
     // committed text is drawn straight onto the image.
     ::SendMessageW(editor_, EM_SETBKGNDCOLOR, 1, 0);
 
-    // Word wrap off: the box has no fixed width to wrap against, so it grows
-    // with the text and breaks only where a line break was typed.
-    ::SendMessageW(editor_, EM_SETTARGETDEVICE, 0, 0);
+    // Word wrap off, so the box grows with the text and breaks only where a
+    // line break was typed.
+    //
+    // The width given here is what the control formats against, and zero does
+    // not mean "no width" -- it means "use the client area", which is wrapping.
+    // Measured: with zero a long line came back as two, and with any width at
+    // all it stayed as one. Wrapping is what made the editing box disagree with
+    // the drawing about where the lines were.
+    ::SendMessageW(editor_, EM_SETTARGETDEVICE, 0, 1000000);
 
     // Only changes are of interest. The size the control says it needs is not:
     // measured, it never grew in height and grew a little in width every time
@@ -1677,11 +1749,61 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
         ::SendMessageW(editor_, EM_SETSEL, 0, -1);
         ApplyCharFormat(true);
 
-        for (const ccl::doc::TextRun& run : editingOriginal_.runs) {
-            const CHARRANGE range{static_cast<LONG>(run.start),
-                                  static_cast<LONG>(run.start + run.length)};
+        // Back into the control's coordinates, where each line break takes two
+        // characters again.
+        const std::vector<ccl::doc::TextRun> restored =
+            MoveRuns(editingOriginal_.runs, EditorOffsets(editingOriginal_.text));
+
+        const UINT editorDpi = ccl::dpi::ForWindow(hwnd_);
+
+        for (const ccl::doc::TextRun& run : restored) {
+            const float runSize = run.fontSize > 0.0f
+                                      ? run.fontSize
+                                      : editingOriginal_.fontSize;
+            const std::wstring& face = run.fontFamily.empty()
+                                           ? editingOriginal_.fontFamily
+                                           : run.fontFamily;
+
+            // Written through the Text Object Model, which does not move the
+            // selection. Selecting each range in turn to format it made the
+            // control repaint once per range, which showed as a flicker every
+            // time a piece of text with several styles was opened again.
+            ITextRange* range = nullptr;
+            if (editorDoc_ != nullptr &&
+                SUCCEEDED(editorDoc_->Range(
+                    static_cast<long>(run.start),
+                    static_cast<long>(run.start + run.length), &range)) &&
+                range != nullptr) {
+                ITextFont* font = nullptr;
+                if (SUCCEEDED(range->GetFont(&font)) && font != nullptr) {
+                    // Sizes go in as points, the same way they come out.
+                    font->SetSize(TwipsToPoints(
+                        PixelsToTwips(runSize * zoom, editorDpi)));
+                    font->SetForeColor(
+                        static_cast<long>(ToColorRef(run.color)));
+                    font->SetBold(run.bold ? tomTrue : tomFalse);
+                    font->SetItalic(run.italic ? tomTrue : tomFalse);
+                    font->SetUnderline(run.underline ? tomSingle : tomNone);
+                    font->SetStrikeThrough(run.strikethrough ? tomTrue
+                                                             : tomFalse);
+                    BSTR name = ::SysAllocString(face.c_str());
+                    if (name != nullptr) {
+                        font->SetName(name);
+                        ::SysFreeString(name);
+                    }
+                    font->Release();
+                }
+                range->Release();
+                continue;
+            }
+
+            // No Text Object Model to be had: the old way still works, it just
+            // repaints as it goes.
+            const CHARRANGE selection{
+                static_cast<LONG>(run.start),
+                static_cast<LONG>(run.start + run.length)};
             ::SendMessageW(editor_, EM_EXSETSEL, 0,
-                           reinterpret_cast<LPARAM>(&range));
+                           reinterpret_cast<LPARAM>(&selection));
 
             CHARFORMAT2W format{};
             format.cbSize = sizeof(format);
@@ -1691,16 +1813,8 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
             format.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD |
                             CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
             format.crTextColor = ToColorRef(run.color);
-            const float runSize = run.fontSize > 0.0f
-                                      ? run.fontSize
-                                      : editingOriginal_.fontSize;
-            format.yHeight = PixelsToTwips(runSize * view_.Zoom(),
-                                           ccl::dpi::ForWindow(hwnd_));
-            ::wcsncpy_s(format.szFaceName,
-                        (run.fontFamily.empty() ? editingOriginal_.fontFamily
-                                                : run.fontFamily)
-                            .c_str(),
-                        _TRUNCATE);
+            format.yHeight = PixelsToTwips(runSize * zoom, editorDpi);
+            ::wcsncpy_s(format.szFaceName, face.c_str(), _TRUNCATE);
             format.dwEffects = (run.bold ? CFE_BOLD : 0) |
                                (run.italic ? CFE_ITALIC : 0) |
                                (run.underline ? CFE_UNDERLINE : 0) |
@@ -2085,59 +2199,79 @@ std::vector<ccl::doc::TextRun> ClipWindow::ReadRunsBySelection(
     return runs;
 }
 
-void ClipWindow::ApplyParagraphFormat(float lineSize) noexcept {
-    if (editor_ == nullptr) {
+void ClipWindow::ApplyParagraphFormat(
+    const ccl::doc::TextAnnotation& shown) noexcept {
+    if (editor_ == nullptr || editorDoc_ == nullptr) {
         return;
     }
 
-    // Rich edit indents paragraphs and spaces them apart. Both have to be
-    // cleared, or the typed text sits at a different place and a different
-    // line pitch from where it will be drawn. Applied to the whole text,
-    // because setting it before the text exists has no lasting effect.
-    CHARRANGE saved{};
-    ::SendMessageW(editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
-    ::SendMessageW(editor_, EM_SETSEL, 0, -1);
-
-    PARAFORMAT2 paragraph{};
-    paragraph.cbSize = sizeof(paragraph);
-    paragraph.dwMask = PFM_LINESPACING | PFM_SPACEBEFORE | PFM_SPACEAFTER |
-                       PFM_STARTINDENT | PFM_RIGHTINDENT | PFM_OFFSET;
-    paragraph.bLineSpacingRule = 0;  // single
-    paragraph.dyLineSpacing = 0;
-    paragraph.dySpaceBefore = 0;
-    paragraph.dySpaceAfter = 0;
-    paragraph.dxStartIndent = 0;
-    paragraph.dxRightIndent = 0;
-    paragraph.dxOffset = 0;
-
-    // Pinned to the line height the drawing will use. Left to its own devices
-    // the control spaces lines differently, so typed and committed text did
-    // not line up once there was more than one line.
-    //
-    // The size that decides it is the largest in the box, not the one text
-    // starts at: pinned to the starting size, a word made bigger grew past the
-    // line it was on and came out with its top and bottom cut off.
-    if (settings_ != nullptr) {
-        ccl::doc::TextAnnotation probe;
-        probe.fontSize = lineSize > 0.0f ? lineSize : settings_->textFontSize;
-        probe.fontFamily = settings_->textFontFamily;
-        probe.bold = tool_.textBold;
-        probe.italic = tool_.textItalic;
-
-        float lineHeight = 0.0f;
-        float baseline = 0.0f;
-        if (renderer_.MeasureLine(probe, lineHeight, baseline) &&
-            lineHeight > 0.0f) {
-            paragraph.bLineSpacingRule = 4;  // exactly dyLineSpacing
-            paragraph.dyLineSpacing = PixelsToTwips(
-                lineHeight * view_.Zoom(), ccl::dpi::ForWindow(hwnd_));
-        }
+    // Each line gets the height the drawing is going to give it. Pinning the
+    // whole box to one spacing -- the largest size anywhere in it -- was the
+    // earlier attempt: it kept typed and drawn text on the same lines, but a
+    // box with one large word in it spaced every other line out to match, and
+    // the height was still worked out from the natural spacing, so the last
+    // lines fell outside the box and could not be seen.
+    std::vector<float> heights;
+    if (!renderer_.MeasureLines(shown, heights) || heights.empty()) {
+        return;
     }
 
-    ::SendMessageW(editor_, EM_SETPARAFORMAT, 0,
-                   reinterpret_cast<LPARAM>(&paragraph));
+    // Nothing to do while the lines still want what they were last given. This
+    // runs after every keystroke, and setting it costs about the same whether
+    // there are five lines or a hundred.
+    if (heights == pinnedLineHeights_) {
+        return;
+    }
+    pinnedLineHeights_ = heights;
 
-    ::SendMessageW(editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    const UINT dpi = ccl::dpi::ForWindow(hwnd_);
+    const float zoom = view_.Zoom();
+    const int length = ::GetWindowTextLengthW(editor_);
+
+    // Walked through the Text Object Model, which leaves the selection where it
+    // is. Selecting each paragraph to format it would move the caret about on
+    // every keystroke, and the control repaints itself when it does.
+    long position = 0;
+    size_t line = 0;
+    int guard = 0;
+    while (position < length && line < heights.size() && guard++ < 4096) {
+        ITextRange* range = nullptr;
+        if (FAILED(editorDoc_->Range(position, position, &range)) ||
+            range == nullptr) {
+            break;
+        }
+
+        long delta = 0;
+        range->Expand(tomParagraph, &delta);
+        long from = position;
+        long to = position;
+        range->GetStart(&from);
+        range->GetEnd(&to);
+        if (to <= position) {
+            range->Release();
+            break;
+        }
+
+        ITextPara* para = nullptr;
+        if (SUCCEEDED(range->GetPara(&para)) && para != nullptr) {
+            // Rich edit indents paragraphs and spaces them apart of its own
+            // accord; both have to go, or typed text sits somewhere other than
+            // where it will be drawn.
+            para->SetSpaceBefore(0.0f);
+            para->SetSpaceAfter(0.0f);
+            para->SetIndents(0.0f, 0.0f, 0.0f);
+            // Spacing is asked for in points, while the height came back in the
+            // pixels the picture will draw at.
+            const float points =
+                heights[line] * zoom * 72.0f / static_cast<float>(dpi);
+            para->SetLineSpacing(tomLineSpaceExactly, points);
+            para->Release();
+        }
+        range->Release();
+
+        ++line;
+        position = to;
+    }
 }
 
 ccl::doc::TextAnnotation ClipWindow::EditorSnapshot() noexcept {
@@ -2152,7 +2286,9 @@ ccl::doc::TextAnnotation ClipWindow::EditorSnapshot() noexcept {
         ::GetWindowTextW(editor_, raw.data(), length + 1);
         raw.resize(static_cast<size_t>(length));
         snapshot.text = ToStoredLineEndings(raw);
-        snapshot.runs = ReadRuns(length);
+        // Read in the control's coordinates, then moved onto the stored ones,
+        // so that the ranges line up with the text they are describing.
+        snapshot.runs = MoveRuns(ReadRuns(length), StoredOffsets(raw));
     }
 
     snapshot.fontSize = editingExisting_ ? editingOriginal_.fontSize
@@ -2179,13 +2315,13 @@ void ClipWindow::ResizeEditor() noexcept {
     // little wider than the last.
     const ccl::doc::TextAnnotation shown = EditorSnapshot();
 
+    ApplyParagraphFormat(shown);
+
+    // The largest size anywhere in the box. The lines are spaced individually
+    // now, but this still decides how much room to leave around the text.
     float tallest = shown.fontSize;
     for (const ccl::doc::TextRun& run : shown.runs) {
         tallest = std::max(tallest, run.fontSize);
-    }
-    if (tallest != pinnedLineSize_) {
-        ApplyParagraphFormat(tallest);
-        pinnedLineSize_ = tallest;
     }
 
     // An empty box still needs room for one line and the caret.
@@ -2251,7 +2387,7 @@ void ClipWindow::DestroyEditor() noexcept {
         editor_ = nullptr;
     }
     // The next box starts unpinned, whatever this one settled on.
-    pinnedLineSize_ = 0.0f;
+    pinnedLineHeights_.clear();
     if (editorFont_ != nullptr) {
         ::DeleteObject(editorFont_);
         editorFont_ = nullptr;
@@ -2300,8 +2436,10 @@ void ClipWindow::CommitText() noexcept {
         ::GetWindowTextW(editor_, raw.data(), length + 1);
 
         // Read before the text is normalised, because the styling positions
-        // refer to the control's own character indices.
-        runs = ReadRuns(static_cast<int>(::wcslen(raw.c_str())));
+        // refer to the control's own character indices -- and then moved onto
+        // the stored ones, since a line break stops taking two characters.
+        runs = MoveRuns(ReadRuns(static_cast<int>(::wcslen(raw.c_str()))),
+                        StoredOffsets(raw));
         text = ToStoredLineEndings(raw);
     }
 
