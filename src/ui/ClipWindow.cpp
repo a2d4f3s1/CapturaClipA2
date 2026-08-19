@@ -542,51 +542,6 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
-        case WM_NOTIFY: {
-            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-            if (header != nullptr && header->hwndFrom == editor_ &&
-                header->code == EN_REQUESTRESIZE) {
-                // The control reports the rectangle its content needs; growing
-                // to match is what keeps every line visible.
-                const auto* request = reinterpret_cast<const REQRESIZE*>(lParam);
-                const int margin = std::max(
-                    4, static_cast<int>(std::lround(
-                           (settings_ != nullptr ? settings_->textFontSize
-                                                 : 16.0f) *
-                           view_.Zoom() * 0.35f)));
-
-                const int width = std::max(
-                    40, static_cast<int>(request->rc.right - request->rc.left) +
-                            margin);
-                const int height = std::max(
-                    12, static_cast<int>(request->rc.bottom - request->rc.top) +
-                            margin);
-
-                RECT current{};
-                ::GetWindowRect(editor_, &current);
-                const int currentWidth = current.right - current.left;
-                const int currentHeight = current.bottom - current.top;
-
-                // Only when it actually changes. The control asks to be
-                // resized on every keystroke, and resizing it regardless made
-                // it flicker.
-                if (width == currentWidth && height == currentHeight) {
-                    return 0;
-                }
-
-                ::SetWindowPos(editor_, nullptr, 0, 0, width, height,
-                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-
-                // Only a shrink exposes image that the parent has to repaint;
-                // growing is covered by the control itself.
-                if (width < currentWidth || height < currentHeight) {
-                    Draw();
-                }
-                return 0;
-            }
-            break;
-        }
-
         case kResizeEditorMessage:
             // No repaint here: the resize notification repaints only if the box
             // actually shrank. Redrawing on every keystroke made the editor
@@ -1670,10 +1625,10 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
     // with the text and breaks only where a line break was typed.
     ::SendMessageW(editor_, EM_SETTARGETDEVICE, 0, 0);
 
-    // ENM_REQUESTRESIZE is what makes the control report the size its content
-    // needs, which is the supported way to keep it fitted to the text.
-    ::SendMessageW(editor_, EM_SETEVENTMASK, 0,
-                   ENM_CHANGE | ENM_REQUESTRESIZE);
+    // Only changes are of interest. The size the control says it needs is not:
+    // measured, it never grew in height and grew a little in width every time
+    // it was asked, so the box is fitted from the text instead.
+    ::SendMessageW(editor_, EM_SETEVENTMASK, 0, ENM_CHANGE);
 
     // Edit controls inset their text by a few pixels. Text layout draws from
     // the origin it is given, so without clearing the margins the preview sits
@@ -1735,7 +1690,8 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
         ApplyCharFormat(true);
     }
 
-    ApplyParagraphFormat();
+    // Fitting the box also pins the line pitch, so the paragraph format does
+    // not have to be applied separately here.
     ResizeEditor();
     ::SetFocus(editor_);
 }
@@ -1929,6 +1885,19 @@ std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
     CHARRANGE saved{};
     ::SendMessageW(editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
 
+    // With nothing selected the control holds a format waiting for the next
+    // character typed, and moving the selection about throws it away. Since
+    // this walk happens every time the box is refitted -- which is after every
+    // keystroke -- a size chosen before typing would never survive to be used.
+    // Read here, put back at the end. The mask comes back naming only the
+    // attributes the selection agrees on, so putting it back changes nothing.
+    CHARFORMAT2W pending{};
+    pending.cbSize = sizeof(pending);
+    pending.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD | CFM_ITALIC |
+                     CFM_UNDERLINE | CFM_STRIKEOUT;
+    ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&pending));
+
     // Walked character by character, collapsing neighbours that share a style.
     // Annotations are short enough that the simple approach is fine.
     ccl::doc::TextRun current{};
@@ -1976,10 +1945,12 @@ std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
     }
 
     ::SendMessageW(editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    ::SendMessageW(editor_, EM_SETCHARFORMAT, SCF_SELECTION,
+                   reinterpret_cast<LPARAM>(&pending));
     return runs;
 }
 
-void ClipWindow::ApplyParagraphFormat() noexcept {
+void ClipWindow::ApplyParagraphFormat(float lineSize) noexcept {
     if (editor_ == nullptr) {
         return;
     }
@@ -2007,10 +1978,13 @@ void ClipWindow::ApplyParagraphFormat() noexcept {
     // Pinned to the line height the drawing will use. Left to its own devices
     // the control spaces lines differently, so typed and committed text did
     // not line up once there was more than one line.
+    //
+    // The size that decides it is the largest in the box, not the one text
+    // starts at: pinned to the starting size, a word made bigger grew past the
+    // line it was on and came out with its top and bottom cut off.
     if (settings_ != nullptr) {
         ccl::doc::TextAnnotation probe;
-        probe.fontSize = editingExisting_ ? editingOriginal_.fontSize
-                                          : settings_->textFontSize;
+        probe.fontSize = lineSize > 0.0f ? lineSize : settings_->textFontSize;
         probe.fontFamily = settings_->textFontFamily;
         probe.bold = tool_.textBold;
         probe.italic = tool_.textItalic;
@@ -2031,19 +2005,93 @@ void ClipWindow::ApplyParagraphFormat() noexcept {
     ::SendMessageW(editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
 }
 
+ccl::doc::TextAnnotation ClipWindow::EditorSnapshot() noexcept {
+    ccl::doc::TextAnnotation snapshot;
+    if (editor_ == nullptr || settings_ == nullptr) {
+        return snapshot;
+    }
+
+    const int length = ::GetWindowTextLengthW(editor_);
+    if (length > 0) {
+        std::wstring raw(static_cast<size_t>(length) + 1, L'\0');
+        ::GetWindowTextW(editor_, raw.data(), length + 1);
+        raw.resize(static_cast<size_t>(length));
+        snapshot.text = ToStoredLineEndings(raw);
+        snapshot.runs = ReadRuns(length);
+    }
+
+    snapshot.fontSize = editingExisting_ ? editingOriginal_.fontSize
+                                         : settings_->textFontSize;
+    snapshot.fontFamily = settings_->textFontFamily;
+    snapshot.color = tool_.Color();
+    snapshot.bold = tool_.textBold;
+    snapshot.italic = tool_.textItalic;
+    snapshot.underline = tool_.textUnderline;
+    snapshot.strikethrough = tool_.textStrikethrough;
+    return snapshot;
+}
+
 void ClipWindow::ResizeEditor() noexcept {
     if (editor_ == nullptr || settings_ == nullptr) {
         return;
     }
 
-    // Asks the control what size its content needs. The answer arrives as an
-    // EN_REQUESTRESIZE notification, which is where the resize happens.
-    //
-    // Measuring it here instead was the mistake behind several attempts: the
-    // positions the control reports are in its own scrolled coordinates, so
-    // once the box was too short the measurement came back short as well and
-    // it could never catch up.
-    ::SendMessageW(editor_, EM_REQUESTRESIZE, 0, 0);
+    // Measured the way the picture will draw it, with the same code, rather
+    // than by asking the control. Asking was measured and found to answer
+    // wrongly in both directions: the height it wants never changes, however
+    // large the letters are, because the line pitch is pinned; and the width it
+    // wants is its own width plus a constant, so every keystroke made the box a
+    // little wider than the last.
+    const ccl::doc::TextAnnotation shown = EditorSnapshot();
+
+    float tallest = shown.fontSize;
+    for (const ccl::doc::TextRun& run : shown.runs) {
+        tallest = std::max(tallest, run.fontSize);
+    }
+    if (tallest != pinnedLineSize_) {
+        ApplyParagraphFormat(tallest);
+        pinnedLineSize_ = tallest;
+    }
+
+    // An empty box still needs room for one line and the caret.
+    ccl::doc::TextAnnotation probe = shown;
+    if (probe.text.empty()) {
+        probe.text = L"W";
+        probe.runs.clear();
+        probe.fontSize = tallest;
+    }
+
+    D2D1_RECT_F bounds{};
+    if (!renderer_.MeasureText(probe, bounds)) {
+        return;
+    }
+
+    const float zoom = view_.Zoom();
+    const int margin =
+        std::max(4, static_cast<int>(std::lround(tallest * zoom * 0.35f)));
+    const int width = std::max(
+        40, static_cast<int>(std::lround((bounds.right - bounds.left) * zoom)) +
+                margin);
+    const int height = std::max(
+        12, static_cast<int>(std::lround((bounds.bottom - bounds.top) * zoom)) +
+                margin);
+
+    RECT current{};
+    ::GetWindowRect(editor_, &current);
+    const int currentWidth = current.right - current.left;
+    const int currentHeight = current.bottom - current.top;
+    if (width == currentWidth && height == currentHeight) {
+        return;
+    }
+
+    ::SetWindowPos(editor_, nullptr, 0, 0, width, height,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    // Only a shrink exposes image that the parent has to repaint; growing is
+    // covered by the control itself.
+    if (width < currentWidth || height < currentHeight) {
+        Draw();
+    }
 }
 
 void ClipWindow::TurnOffIme() noexcept {
@@ -2062,6 +2110,8 @@ void ClipWindow::DestroyEditor() noexcept {
         ::DestroyWindow(editor_);
         editor_ = nullptr;
     }
+    // The next box starts unpinned, whatever this one settled on.
+    pinnedLineSize_ = 0.0f;
     if (editorFont_ != nullptr) {
         ::DeleteObject(editorFont_);
         editorFont_ = nullptr;

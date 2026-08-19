@@ -233,7 +233,12 @@ private:
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
     // default, which do not exist in the drawn result.
-    void ApplyParagraphFormat() noexcept;
+    // Pins the line pitch to what the picture will use for text of this size.
+    // The size is the largest in the box, so the tallest line is not cut off.
+    void ApplyParagraphFormat(float lineSize) noexcept;
+    // What is in the editor, shaped like the annotation it will become, so it
+    // can be measured with the same code that will draw it.
+    ccl::doc::TextAnnotation EditorSnapshot() noexcept;
     // Reads back the per-character styling as ranges.
     std::vector<ccl::doc::TextRun> ReadRuns(int length) noexcept;
 
@@ -481,6 +486,10 @@ private:
     // The text whose size is being stepped, so that a run of presses records
     // one undo step rather than one per press. Zero while nothing is.
     unsigned int resizingTextId_ = 0;
+    // The size the editor's line pitch is currently pinned to. Pinning it runs
+    // through a select-all, which throws away the format waiting for the next
+    // character typed, so it is only done when the size actually changes.
+    float pinnedLineSize_ = 0.0f;
 
     size_t movingTextIndex_ = static_cast<size_t>(-1);
     POINT textDragStart_{};
