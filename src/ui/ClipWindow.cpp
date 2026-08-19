@@ -1771,6 +1771,16 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
         const UINT editorDpi = ccl::dpi::ForWindow(hwnd_);
 
+        // What the whole box was just given. Every write costs the control a
+        // fresh layout -- measured at about 8.5ms each -- so a range that only
+        // repeats one of these is left alone. Most ranges say nothing new
+        // about most attributes, and a piece of text with no styling at all
+        // comes back as one range that repeats all of them.
+        const LONG baseHeight =
+            PixelsToTwips(editingOriginal_.fontSize * zoom, editorDpi);
+        const COLORREF baseColour = ToColorRef(tool_.Color());
+        const std::wstring& baseFace = settings_->textFontFamily;
+
         for (const ccl::doc::TextRun& run : restored) {
             const float runSize = run.fontSize > 0.0f
                                       ? run.fontSize
@@ -1778,6 +1788,23 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
             const std::wstring& face = run.fontFamily.empty()
                                            ? editingOriginal_.fontFamily
                                            : run.fontFamily;
+
+            const LONG runHeight = PixelsToTwips(runSize * zoom, editorDpi);
+            const COLORREF runColour = ToColorRef(run.color);
+            const bool sizeDiffers = runHeight != baseHeight;
+            const bool colourDiffers = runColour != baseColour;
+            const bool faceDiffers = face != baseFace;
+            const bool boldDiffers = run.bold != tool_.textBold;
+            const bool italicDiffers = run.italic != tool_.textItalic;
+            const bool underlineDiffers = run.underline != tool_.textUnderline;
+            const bool strikeDiffers =
+                run.strikethrough != tool_.textStrikethrough;
+
+            if (!sizeDiffers && !colourDiffers && !faceDiffers &&
+                !boldDiffers && !italicDiffers && !underlineDiffers &&
+                !strikeDiffers) {
+                continue;
+            }
 
             // Written through the Text Object Model, which does not move the
             // selection. Selecting each range in turn to format it made the
@@ -1791,20 +1818,32 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
                 range != nullptr) {
                 ITextFont* font = nullptr;
                 if (SUCCEEDED(range->GetFont(&font)) && font != nullptr) {
-                    // Sizes go in as points, the same way they come out.
-                    font->SetSize(TwipsToPoints(
-                        PixelsToTwips(runSize * zoom, editorDpi)));
-                    font->SetForeColor(
-                        static_cast<long>(ToColorRef(run.color)));
-                    font->SetBold(run.bold ? tomTrue : tomFalse);
-                    font->SetItalic(run.italic ? tomTrue : tomFalse);
-                    font->SetUnderline(run.underline ? tomSingle : tomNone);
-                    font->SetStrikeThrough(run.strikethrough ? tomTrue
-                                                             : tomFalse);
-                    BSTR name = ::SysAllocString(face.c_str());
-                    if (name != nullptr) {
-                        font->SetName(name);
-                        ::SysFreeString(name);
+                    if (sizeDiffers) {
+                        // Sizes go in as points, the same way they come out.
+                        font->SetSize(TwipsToPoints(runHeight));
+                    }
+                    if (colourDiffers) {
+                        font->SetForeColor(static_cast<long>(runColour));
+                    }
+                    if (boldDiffers) {
+                        font->SetBold(run.bold ? tomTrue : tomFalse);
+                    }
+                    if (italicDiffers) {
+                        font->SetItalic(run.italic ? tomTrue : tomFalse);
+                    }
+                    if (underlineDiffers) {
+                        font->SetUnderline(run.underline ? tomSingle : tomNone);
+                    }
+                    if (strikeDiffers) {
+                        font->SetStrikeThrough(run.strikethrough ? tomTrue
+                                                                 : tomFalse);
+                    }
+                    if (faceDiffers) {
+                        BSTR name = ::SysAllocString(face.c_str());
+                        if (name != nullptr) {
+                            font->SetName(name);
+                            ::SysFreeString(name);
+                        }
                     }
                     font->Release();
                 }
@@ -1825,8 +1864,17 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
             // Size and face belong here as much as the rest. Left out, a piece
             // of text with one word made bigger came back all one size, and
             // committing it again wrote that flattening into the picture.
-            format.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD |
-                            CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
+            //
+            // Only what this range says differently, for the same reason the
+            // path above skips writes: the effects travel together because
+            // they share one field.
+            format.dwMask = (colourDiffers ? CFM_COLOR : 0) |
+                            (sizeDiffers ? CFM_SIZE : 0) |
+                            (faceDiffers ? CFM_FACE : 0) |
+                            (boldDiffers ? CFM_BOLD : 0) |
+                            (italicDiffers ? CFM_ITALIC : 0) |
+                            (underlineDiffers ? CFM_UNDERLINE : 0) |
+                            (strikeDiffers ? CFM_STRIKEOUT : 0);
             format.crTextColor = ToColorRef(run.color);
             format.yHeight = PixelsToTwips(runSize * zoom, editorDpi);
             ::wcsncpy_s(format.szFaceName, face.c_str(), _TRUNCATE);
