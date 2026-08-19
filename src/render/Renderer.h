@@ -44,6 +44,11 @@ public:
     // Drops the cached pixels for an effect whose strength has changed.
     void InvalidateEffect(unsigned int id) noexcept;
 
+    // Drops the laid-out glyphs of a piece of text whose size or font has
+    // changed. Only needed for a change made in place: re-editing produces a
+    // new annotation with an id of its own, which has no cache entry yet.
+    void InvalidateText(unsigned int id) noexcept;
+
     // Where the time in a frame went, split so that rebuilding shapes on the
     // CPU can be told apart from the cost of putting pixels on the screen.
     // Written to the timing log when the window closes.

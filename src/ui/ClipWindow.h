@@ -220,6 +220,10 @@ private:
     void ApplyTextColor() noexcept;
     // Scales the font size of the selection, or of what is typed next.
     void StepTextSize(int steps) noexcept;
+    // Resizes the text the pointer is over, which is the one drawn with an
+    // outline round it. A run of steps counts as one thing done: the state
+    // before the first is what undo returns to.
+    void ResizeHoveredText(int steps) noexcept;
     void SetTextFont(const std::wstring& family) noexcept;
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
@@ -469,6 +473,9 @@ private:
     // enough is treated as a click and opens the text for editing instead.
     // Text under the pointer, outlined so it is clear what a click would edit.
     size_t hoveredTextIndex_ = static_cast<size_t>(-1);
+    // The text whose size is being stepped, so that a run of presses records
+    // one undo step rather than one per press. Zero while nothing is.
+    unsigned int resizingTextId_ = 0;
 
     size_t movingTextIndex_ = static_cast<size_t>(-1);
     POINT textDragStart_{};

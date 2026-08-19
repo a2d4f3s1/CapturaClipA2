@@ -86,6 +86,18 @@ float TwipsToPixels(LONG twips, UINT dpi) noexcept {
 constexpr float kMinFontSize = 6.0f;
 constexpr float kMaxFontSize = 400.0f;
 
+// One press of a size key. Proportional, so the same key feels the same at any
+// size, with half a pixel added so that the smallest sizes still move.
+float SteppedFontSize(float size, int steps) noexcept {
+    for (int i = 0; i < steps; ++i) {
+        size = std::min(kMaxFontSize, size * 1.15f + 0.5f);
+    }
+    for (int i = 0; i > steps; --i) {
+        size = std::max(kMinFontSize, (size - 0.5f) / 1.15f);
+    }
+    return size;
+}
+
 // Where a lasso stops gathering points and starts spacing them further apart
 // instead. Measured, not guessed: folding and outlining both grow with the
 // count, and at 1024 points an outline costs 0.42ms a frame against 9.1ms at
@@ -1754,12 +1766,7 @@ void ClipWindow::StepTextSize(int steps) noexcept {
         size = settings_ != nullptr ? settings_->textFontSize : 30.0f;
     }
 
-    for (int i = 0; i < steps; ++i) {
-        size = std::min(kMaxFontSize, size * 1.15f + 0.5f);
-    }
-    for (int i = 0; i > steps; --i) {
-        size = std::max(kMinFontSize, (size - 0.5f) / 1.15f);
-    }
+    size = SteppedFontSize(size, steps);
 
     CHARFORMAT2W format{};
     format.cbSize = sizeof(format);
@@ -1834,6 +1841,42 @@ void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
     ::SendMessageW(editor_, EM_SETCHARFORMAT,
                    wholeText ? SCF_ALL : SCF_SELECTION,
                    reinterpret_cast<LPARAM>(&format));
+}
+
+void ClipWindow::ResizeHoveredText(int steps) noexcept {
+    if (document_ == nullptr ||
+        hoveredTextIndex_ >= document_->Annotations().size()) {
+        return;
+    }
+
+    ccl::doc::Annotation& annotation =
+        document_->Annotations()[hoveredTextIndex_];
+    if (annotation.kind != ccl::doc::AnnotationKind::Text) {
+        return;
+    }
+
+    const float size = SteppedFontSize(annotation.text.fontSize, steps);
+    if (size == annotation.text.fontSize) {
+        return;
+    }
+
+    // Recorded once for a run of presses, the way an effect's strength is: what
+    // undo returns to is the size it had before the fiddling started.
+    if (resizingTextId_ != annotation.id) {
+        history_.Record(document_->Annotations(), ToolForHistory());
+        resizingTextId_ = annotation.id;
+    }
+
+    annotation.text.fontSize = size;
+    // A range carrying a size of its own would keep it, and only part of the
+    // text would move. Zero hands those ranges back to the size above.
+    for (ccl::doc::TextRun& run : annotation.text.runs) {
+        run.fontSize = 0.0f;
+    }
+
+    // The glyphs in the cache were laid out at the old size.
+    renderer_.InvalidateText(annotation.id);
+    Draw();
 }
 
 std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
@@ -2644,6 +2687,9 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         const size_t hovered = FindTextAt(ToImage(client));
         if (hovered != hoveredTextIndex_) {
             hoveredTextIndex_ = hovered;
+            // Pointing at something else ends the run of size steps, so the
+            // next one starts a fresh undo step.
+            resizingTextId_ = 0;
             UpdateCursor();
             Draw();
         }
@@ -2985,6 +3031,14 @@ void ClipWindow::OnKeyDown(WPARAM key) noexcept {
             // strength can be tuned while looking at it.
             if (adjustingEffectIndex_ != static_cast<size_t>(-1)) {
                 StepEffectStrength(steps);
+                return;
+            }
+
+            // Text under the pointer takes them too, for the same reason: what
+            // is being pointed at, and outlined to say so, is what they act on.
+            if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr &&
+                hoveredTextIndex_ != static_cast<size_t>(-1)) {
+                ResizeHoveredText(steps);
                 return;
             }
 
@@ -4197,6 +4251,7 @@ void ClipWindow::Undo() noexcept {
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
+    resizingTextId_ = 0;
     // The step may have put a different area back, and a step that carried
     // none leaves the one in hand alone. Either way the folded shape has to
     // be built again from what is there now.
@@ -4230,6 +4285,7 @@ void ClipWindow::Redo() noexcept {
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
+    resizingTextId_ = 0;
     RefreshSelection();
     if (reshaped) {
         // The area is not thrown away here: the step carried the one that
@@ -4266,6 +4322,7 @@ void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
+    resizingTextId_ = 0;
     ClearSelection();
     saved_ = false;
 
