@@ -15,6 +15,10 @@
 #include "util/Timing.h"
 #include "view/ViewState.h"
 
+// The Text Object Model view of a rich edit control. Declared here so the
+// header does not have to pull in <tom.h>.
+struct ITextDocument;
+
 namespace ccl::doc {
 class Document;
 }
@@ -241,6 +245,14 @@ private:
     ccl::doc::TextAnnotation EditorSnapshot() noexcept;
     // Reads back the per-character styling as ranges.
     std::vector<ccl::doc::TextRun> ReadRuns(int length) noexcept;
+    // The same, read through the Text Object Model, which leaves the selection
+    // where it is. False if the control would not answer, in which case the
+    // caller falls back to walking the selection.
+    bool ReadRunsByTom(int length,
+                       std::vector<ccl::doc::TextRun>& runs) noexcept;
+    // The original way: selects each character in turn and asks about it. Kept
+    // for when there is no Text Object Model to be had.
+    std::vector<ccl::doc::TextRun> ReadRunsBySelection(int length) noexcept;
 
     float WidthForPressure(float pressure) const noexcept;
     void BeginStroke(POINT client, float pressure) noexcept;
@@ -465,6 +477,9 @@ private:
 
     HWND editor_ = nullptr;
     HFONT editorFont_ = nullptr;
+    // Held for as long as the editor is open, so that reading the styling back
+    // costs one interface call rather than one per keystroke.
+    ITextDocument* editorDoc_ = nullptr;
     HBRUSH editorBackground_ = nullptr;
     // Where the text will sit, in image coordinates.
     float editorX_ = 0.0f;

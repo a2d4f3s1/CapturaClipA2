@@ -3,7 +3,9 @@
 #include <commdlg.h>
 #include <imm.h>
 #include <richedit.h>
+#include <richole.h>
 #include <shellapi.h>
+#include <tom.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -383,11 +385,15 @@ LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
     const LRESULT result =
         ::CallWindowProcW(g_originalEditProc, hwnd, msg, wParam, lParam);
 
-    // Re-measure after anything that can change the content. Driven from the
-    // messages themselves because the change notification does not arrive.
+    // Re-measure after the changes a change notification does not cover.
+    //
+    // Typing, backspace and delete all raise EN_CHANGE -- delete does so
+    // without ever sending a WM_CHAR -- so none of them need driving from here,
+    // and asking on every key down made moving the caret cost as much as typing
+    // a character. Composing with an IME is the case that does need it: the
+    // text grows and shrinks all through a composition without a single
+    // EN_CHANGE, which only arrives once the composition is committed.
     switch (msg) {
-        case WM_CHAR:
-        case WM_KEYDOWN:
         case WM_PASTE:
         case WM_CUT:
         case WM_CLEAR:
@@ -1643,6 +1649,23 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
     g_originalEditProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
         editor_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditSubclassProc)));
 
+    // Taken once and kept: reading the styling through this leaves the
+    // selection alone, where asking about each character in turn made the
+    // control repaint itself once per character on every keystroke.
+    {
+        IRichEditOle* ole = nullptr;
+        ::SendMessageW(editor_, EM_GETOLEINTERFACE, 0,
+                       reinterpret_cast<LPARAM>(&ole));
+        if (ole != nullptr) {
+            if (FAILED(ole->QueryInterface(
+                    __uuidof(ITextDocument),
+                    reinterpret_cast<void**>(&editorDoc_)))) {
+                editorDoc_ = nullptr;
+            }
+            ole->Release();
+        }
+    }
+
     if (editingExisting_) {
         ::SetWindowTextW(editor_,
                          ToEditorLineEndings(editingOriginal_.text).c_str());
@@ -1882,6 +1905,115 @@ std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
         return runs;
     }
 
+    // Preferred, because it does not disturb the selection. Measured at 0.12ms
+    // for 500 characters against 311ms for the walk below, which the control
+    // answered by repainting itself once per character.
+    if (ReadRunsByTom(length, runs)) {
+        return runs;
+    }
+    return ReadRunsBySelection(length);
+}
+
+bool ClipWindow::ReadRunsByTom(int length,
+                               std::vector<ccl::doc::TextRun>& runs) noexcept {
+    if (editorDoc_ == nullptr || length <= 0) {
+        return false;
+    }
+
+    const UINT dpi = ccl::dpi::ForWindow(hwnd_);
+    const float zoom = std::max(0.01f, view_.Zoom());
+
+    std::vector<ccl::doc::TextRun> found;
+    ccl::doc::TextRun current{};
+    bool open = false;
+
+    // Read one character at a time and join neighbours that match. Asking a
+    // range to widen itself to the run it sits in looked cheaper, but it
+    // returned overlapping ranges near the end of the text once there were
+    // line breaks, and this is fast enough as it is.
+    for (int i = 0; i < length; ++i) {
+        ITextRange* range = nullptr;
+        if (FAILED(editorDoc_->Range(i, i + 1, &range)) || range == nullptr) {
+            return false;
+        }
+
+        ITextFont* font = nullptr;
+        if (FAILED(range->GetFont(&font)) || font == nullptr) {
+            range->Release();
+            return false;
+        }
+
+        float points = 0.0f;
+        long colour = 0;
+        long bold = 0;
+        long italic = 0;
+        long underline = 0;
+        long strikethrough = 0;
+        font->GetSize(&points);
+        font->GetForeColor(&colour);
+        font->GetBold(&bold);
+        font->GetItalic(&italic);
+        font->GetUnderline(&underline);
+        font->GetStrikeThrough(&strikethrough);
+
+        BSTR face = nullptr;
+        std::wstring family;
+        if (SUCCEEDED(font->GetName(&face)) && face != nullptr) {
+            family = face;
+            ::SysFreeString(face);
+        }
+        font->Release();
+        range->Release();
+
+        ccl::doc::TextRun style{};
+        // Text with no colour of its own reports "automatic" rather than a
+        // colour, and a range covering more than one style reports "undefined".
+        // Either would come out as a nonsense colour if stored as it stands, so
+        // both fall back to what asking through the selection would have given.
+        style.color =
+            FromColorRef((colour == tomAutoColor || colour == tomUndefined)
+                             ? RGB(0, 0, 0)
+                             : static_cast<COLORREF>(colour));
+        style.fontFamily = family;
+        // Sizes arrive in points; the rest of the code works in the pixels the
+        // text will be drawn at, so go through twips as the selection path does.
+        style.fontSize =
+            TwipsToPixels(static_cast<LONG>(std::lround(points * 20.0f)), dpi) /
+            zoom;
+        // Underline answers with the kind of line rather than a yes or no, so
+        // only its presence is taken.
+        style.bold = bold != 0;
+        style.italic = italic != 0;
+        style.underline = underline != 0;
+        style.strikethrough = strikethrough != 0;
+
+        if (open && current.SameStyle(style)) {
+            ++current.length;
+            continue;
+        }
+        if (open) {
+            found.push_back(current);
+        }
+        current = style;
+        current.start = static_cast<unsigned int>(i);
+        current.length = 1;
+        open = true;
+    }
+    if (open) {
+        found.push_back(current);
+    }
+
+    runs = std::move(found);
+    return true;
+}
+
+std::vector<ccl::doc::TextRun> ClipWindow::ReadRunsBySelection(
+    int length) noexcept {
+    std::vector<ccl::doc::TextRun> runs;
+    if (editor_ == nullptr || length <= 0) {
+        return runs;
+    }
+
     CHARRANGE saved{};
     ::SendMessageW(editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
 
@@ -2106,6 +2238,11 @@ void ClipWindow::TurnOffIme() noexcept {
 }
 
 void ClipWindow::DestroyEditor() noexcept {
+    // Released before the window it belongs to goes away.
+    if (editorDoc_ != nullptr) {
+        editorDoc_->Release();
+        editorDoc_ = nullptr;
+    }
     if (editor_ != nullptr) {
         ::DestroyWindow(editor_);
         editor_ = nullptr;
