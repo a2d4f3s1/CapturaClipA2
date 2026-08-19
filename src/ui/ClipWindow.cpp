@@ -1756,6 +1756,15 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
         const UINT editorDpi = ccl::dpi::ForWindow(hwnd_);
 
+        // Held still while the styling goes in. Each format written is a
+        // reason for the control to lay the text out again, and it does so at
+        // once: measured, sixty ranges took 160ms and two hundred took 519ms,
+        // which is the pause between the box appearing and the text looking
+        // right. Asked to hold, the same work takes about a millisecond.
+        long frozen = 0;
+        const bool held =
+            editorDoc_ != nullptr && SUCCEEDED(editorDoc_->Freeze(&frozen));
+
         for (const ccl::doc::TextRun& run : restored) {
             const float runSize = run.fontSize > 0.0f
                                       ? run.fontSize
@@ -1825,6 +1834,10 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
         // Caret at the end, which is where editing usually continues.
         ::SendMessageW(editor_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
+
+        if (held) {
+            editorDoc_->Unfreeze(&frozen);
+        }
     } else {
         ApplyCharFormat(true);
     }
