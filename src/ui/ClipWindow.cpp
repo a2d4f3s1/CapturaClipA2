@@ -1136,7 +1136,7 @@ void ClipWindow::ApplyEffectToSelection(ccl::doc::EffectKind kind) noexcept {
         tool_.blurStrength = annotation.effect.strength;
     }
 
-    document_->Annotations().push_back(std::move(annotation));
+    document_->MutableAnnotations().push_back(std::move(annotation));
 
     // Stays adjustable so the strength can be dialled in against the result
     // rather than guessed at beforehand.
@@ -1255,7 +1255,7 @@ void ClipWindow::PaintSelection(float opacity, float width) noexcept {
         annotation.area.antialias = tool_.antialias;
         annotation.area.width = width;
 
-        document_->Annotations().push_back(std::move(annotation));
+        document_->MutableAnnotations().push_back(std::move(annotation));
     }
 
     // The size keys have nothing to adjust here, so whatever effect they were
@@ -1275,7 +1275,8 @@ void ClipWindow::StepEffectStrength(int steps) noexcept {
         return;
     }
 
-    auto& annotation = document_->Annotations()[adjustingEffectIndex_];
+    auto& annotation =
+        document_->MutableAnnotations()[adjustingEffectIndex_];
     if (annotation.kind != ccl::doc::AnnotationKind::Effect) {
         adjustingEffectIndex_ = static_cast<size_t>(-1);
         return;
@@ -1557,8 +1558,9 @@ void ClipWindow::EditTextAt(size_t index) noexcept {
     tool_.textShadow = editingOriginal_.shadow;
     tool_.textOutline = editingOriginal_.outline;
 
-    document_->Annotations().erase(document_->Annotations().begin() +
-                                   static_cast<std::ptrdiff_t>(index));
+    auto& annotations = document_->MutableAnnotations();
+    annotations.erase(annotations.begin() +
+                      static_cast<std::ptrdiff_t>(index));
     Draw();
 
     // The editor opens where the text is, not where the click landed.
@@ -1851,7 +1853,8 @@ void ClipWindow::PaintText(size_t index, const ccl::doc::Color& colour) noexcept
     if (document_ == nullptr || index >= document_->Annotations().size()) {
         return;
     }
-    ccl::doc::TextAnnotation& text = document_->Annotations()[index].text;
+    ccl::doc::TextAnnotation& text =
+        document_->MutableAnnotations()[index].text;
     text.color = colour;
     // Ranges hold a colour of their own with no way to say "the one above", so
     // they are painted too rather than left behind.
@@ -1867,7 +1870,7 @@ void ClipWindow::ResizeHoveredText(int steps) noexcept {
     }
 
     ccl::doc::Annotation& annotation =
-        document_->Annotations()[hoveredTextIndex_];
+        document_->MutableAnnotations()[hoveredTextIndex_];
     if (annotation.kind != ccl::doc::AnnotationKind::Text) {
         return;
     }
@@ -2346,7 +2349,7 @@ void ClipWindow::CommitText() noexcept {
     annotation.text.outline = tool_.textOutline;
     annotation.text.runs = std::move(runs);
 
-    document_->Annotations().push_back(std::move(annotation));
+    document_->MutableAnnotations().push_back(std::move(annotation));
     Draw();
 }
 
@@ -2426,7 +2429,25 @@ void ClipWindow::ContinueStroke(POINT client, float pressure) noexcept {
     Draw();
 }
 
-ccl::doc::Stroke* ClipWindow::RecentStroke() noexcept {
+const ccl::doc::Stroke* ClipWindow::RecentStroke() const noexcept {
+    if (drawing_) {
+        return &activeStroke_;
+    }
+    if (document_ == nullptr ||
+        recentStrokeIndex_ >= document_->Annotations().size()) {
+        return nullptr;
+    }
+    const ccl::doc::Annotation& annotation =
+        document_->Annotations()[recentStrokeIndex_];
+    return annotation.kind == ccl::doc::AnnotationKind::Stroke
+               ? &annotation.stroke
+               : nullptr;
+}
+
+// The same, for the callers that go on to change what they are given. Kept
+// apart from the reading one so that merely asking whether there is a head to
+// turn does not count as having changed the picture.
+ccl::doc::Stroke* ClipWindow::MutableRecentStroke() noexcept {
     if (drawing_) {
         return &activeStroke_;
     }
@@ -2435,7 +2456,7 @@ ccl::doc::Stroke* ClipWindow::RecentStroke() noexcept {
         return nullptr;
     }
     ccl::doc::Annotation& annotation =
-        document_->Annotations()[recentStrokeIndex_];
+        document_->MutableAnnotations()[recentStrokeIndex_];
     return annotation.kind == ccl::doc::AnnotationKind::Stroke
                ? &annotation.stroke
                : nullptr;
@@ -2446,12 +2467,12 @@ void ClipWindow::ForgetRecentStroke() noexcept {
 }
 
 bool ClipWindow::HasAdjustableArrow() const noexcept {
-    return const_cast<ClipWindow*>(this)->RecentStroke() != nullptr &&
-           !const_cast<ClipWindow*>(this)->RecentStroke()->arrows.empty();
+    const ccl::doc::Stroke* stroke = RecentStroke();
+    return stroke != nullptr && !stroke->arrows.empty();
 }
 
 void ClipWindow::InsertArrowhead() noexcept {
-    ccl::doc::Stroke* stroke = RecentStroke();
+    ccl::doc::Stroke* stroke = MutableRecentStroke();
     // Nothing to point along: the first point of a line has nothing behind it.
     if (stroke == nullptr || stroke->points.size() < 2) {
         return;
@@ -2471,7 +2492,7 @@ void ClipWindow::InsertArrowhead() noexcept {
     if (!drawing_ && document_ != nullptr) {
         history_.Record(document_->Annotations(), ToolForHistory());
         // Recorded before the change, so the pointer has to be taken again.
-        stroke = RecentStroke();
+        stroke = MutableRecentStroke();
         if (stroke == nullptr) {
             return;
         }
@@ -2488,7 +2509,7 @@ void ClipWindow::InsertArrowhead() noexcept {
 }
 
 void ClipWindow::TurnArrowhead(int steps) noexcept {
-    ccl::doc::Stroke* stroke = RecentStroke();
+    ccl::doc::Stroke* stroke = MutableRecentStroke();
     if (stroke == nullptr || stroke->arrows.empty() || settings_ == nullptr) {
         return;
     }
@@ -2516,7 +2537,7 @@ void ClipWindow::EndStroke() noexcept {
         annotation.id = ccl::doc::NextAnnotationId();
         annotation.kind = ccl::doc::AnnotationKind::Stroke;
         annotation.stroke = std::move(activeStroke_);
-        document_->Annotations().push_back(std::move(annotation));
+        document_->MutableAnnotations().push_back(std::move(annotation));
 
         // Kept in reach: a line is often finished before it is clear that it
         // wanted an arrow on the end, and having to draw it again for that
@@ -2576,9 +2597,13 @@ void ClipWindow::EraseAt(POINT client) noexcept {
         erasedAny_ = true;
     }
 
+    // Taken only now that there is something to take out. Asked for on every
+    // move of the eraser, this would count as a change whether or not anything
+    // was rubbed out.
+    auto& mutableAnnotations = document_->MutableAnnotations();
     for (size_t i = victims.size(); i > 0; --i) {
-        annotations.erase(annotations.begin() +
-                          static_cast<std::ptrdiff_t>(victims[i - 1]));
+        mutableAnnotations.erase(mutableAnnotations.begin() +
+                                 static_cast<std::ptrdiff_t>(victims[i - 1]));
     }
 }
 
@@ -2882,7 +2907,8 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         if (document_ != nullptr &&
             movingTextIndex_ < document_->Annotations().size()) {
             const float zoom = view_.Zoom();
-            auto& text = document_->Annotations()[movingTextIndex_].text;
+            auto& text =
+                document_->MutableAnnotations()[movingTextIndex_].text;
             text.x = textDragOriginX_ + static_cast<float>(dx) / zoom;
             text.y = textDragOriginY_ + static_cast<float>(dy) / zoom;
             Draw();
@@ -3648,7 +3674,7 @@ void ClipWindow::ChooseColorFromPicker() noexcept {
         // Put back what the preview painted over. Accepting then repaints it
         // for good, with the state before the drag recorded first, so the whole
         // business is one step to undo and a walk away leaves no step at all.
-        document_->Annotations()[target].text = before;
+        document_->MutableAnnotations()[target].text = before;
         if (chosen.has_value()) {
             history_.Record(document_->Annotations(), ToolForHistory());
             PaintText(target, *chosen);
@@ -4498,8 +4524,8 @@ void ClipWindow::Undo() noexcept {
     // whether the picture was among what came back.
     const bool reshaped = history_.NextUndoChangesImage();
     ccl::tool::Tool tool = ToolForHistory();
-    if (!history_.Undo(document_->Annotations(), document_->Image(), selection_,
-                       tool)) {
+    if (!history_.Undo(document_->MutableAnnotations(),
+                       document_->MutableImage(), selection_, tool)) {
         return;
     }
     RestoreTool(tool);
@@ -4532,8 +4558,8 @@ void ClipWindow::Redo() noexcept {
     }
     const bool reshaped = history_.NextRedoChangesImage();
     ccl::tool::Tool tool = ToolForHistory();
-    if (!history_.Redo(document_->Annotations(), document_->Image(), selection_,
-                       tool)) {
+    if (!history_.Redo(document_->MutableAnnotations(),
+                       document_->MutableImage(), selection_, tool)) {
         return;
     }
     RestoreTool(tool);
@@ -4572,8 +4598,8 @@ void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
     history_.RecordWithImage(document_->Annotations(), document_->Image(),
                              selection_, ToolForHistory());
 
-    document_->Image() = std::move(transformed);
-    document_->Annotations().clear();
+    document_->MutableImage() = std::move(transformed);
+    document_->MutableAnnotations().clear();
 
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);

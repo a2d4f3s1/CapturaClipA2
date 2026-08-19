@@ -272,7 +272,10 @@ private:
     void ForgetRecentStroke() noexcept;
     // The stroke R and the arrow keys act on, or null when there is none. The
     // line being drawn takes precedence over the one just finished.
-    ccl::doc::Stroke* RecentStroke() noexcept;
+    const ccl::doc::Stroke* RecentStroke() const noexcept;
+    // For callers that go on to change it: taking this counts as having changed
+    // the picture, so asking a question does not go through here.
+    ccl::doc::Stroke* MutableRecentStroke() noexcept;
     void EraseAt(POINT client) noexcept;
 
     // Pen input arrives as pointer messages, which carry pressure. Returns
