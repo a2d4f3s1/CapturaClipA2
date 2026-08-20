@@ -2056,9 +2056,11 @@ void ClipWindow::ToggleTextOutline() noexcept {
     }
 
     history_.Record(document_->Annotations(), ToolForHistory());
-    ccl::doc::TextAnnotation& text =
-        document_->MutableAnnotations()[target].text;
-    text.outline = !text.outline;
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[target];
+    annotation.text.outline = !annotation.text.outline;
+    // The glyphs are unchanged, so what was traced still stands; only the
+    // drawn pixels have to be made again.
+    renderer_.InvalidateTextPixels(annotation.id);
     Draw();
 }
 
@@ -2117,9 +2119,9 @@ void ClipWindow::ToggleTextShadow() noexcept {
     }
 
     history_.Record(document_->Annotations(), ToolForHistory());
-    ccl::doc::TextAnnotation& text =
-        document_->MutableAnnotations()[target].text;
-    text.shadow = !text.shadow;
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[target];
+    annotation.text.shadow = !annotation.text.shadow;
+    renderer_.InvalidateTextPixels(annotation.id);
     Draw();
 }
 
@@ -2127,14 +2129,16 @@ void ClipWindow::PaintText(size_t index, const ccl::doc::Color& colour) noexcept
     if (document_ == nullptr || index >= document_->Annotations().size()) {
         return;
     }
-    ccl::doc::TextAnnotation& text =
-        document_->MutableAnnotations()[index].text;
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[index];
+    ccl::doc::TextAnnotation& text = annotation.text;
     text.color = colour;
     // Ranges hold a colour of their own with no way to say "the one above", so
     // they are painted too rather than left behind.
     for (ccl::doc::TextRun& run : text.runs) {
         run.color = colour;
     }
+    // The glyphs are unchanged; only the pixels drawn from them.
+    renderer_.InvalidateTextPixels(annotation.id);
 }
 
 void ClipWindow::ResizeHoveredText(int steps) noexcept {

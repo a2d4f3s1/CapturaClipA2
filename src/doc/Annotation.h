@@ -140,6 +140,19 @@ struct TextAnnotation {
     bool shadow = true;
     bool outline = false;
     Color outlineColor{0.0f, 0.0f, 0.0f, 1.0f};
+
+    // Both are whole pixels at 100%, and have nothing to do with how large the
+    // text is: an edge that thickened with the font came out at two different
+    // weights depending on whether the size was changed from outside or from
+    // within the editor, which is what these replaced.
+    //
+    // The shadow is cast in one of eight directions, numbered clockwise from
+    // straight up. Eight means it falls under the text and cannot be seen,
+    // which is a real choice: it is how a shadow is turned off without giving
+    // up the length that was set.
+    float outlineWidth = 2.0f;
+    float shadowLength = 2.0f;
+    int shadowDirection = 3;  // down-right, where a shadow is usually expected
 };
 
 enum class EffectKind {

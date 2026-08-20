@@ -24,24 +24,21 @@ inline constexpr int kWindowBorder = 1;
 
 class D2DContext;
 
-// TEMPORARY (2026-08-20): comparing two ways of drawing the outline, so that
-// its thickness can be given in pixels. Off unless --outline=geometry is on the
-// command line. Measurement scaffolding -- not to be committed.
-//   g_outlineGeometry  stroke the glyph outline instead of offsetting the text
-//   g_outlineWidth     thickness in image pixels; 0 keeps the old size-relative
-//                      offset, so the two can be compared at the same look
-//   g_bakeText         put each piece of text on a small bitmap of its own,
-//                      once, and blit that every frame
-//   g_bodyGeometry     fill the text itself from the same shape, instead of
-//                      laying the glyphs out again
-inline bool g_outlineGeometry = false;
-inline bool g_bakeText = false;
-//   g_bakeSettled      while the zoom is still moving, stretch the bitmap
-//                      already held instead of drawing it again; redo it once
-//                      the zoom stops. Blurred only while the wheel turns.
-inline bool g_bakeSettled = false;
-inline bool g_bodyGeometry = false;
-inline float g_outlineWidth = 0.0f;
+// A piece of the shape a piece of text traces, and which run of that text it
+// belongs to. The run is kept rather than the colour: the shape outlives many
+// frames, and recolouring must not mean tracing the glyphs again.
+struct TextPart {
+    Microsoft::WRL::ComPtr<ID2D1Geometry> shape;
+    int run = -1;  // -1 where no run applies; the colour of the whole is used
+};
+
+// Everything a piece of text is drawn from. The parts are filled one at a time,
+// each in its own colour; the group is filled in one go for the shadow and
+// stroked in one go for the outline, neither of which is coloured per run.
+struct TextShape {
+    std::vector<TextPart> parts;
+    Microsoft::WRL::ComPtr<ID2D1GeometryGroup> group;
+};
 
 // Outline showing the size of the brush or eraser, drawn at the cursor.
 struct BrushCursor {
@@ -67,6 +64,12 @@ public:
     // changed. Only needed for a change made in place: re-editing produces a
     // new annotation with an id of its own, which has no cache entry yet.
     void InvalidateText(unsigned int id) noexcept;
+
+    // Drops the drawn pixels of a piece of text whose look changed without its
+    // shape changing -- a new colour, the shadow or the outline switched. The
+    // traced glyphs are kept: tracing them again for a colour would be paid for
+    // nothing.
+    void InvalidateTextPixels(unsigned int id) noexcept;
 
     // Drops everything worked out from what the annotations say -- laid-out
     // glyphs and processed effect pixels -- for use when a step is undone or
@@ -234,10 +237,11 @@ private:
     // as its id does.
     IDWriteTextLayout* TextLayout(const ccl::doc::TextAnnotation& text,
                                   unsigned int id) noexcept;
-    // TEMPORARY (2026-08-20): the shape the glyphs trace, for stroking the
-    // outline at a width of its own. Kept per id like the layout above.
-    ID2D1Geometry* TextOutline(const ccl::doc::TextAnnotation& text,
-                               unsigned int id) noexcept;
+    // The shape the glyphs trace, kept per id like the layout above. Every
+    // part of a piece of text -- shadow, outline, the text itself -- is drawn
+    // from this one shape.
+    const TextShape* TextShapeFor(const ccl::doc::TextAnnotation& text,
+                                  unsigned int id) noexcept;
     void DrawEffect(const ccl::doc::EffectAnnotation& effect,
                     unsigned int id) noexcept;
     // Takes a copy of what lies under each effect that has not got one yet:
@@ -296,21 +300,26 @@ private:
         geometryCache_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextLayout>>
         layoutCache_;
-    // TEMPORARY (2026-08-20): glyph outlines and the joins they are stroked
-    // with. Both come from the factory rather than the device, so they survive
-    // a device loss the way the layouts do.
-    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Geometry>>
-        outlineCache_;
+    // Traced glyphs, and the joins they are stroked with. Both come from the
+    // factory rather than the device, so they survive a device loss the way the
+    // layouts do.
+    //
+    // Rounded joins are not decoration: a sharp corner under a mitre throws a
+    // spike a long way past the letter it belongs to.
+    std::unordered_map<unsigned int, TextShape> shapeCache_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> outlineStyle_;
-    Microsoft::WRL::ComPtr<ID2D1Geometry> transientOutline_;
-    // TEMPORARY (2026-08-20): one piece of text, drawn once onto a bitmap of
-    // its own size, ready to be blitted. Kept at the zoom it was drawn for --
-    // blitting a smaller one up would show.
+    TextShape transientShape_;
+    // One piece of text, drawn once onto a bitmap of its own size, ready to be
+    // blitted. Kept at the zoom it was drawn for -- blitting a smaller one up
+    // would show.
+    //
+    // Where it goes is held relative to the text's own position, not as a place
+    // on the picture: a piece of text being dragged moves every frame, and
+    // absolute corners would leave the blit behind at the place it started.
     struct BakedText {
         Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
-        D2D1_RECT_F bounds{};   // image coordinates
+        D2D1_RECT_F offset{};   // image units, from the text's own position
         float scale = 0.0f;     // device pixels per image pixel
-        unsigned int stamp = 0;
     };
     std::unordered_map<unsigned int, BakedText> bakedCache_;
     bool baking_ = false;
