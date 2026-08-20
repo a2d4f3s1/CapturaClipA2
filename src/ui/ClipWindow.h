@@ -228,6 +228,21 @@ private:
     // outline round it. A run of steps counts as one thing done: the state
     // before the first is what undo returns to.
     void ResizeHoveredText(int steps) noexcept;
+
+    // A number given outright rather than stepped with the bracket keys. The
+    // box appears where the menu item was, on this window -- there is no
+    // dialog. Acts on the piece being pointed at, or, with nothing pointed at,
+    // on what the next piece will be given.
+    enum class NumberKind { FontSize, OutlineWidth };
+    void BeginNumberEntry(NumberKind kind) noexcept;
+    // Reads what has been typed and shows it on the text as it goes.
+    void UpdateNumberEntry() noexcept;
+    // `keep` false puts back what was there before the box opened.
+    void EndNumberEntry(bool keep) noexcept;
+    void ApplyNumber(float value) noexcept;
+    static LRESULT CALLBACK NumberProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                       LPARAM lParam, UINT_PTR id,
+                                       DWORD_PTR reference);
     // Paints the whole of one piece of text, ranges included. Whole rather
     // than partly: outside the editor there is no selection to aim at.
     void PaintText(size_t index, const ccl::doc::Color& colour) noexcept;
@@ -500,6 +515,13 @@ private:
     bool trackingLeave_ = false;
 
     HWND editor_ = nullptr;
+    // The little box a number is typed into, and what it is acting on. Null
+    // whenever one is not open.
+    HWND numberBox_ = nullptr;
+    NumberKind numberKind_ = NumberKind::FontSize;
+    size_t numberTarget_ = static_cast<size_t>(-1);
+    unsigned int numberId_ = 0;
+    float numberBefore_ = 0.0f;
     HFONT editorFont_ = nullptr;
     // Held for as long as the editor is open, so that reading the styling back
     // costs one interface call rather than one per keystroke.

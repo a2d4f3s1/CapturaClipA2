@@ -1,5 +1,6 @@
 #include "ui/ClipWindow.h"
 
+#include <commctrl.h>
 #include <commdlg.h>
 #include <imm.h>
 #include <richedit.h>
@@ -251,6 +252,8 @@ enum MenuId : UINT {
     kMenuEyedropper,
     kMenuColorPicker,
     kMenuExit,
+    kMenuTextSize,
+    kMenuOutlineWidth,
 
     // Range bases, kept together at the end. Putting one in the middle renumbers
     // everything after it into that range, which is how the colour entry ended
@@ -669,9 +672,23 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 Draw();
                 return 0;
             }
+            // A number being typed shows on the text as it goes, so that the
+            // value is judged against the real thing rather than guessed at.
+            if (HIWORD(wParam) == EN_CHANGE &&
+                reinterpret_cast<HWND>(lParam) == numberBox_) {
+                UpdateNumberEntry();
+                return 0;
+            }
             break;
 
         case WM_CTLCOLOREDIT: {
+            // The box a number is typed into is an ordinary box, filled and
+            // legible. Only the one that previews text belongs over the
+            // picture; leaving this one transparent showed the picture through
+            // it and left old digits behind, which cannot be typed into.
+            if (reinterpret_cast<HWND>(lParam) == numberBox_) {
+                break;
+            }
             // Drawn in the colour the text will end up, over the image rather
             // than over a filled box, so the editor previews the result
             // instead of covering it.
@@ -2178,6 +2195,206 @@ void ClipWindow::ResizeHoveredText(int steps) noexcept {
     // The glyphs in the cache were laid out at the old size.
     renderer_.InvalidateText(annotation.id);
     Draw();
+}
+
+// A number typed where the menu item was. Not a window of its own: a small box
+// on the capture window, the same way the text being typed is a box on it.
+//
+// What it changes is shown as it is typed, on the text itself at its real size.
+// Enter keeps it, Escape puts back what was there, and clicking away keeps it --
+// the same as finishing a piece of text.
+LRESULT CALLBACK ClipWindow::NumberProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                        LPARAM lParam, UINT_PTR,
+                                        DWORD_PTR reference) {
+    auto* self = reinterpret_cast<ClipWindow*>(reference);
+    switch (msg) {
+        case WM_KEYDOWN:
+            if (self != nullptr && wParam == VK_RETURN) {
+                self->EndNumberEntry(true);
+                return 0;
+            }
+            if (self != nullptr && wParam == VK_ESCAPE) {
+                self->EndNumberEntry(false);
+                return 0;
+            }
+            break;
+        // Without this the control beeps at Enter and Escape, which it treats
+        // as characters it has no use for.
+        case WM_CHAR:
+            if (wParam == VK_RETURN || wParam == VK_ESCAPE) {
+                return 0;
+            }
+            break;
+        case WM_KILLFOCUS:
+            if (self != nullptr) {
+                self->EndNumberEntry(true);
+            }
+            break;
+        default:
+            break;
+    }
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+void ClipWindow::BeginNumberEntry(NumberKind kind) noexcept {
+    if (document_ == nullptr || hwnd_ == nullptr) {
+        return;
+    }
+    EndNumberEntry(true);
+
+    numberKind_ = kind;
+    numberTarget_ = HoveredTextTarget();
+    numberId_ = 0;
+
+    // Pointing at a piece of text changes that piece. With nothing pointed at,
+    // it is what the next piece will be given.
+    float value = 0.0f;
+    if (numberTarget_ != static_cast<size_t>(-1)) {
+        const ccl::doc::TextAnnotation& text =
+            document_->Annotations()[numberTarget_].text;
+        numberId_ = document_->Annotations()[numberTarget_].id;
+        value = kind == NumberKind::FontSize ? text.fontSize : text.outlineWidth;
+    } else {
+        value = kind == NumberKind::FontSize ? settings_->textFontSize
+                                             : tool_.textOutlineWidth;
+    }
+    numberBefore_ = value;
+
+    // Where the menu item was: the pointer is still on it, since clicking it is
+    // what got here.
+    POINT where{};
+    ::GetCursorPos(&where);
+    ::ScreenToClient(hwnd_, &where);
+
+    RECT client{};
+    ::GetClientRect(hwnd_, &client);
+    const UINT dpi = ccl::dpi::ForWindow(hwnd_);
+    const int width = ccl::dpi::Scale(64, dpi);
+    const int height = ccl::dpi::Scale(22, dpi);
+    const int x = std::clamp(static_cast<int>(where.x), 0,
+                             (std::max)(0, static_cast<int>(client.right) - width));
+    const int y = std::clamp(static_cast<int>(where.y), 0,
+                             (std::max)(0, static_cast<int>(client.bottom) - height));
+
+    const HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        ::GetWindowLongPtrW(hwnd_, GWLP_HINSTANCE));
+    numberBox_ = ::CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL, x, y,
+        width, height, hwnd_, nullptr, instance, nullptr);
+    if (numberBox_ == nullptr) {
+        return;
+    }
+    ::SendMessageW(numberBox_, WM_SETFONT,
+                   reinterpret_cast<WPARAM>(::GetStockObject(DEFAULT_GUI_FONT)),
+                   TRUE);
+    ::SetWindowSubclass(numberBox_, NumberProc, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
+
+    wchar_t text[16];
+    ::swprintf_s(text, L"%d", static_cast<int>(value + 0.5f));
+    ::SetWindowTextW(numberBox_, text);
+    // Everything selected, so typing replaces rather than appends -- the value
+    // is being chosen, not edited a digit at a time.
+    ::SendMessageW(numberBox_, EM_SETSEL, 0, -1);
+    ::SetFocus(numberBox_);
+}
+
+void ClipWindow::ApplyNumber(float value) noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+
+    if (numberTarget_ == static_cast<size_t>(-1)) {
+        if (numberKind_ == NumberKind::FontSize) {
+            settings_->textFontSize = value;
+        } else {
+            tool_.textOutlineWidth = value;
+        }
+        return;
+    }
+    if (numberTarget_ >= document_->Annotations().size()) {
+        return;
+    }
+
+    ccl::doc::TextAnnotation& text =
+        document_->MutableAnnotations()[numberTarget_].text;
+    if (numberKind_ == NumberKind::FontSize) {
+        // Ranges carrying a size of their own move in proportion, the way the
+        // bracket keys move them, so a word made bigger stays bigger.
+        if (text.fontSize > 0.0f && value != text.fontSize) {
+            const float ratio = value / text.fontSize;
+            for (ccl::doc::TextRun& run : text.runs) {
+                if (run.fontSize > 0.0f) {
+                    run.fontSize *= ratio;
+                }
+            }
+        }
+        text.fontSize = value;
+        // A different size means different glyphs, so what was traced for this
+        // piece is no longer what is being asked for.
+        renderer_.InvalidateText(numberId_);
+    } else {
+        text.outlineWidth = value;
+        // The glyphs are the same; only the pixels drawn from them differ.
+        renderer_.InvalidateTextPixels(numberId_);
+    }
+    Draw();
+}
+
+void ClipWindow::UpdateNumberEntry() noexcept {
+    if (numberBox_ == nullptr) {
+        return;
+    }
+    wchar_t text[16]{};
+    ::GetWindowTextW(numberBox_, text, ARRAYSIZE(text));
+    wchar_t* end = nullptr;
+    const long typed = ::wcstol(text, &end, 10);
+    if (end == text) {
+        return;
+    }
+    // The same bounds the settings file is held to, so a value typed here and
+    // one edited there cannot disagree about what is allowed.
+    const float value =
+        numberKind_ == NumberKind::FontSize
+            ? std::clamp(static_cast<float>(typed), 4.0f, 400.0f)
+            : std::clamp(static_cast<float>(typed), 1.0f, 20.0f);
+    ApplyNumber(value);
+}
+
+void ClipWindow::EndNumberEntry(bool keep) noexcept {
+    if (numberBox_ == nullptr) {
+        return;
+    }
+
+    const HWND box = numberBox_;
+    // Cleared first: taking the box down moves the focus, which comes back
+    // through here.
+    numberBox_ = nullptr;
+    ::RemoveWindowSubclass(box, NumberProc, 1);
+    ::DestroyWindow(box);
+
+    if (!keep) {
+        ApplyNumber(numberBefore_);
+        ::SetFocus(hwnd_);
+        return;
+    }
+
+    // Put back, record, then apply again. A step recorded while the new value
+    // was already showing would return to a size the text never really had.
+    if (numberTarget_ != static_cast<size_t>(-1) && document_ != nullptr &&
+        numberTarget_ < document_->Annotations().size()) {
+        const float chosen =
+            numberKind_ == NumberKind::FontSize
+                ? document_->Annotations()[numberTarget_].text.fontSize
+                : document_->Annotations()[numberTarget_].text.outlineWidth;
+        if (chosen != numberBefore_) {
+            ApplyNumber(numberBefore_);
+            history_.Record(document_->Annotations(), ToolForHistory());
+            ApplyNumber(chosen);
+        }
+    }
+    ::SetFocus(hwnd_);
 }
 
 std::vector<ccl::doc::TextRun> ClipWindow::ReadRuns(int length) noexcept {
@@ -4260,6 +4477,7 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     // for them finds them, greyed, where they have always been.
     const UINT locked = MF_STRING | MF_GRAYED;
     ::AppendMenuW(menu, locked, kMenuTextOutline, L"縁取り");
+    ::AppendMenuW(menu, locked, kMenuOutlineWidth, L"縁の太さ...");
     ::AppendMenuW(menu, locked, kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, plain, kMenuCommitText, L"確定\tEsc");
@@ -4405,6 +4623,12 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     // a key of its own, and is not repeated here.
     ::AppendMenuW(textStyle, MF_POPUP,
                   reinterpret_cast<UINT_PTR>(BuildFontMenu()), L"フォント");
+    // Outright, rather than by stepping with the bracket keys. Greyed while the
+    // box is open: what is being typed is sized by the box, and the piece this
+    // would act on is the one being pointed at.
+    ::AppendMenuW(textStyle,
+                  MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
+                  kMenuTextSize, L"大きさ...");
     ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
 
     // Pointing at a piece of text makes every one of these read that piece.
@@ -4443,6 +4667,11 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     const UINT shadowFlags =
         (hasShadow ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
     ::AppendMenuW(textStyle, outlineFlags, kMenuTextOutline, L"縁取り");
+    // Under the switch it belongs to, rather than beside the size: it is the
+    // thickness of that edge, not another size of the text.
+    ::AppendMenuW(textStyle,
+                  MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
+                  kMenuOutlineWidth, L"縁の太さ...");
     ::AppendMenuW(textStyle, shadowFlags, kMenuTextShadow, L"影");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
                   L"文字\tCtrl+B I U");
@@ -4754,6 +4983,12 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuColorPicker:
             ChooseColorFromPicker();
+            return;
+        case kMenuTextSize:
+            BeginNumberEntry(NumberKind::FontSize);
+            return;
+        case kMenuOutlineWidth:
+            BeginNumberEntry(NumberKind::OutlineWidth);
             return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
