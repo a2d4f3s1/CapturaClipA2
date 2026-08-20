@@ -147,9 +147,9 @@ struct TextAnnotation {
     // within the editor, which is what these replaced.
     //
     // The shadow is cast in one of eight directions, numbered clockwise from
-    // straight up. Eight means it falls under the text and cannot be seen,
-    // which is a real choice: it is how a shadow is turned off without giving
-    // up the length that was set.
+    // straight up. A length of zero is a real choice: it puts the shadow under
+    // the text where none of it shows, which sets one aside without losing the
+    // direction it was cast in.
     float outlineWidth = 2.0f;
     float shadowLength = 2.0f;
     int shadowDirection = 3;  // down-right, where a shadow is usually expected

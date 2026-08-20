@@ -1,5 +1,6 @@
 #include "app/Settings.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -186,6 +187,13 @@ void Settings::Load() noexcept {
     textFontSize = ReadFloat(L"Text", L"FontSize", textFontSize, path_);
     textShadow = ReadBool(L"Text", L"Shadow", textShadow, path_);
     textOutline = ReadBool(L"Text", L"Outline", textOutline, path_);
+    textOutlineWidth =
+        ReadFloat(L"Text", L"OutlineWidth", textOutlineWidth, path_);
+    textShadowLength =
+        ReadFloat(L"Text", L"ShadowLength", textShadowLength, path_);
+    textShadowDirection = static_cast<int>(
+        ReadFloat(L"Text", L"ShadowDirection",
+                  static_cast<float>(textShadowDirection), path_));
 
     usePenPressure = ReadBool(L"Drawing", L"UsePenPressure", usePenPressure, path_);
     pressureMinScale =
@@ -295,6 +303,20 @@ void Settings::Clamp() noexcept {
     if (textFontSize < 4.0f) textFontSize = 4.0f;
     if (textFontSize > 400.0f) textFontSize = 400.0f;
     if (textFontFamily.empty()) textFontFamily = L"Meiryo";
+    // Whole pixels, and at least one: an edge of nothing is an edge turned off,
+    // which is what the switch is for.
+    textOutlineWidth = std::roundf(textOutlineWidth);
+    if (textOutlineWidth < 1.0f) textOutlineWidth = 1.0f;
+    if (textOutlineWidth > 20.0f) textOutlineWidth = 20.0f;
+    // Zero is a real length: it puts the shadow under the text, where nothing
+    // of it shows. That is how a shadow is set aside without losing the
+    // direction it was cast in.
+    textShadowLength = std::roundf(textShadowLength);
+    if (textShadowLength < 0.0f) textShadowLength = 0.0f;
+    if (textShadowLength > 20.0f) textShadowLength = 20.0f;
+    if (textShadowDirection < 0 || textShadowDirection > 7) {
+        textShadowDirection = 3;
+    }
     // A capture that waits minutes before grabbing the screen is a hang, not a
     // setting.
     if (preparationMs > 10000) preparationMs = 10000;
@@ -339,6 +361,13 @@ void Settings::Save() const noexcept {
                L"; screenshot. Both can be on at once.\n"
                L"Shadow=%d\n"
                L"Outline=%d\n"
+               L"; Thickness of the outline and length of the shadow, in whole\n"
+               L"; pixels. Neither follows the size of the text.\n"
+               L"OutlineWidth=%g\n"
+               L"ShadowLength=%g\n"
+               L"; Which way the shadow falls: 0 is straight up, then clockwise\n"
+               L"; to 7. A length of 0 hides it under the text.\n"
+               L"ShadowDirection=%d\n"
                L"\n"
                L"[Drawing]\n"
                L"; Vary stroke width with pen pressure. Needs a pressure-\n"
@@ -460,6 +489,7 @@ void Settings::Save() const noexcept {
                L"%s",
                preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
+               textOutlineWidth, textShadowLength, textShadowDirection,
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
                ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
                arrowScale, arrowAspect, arrowRounding, arrowTurnDegrees,

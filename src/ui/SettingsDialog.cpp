@@ -210,6 +210,9 @@ enum ControlId : UINT {
     kIdFontSize,
     kIdTextOutline,
     kIdTextShadow,
+    kIdOutlineWidth,
+    kIdShadowLength,
+    kIdShadowDirection,
 
     kIdFormat,
     kIdJpegQuality,
@@ -598,10 +601,23 @@ void BuildText(Dialog& dialog) noexcept {
     AddRow(dialog, L"大きさ (px)", L"EDIT", ES_AUTOHSCROLL | WS_BORDER,
            kIdFontSize, kNarrowField);
     AddCheck(dialog, L"縁取りをつける", kIdTextOutline);
+    AddRow(dialog, L"縁の太さ (px)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdOutlineWidth,
+           kNarrowField);
     AddCheck(dialog, L"影をつける", kIdTextShadow);
+    AddRow(dialog, L"影の長さ (px)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdShadowLength,
+           kNarrowField);
+    const HWND way =
+        AddRow(dialog, L"影の向き", L"COMBOBOX", CBS_DROPDOWNLIST | WS_VSCROLL,
+               kIdShadowDirection, kFieldWidth, 10);
+    for (const wchar_t* name :
+         {L"上", L"右上", L"右", L"右下", L"下", L"左下", L"左", L"左上"}) {
+        ComboBox_AddString(way, name);
+    }
     AddNote(dialog,
-            L"どちらもスクリーンショットの上で読めるようにするためのもので、"
-            L"両方いっしょに使えます。",
+            L"縁も影も、文字の大きさとは無関係の太さ・長さです。"
+            L"影の長さを 0 にすると字の真下に入り、見えなくなります。",
             false);
     EndPage(dialog);
 }
@@ -1113,6 +1129,10 @@ void Populate(Dialog& dialog) noexcept {
                     values.textOutline ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(dialog.Field(kIdTextShadow),
                     values.textShadow ? BST_CHECKED : BST_UNCHECKED);
+    SetNumber(dialog.Field(kIdOutlineWidth), values.textOutlineWidth);
+    SetNumber(dialog.Field(kIdShadowLength), values.textShadowLength);
+    ComboBox_SetCurSel(dialog.Field(kIdShadowDirection),
+                       values.textShadowDirection);
 
     ComboBox_SetCurSel(dialog.Field(kIdFormat),
                        static_cast<int>(values.defaultFormat));
@@ -1194,6 +1214,16 @@ void Collect(Dialog& dialog) noexcept {
         Button_GetCheck(dialog.Field(kIdTextOutline)) == BST_CHECKED;
     values.textShadow =
         Button_GetCheck(dialog.Field(kIdTextShadow)) == BST_CHECKED;
+    values.textOutlineWidth =
+        ReadFloat(dialog.Field(kIdOutlineWidth), values.textOutlineWidth);
+    values.textShadowLength =
+        ReadFloat(dialog.Field(kIdShadowLength), values.textShadowLength);
+    {
+        const int way = ComboBox_GetCurSel(dialog.Field(kIdShadowDirection));
+        if (way != CB_ERR) {
+            values.textShadowDirection = way;
+        }
+    }
 
     switch (ComboBox_GetCurSel(dialog.Field(kIdFormat))) {
         case 1: values.defaultFormat = ccl::app::ImageFormat::Jpeg; break;

@@ -1724,15 +1724,14 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
     // Screenshots are busy backgrounds, so the shadow and the outline are there
     // to keep text readable rather than to decorate it.
     if (text.shadow && text.shadowLength > 0.0f) {
-        // Eight ways round, clockwise from straight up, and a ninth that puts
-        // the shadow under the text where it cannot be seen -- which is how a
-        // shadow is turned off without giving up the length that was set.
-        static constexpr float kAcross[] = {0.0f,     0.7071f, 1.0f,
-                                            0.7071f,  0.0f,    -0.7071f,
-                                            -1.0f,    -0.7071f, 0.0f};
-        static constexpr float kDown[] = {-1.0f,   -0.7071f, 0.0f,
-                                          0.7071f, 1.0f,     0.7071f,
-                                          0.0f,    -0.7071f, 0.0f};
+        // Eight ways round, clockwise from straight up. A length of zero needs
+        // no direction of its own: it puts the shadow under the text, where
+        // none of it shows -- which is how one is set aside without losing the
+        // direction it was cast in.
+        static constexpr float kAcross[] = {0.0f,   0.7071f,  1.0f,  0.7071f,
+                                            0.0f,   -0.7071f, -1.0f, -0.7071f};
+        static constexpr float kDown[] = {-1.0f,   -0.7071f, 0.0f,  0.7071f,
+                                          1.0f,    0.7071f,  0.0f,  -0.7071f};
         const int way =
             text.shadowDirection >= 0 &&
                     text.shadowDirection < static_cast<int>(ARRAYSIZE(kAcross))

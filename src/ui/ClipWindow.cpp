@@ -2654,6 +2654,9 @@ void ClipWindow::CommitText() noexcept {
     if (!wasEditing) {
         annotation.text.shadow = tool_.textShadow;
         annotation.text.outline = tool_.textOutline;
+        annotation.text.outlineWidth = tool_.textOutlineWidth;
+        annotation.text.shadowLength = tool_.textShadowLength;
+        annotation.text.shadowDirection = tool_.textShadowDirection;
     }
     annotation.text.runs = std::move(runs);
 
@@ -5114,14 +5117,22 @@ void ClipWindow::OpenSettings() noexcept {
     }
 
     // Applied where it costs nothing to do so. What is left -- the capture
-    // settings, and the text defaults, which only apply to text placed from
-    // here on -- takes effect the next time it is used.
+    // settings -- takes effect the next time it is used.
     renderer_.SetSmoothScaling(settings_->smoothScaling);
     renderer_.SetArrowShape(settings_->arrowScale, settings_->arrowAspect,
                             settings_->arrowRounding);
     view_.SetZoomStepPercent(settings_->zoomStepPercent);
     tool_.usePressure = settings_->usePenPressure;
     tool_.quickColors = settings_->quickColors;
+    // The text defaults too. They were seeded when the window opened and left
+    // alone after, so changing them here did nothing until the next run -- the
+    // settings appeared to be ignored. Whatever was switched from the menu
+    // during this session gives way to what has just been chosen here.
+    tool_.textShadow = settings_->textShadow;
+    tool_.textOutline = settings_->textOutline;
+    tool_.textOutlineWidth = settings_->textOutlineWidth;
+    tool_.textShadowLength = settings_->textShadowLength;
+    tool_.textShadowDirection = settings_->textShadowDirection;
 
     UpdateTitle();
     Draw();
@@ -5380,6 +5391,9 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     tool_.usePressure = settings.usePenPressure;
     tool_.textShadow = settings.textShadow;
     tool_.textOutline = settings.textOutline;
+    tool_.textOutlineWidth = settings.textOutlineWidth;
+    tool_.textShadowLength = settings.textShadowLength;
+    tool_.textShadowDirection = settings.textShadowDirection;
     tool_.SeedDefaults(settings.penColor, settings.penWidth,
                        settings.eraserWidth, settings.quickColors);
     ccl::timing::Stopwatch watch;

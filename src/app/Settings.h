@@ -65,6 +65,15 @@ public:
     // shift the text's apparent position the way a shadow does.
     bool textShadow = false;
     bool textOutline = true;
+    // Whole pixels at 100%, independent of the size of the text: an edge that
+    // grew with the font came out at two different weights depending on where
+    // the size had been changed from.
+    //
+    // The shadow falls one of eight ways round, clockwise from straight up,
+    // with a ninth that puts it under the text where it cannot be seen.
+    float textOutlineWidth = 2.0f;
+    float textShadowLength = 2.0f;
+    int textShadowDirection = 3;
 
     // Drawing
     bool usePenPressure = true;

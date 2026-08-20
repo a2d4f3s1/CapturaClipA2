@@ -41,6 +41,12 @@ public:
     // settings file and toggleable per piece of text.
     bool textShadow = false;
     bool textOutline = true;
+    // Whole pixels at 100%, and nothing to do with how large the text is. The
+    // shadow falls one of eight ways round; a length of zero puts it under the
+    // text, where none of it shows.
+    float textOutlineWidth = 2.0f;
+    float textShadowLength = 2.0f;
+    int textShadowDirection = 3;  // down-right
 
     // Strength last used for each obscuring effect, so the next one starts
     // where the last was left. Negative means "not chosen yet", in which case
