@@ -13,6 +13,7 @@
 #include "io/ImageCodec.h"
 #include "overlay/SelectionOverlay.h"
 #include "render/D2DContext.h"
+#include "render/Renderer.h"  // TEMPORARY (2026-08-20): outline method switch
 #include "ui/ClipWindow.h"
 #include "util/Timing.h"
 
@@ -153,6 +154,30 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
     const LONGLONG launchStart = ccl::timing::Now();
     if (HasFlag(::GetCommandLineW(), L"--timing")) {
         ccl::timing::g_enabled = true;
+    }
+    // TEMPORARY (2026-08-20): comparing two ways of drawing the text outline.
+    // --outline=geometry strokes the glyph shape, --outline-width=<px> fixes
+    // the thickness so the two can be seen side by side. Both go once the
+    // method is settled.
+    if (HasFlag(::GetCommandLineW(), L"--outline=geometry")) {
+        ccl::render::g_outlineGeometry = true;
+    }
+    if (HasFlag(::GetCommandLineW(), L"--bake")) {
+        ccl::render::g_bakeText = true;
+    }
+    if (HasFlag(::GetCommandLineW(), L"--bake-settled")) {
+        ccl::render::g_bakeSettled = true;
+    }
+    if (HasFlag(::GetCommandLineW(), L"--body=geometry")) {
+        ccl::render::g_bodyGeometry = true;
+    }
+    {
+        constexpr wchar_t kSwitch[] = L"--outline-width=";
+        const wchar_t* found = ::wcsstr(::GetCommandLineW(), kSwitch);
+        if (found != nullptr) {
+            ccl::render::g_outlineWidth = static_cast<float>(
+                ::wcstod(found + ARRAYSIZE(kSwitch) - 1, nullptr));
+        }
     }
     const ccl::timing::ScopedFlush flushLogOnExit;
     ccl::timing::Stopwatch watch;

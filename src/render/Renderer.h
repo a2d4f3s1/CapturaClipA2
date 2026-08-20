@@ -24,6 +24,25 @@ inline constexpr int kWindowBorder = 1;
 
 class D2DContext;
 
+// TEMPORARY (2026-08-20): comparing two ways of drawing the outline, so that
+// its thickness can be given in pixels. Off unless --outline=geometry is on the
+// command line. Measurement scaffolding -- not to be committed.
+//   g_outlineGeometry  stroke the glyph outline instead of offsetting the text
+//   g_outlineWidth     thickness in image pixels; 0 keeps the old size-relative
+//                      offset, so the two can be compared at the same look
+//   g_bakeText         put each piece of text on a small bitmap of its own,
+//                      once, and blit that every frame
+//   g_bodyGeometry     fill the text itself from the same shape, instead of
+//                      laying the glyphs out again
+inline bool g_outlineGeometry = false;
+inline bool g_bakeText = false;
+//   g_bakeSettled      while the zoom is still moving, stretch the bitmap
+//                      already held instead of drawing it again; redo it once
+//                      the zoom stops. Blurred only while the wheel turns.
+inline bool g_bakeSettled = false;
+inline bool g_bodyGeometry = false;
+inline float g_outlineWidth = 0.0f;
+
 // Outline showing the size of the brush or eraser, drawn at the cursor.
 struct BrushCursor {
     D2D1_POINT_2F position{};  // image coordinates
@@ -215,6 +234,10 @@ private:
     // as its id does.
     IDWriteTextLayout* TextLayout(const ccl::doc::TextAnnotation& text,
                                   unsigned int id) noexcept;
+    // TEMPORARY (2026-08-20): the shape the glyphs trace, for stroking the
+    // outline at a width of its own. Kept per id like the layout above.
+    ID2D1Geometry* TextOutline(const ccl::doc::TextAnnotation& text,
+                               unsigned int id) noexcept;
     void DrawEffect(const ccl::doc::EffectAnnotation& effect,
                     unsigned int id) noexcept;
     // Takes a copy of what lies under each effect that has not got one yet:
@@ -273,6 +296,31 @@ private:
         geometryCache_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextLayout>>
         layoutCache_;
+    // TEMPORARY (2026-08-20): glyph outlines and the joins they are stroked
+    // with. Both come from the factory rather than the device, so they survive
+    // a device loss the way the layouts do.
+    std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1Geometry>>
+        outlineCache_;
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> outlineStyle_;
+    Microsoft::WRL::ComPtr<ID2D1Geometry> transientOutline_;
+    // TEMPORARY (2026-08-20): one piece of text, drawn once onto a bitmap of
+    // its own size, ready to be blitted. Kept at the zoom it was drawn for --
+    // blitting a smaller one up would show.
+    struct BakedText {
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+        D2D1_RECT_F bounds{};   // image coordinates
+        float scale = 0.0f;     // device pixels per image pixel
+        unsigned int stamp = 0;
+    };
+    std::unordered_map<unsigned int, BakedText> bakedCache_;
+    bool baking_ = false;
+    // The zoom the last frame ran at. Two frames at the same zoom mean the
+    // wheel has stopped.
+    float lastZoom_ = -1.0f;
+    // Prepares a bitmap for every piece of text, at the zoom about to be used.
+    // Has to run before the frame opens: a target of its own cannot be drawn
+    // into once BeginDraw has been called on this one.
+    void BakeTexts(float zoom) noexcept;
     // The stroke still being drawn changes shape with every mouse message, so
     // its path is rebuilt each frame. Held here only so it outlives the call
     // that draws with it.
@@ -316,6 +364,11 @@ private:
     // took", which is the distinction that says whether caching would help.
     ccl::timing::FrameStats pictureStats_;
     ccl::timing::FrameStats annotationStats_;
+    // TEMPORARY (2026-08-20): the scene is filled before the frame opens, so
+    // none of the intervals below ever covered it. Rebuilding it redraws the
+    // picture and every annotation, and happens whenever the document changes.
+    ccl::timing::FrameStats sceneStats_;
+    ccl::timing::FrameStats sceneAnnotationStats_;
     // Carrying out the queued drawing, and putting the finished frame on the
     // screen. Split because the two want opposite answers: less to draw, or a
     // different way of handing it over.

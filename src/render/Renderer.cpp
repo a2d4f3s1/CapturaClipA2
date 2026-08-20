@@ -52,16 +52,23 @@ void Renderer::InvalidateEffect(unsigned int id) noexcept {
 
 void Renderer::InvalidateText(unsigned int id) noexcept {
     layoutCache_.erase(id);
+    outlineCache_.erase(id);  // TEMPORARY (2026-08-20)
+    bakedCache_.erase(id);    // TEMPORARY (2026-08-20)
 }
 
 void Renderer::InvalidateResults() noexcept {
     layoutCache_.clear();
+    outlineCache_.clear();  // TEMPORARY (2026-08-20)
+    bakedCache_.clear();    // TEMPORARY (2026-08-20)
     effectCache_.clear();
 }
 
 void Renderer::ReportStats() const noexcept {
     ccl::timing::ReportFrames(L"  picture", pictureStats_);
     ccl::timing::ReportFrames(L"  annotations", annotationStats_);
+    // TEMPORARY (2026-08-20)
+    ccl::timing::ReportFrames(L"  scene rebuild", sceneStats_);
+    ccl::timing::ReportFrames(L"  scene annotations", sceneAnnotationStats_);
     ccl::timing::ReportFrames(L"  raster", rasterStats_);
     ccl::timing::ReportFrames(L"  present", presentStats_);
 }
@@ -119,6 +126,10 @@ bool Renderer::EnsureScene(const ccl::view::ViewState& view) noexcept {
         return false;
     }
 
+    // TEMPORARY (2026-08-20): what a rebuild costs, and how much of it is the
+    // annotations rather than the picture.
+    const LONGLONG sceneStart = ccl::timing::Mark();
+
     // The same transform the frame is about to use, so that what is baked lines
     // up exactly with what gets drawn on top of it.
     const auto inset = static_cast<float>(border_);
@@ -147,6 +158,7 @@ bool Renderer::EnsureScene(const ccl::view::ViewState& view) noexcept {
             1.0f, interpolation);
     }
 
+    const LONGLONG sceneAnnotationStart = ccl::timing::Mark();
     for (const auto& annotation : document_->Annotations()) {
         switch (annotation.kind) {
             case ccl::doc::AnnotationKind::Stroke:
@@ -163,10 +175,12 @@ bool Renderer::EnsureScene(const ccl::view::ViewState& view) noexcept {
                 break;
         }
     }
+    ccl::timing::AddSince(sceneAnnotationStats_, sceneAnnotationStart);
 
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     const HRESULT drawn = target_->EndDraw();
     target_ = saved;
+    ccl::timing::AddSince(sceneStats_, sceneStart);
 
     if (FAILED(drawn) ||
         FAILED(sceneTarget_->GetBitmap(&sceneBitmap_)) || !sceneBitmap_) {
@@ -211,6 +225,9 @@ void Renderer::PruneCaches() noexcept {
     }
     if (layoutCache_.size() > limit) {
         layoutCache_.clear();
+    }
+    if (outlineCache_.size() > limit) {  // TEMPORARY (2026-08-20)
+        outlineCache_.clear();
     }
 }
 
@@ -698,6 +715,141 @@ void Renderer::DrawArea(const ccl::doc::AreaAnnotation& area,
 }
 
 namespace {
+
+// TEMPORARY (2026-08-20): walks a laid-out piece of text and collects the shape
+// its glyphs trace, so the outline can be stroked at a width of its own instead
+// of being faked by drawing the text eight times at an offset.
+//
+// Font fallback has already happened by the time this is called -- each run
+// arrives with the face the layout resolved for it -- so a string that reaches
+// several faces needs nothing special here.
+class OutlineCollector : public IDWriteTextRenderer {
+public:
+    explicit OutlineCollector(ID2D1Factory* factory) noexcept
+        : factory_(factory) {}
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG left = --refs_;
+        if (left == 0) {
+            delete this;
+        }
+        return left;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** obj) override {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IDWritePixelSnapping) ||
+            iid == __uuidof(IDWriteTextRenderer)) {
+            *obj = this;
+            AddRef();
+            return S_OK;
+        }
+        *obj = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*,
+                                                     BOOL* disabled) override {
+        *disabled = TRUE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*,
+                                                  DWRITE_MATRIX* m) override {
+        *m = DWRITE_MATRIX{1, 0, 0, 1, 0, 0};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* ppd) override {
+        *ppd = 1.0f;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(
+        void*, FLOAT baselineX, FLOAT baselineY, DWRITE_MEASURING_MODE,
+        DWRITE_GLYPH_RUN const* run, DWRITE_GLYPH_RUN_DESCRIPTION const*,
+        IUnknown*) override {
+        if (run == nullptr || run->fontFace == nullptr || run->glyphCount == 0) {
+            return S_OK;
+        }
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+        if (FAILED(factory_->CreatePathGeometry(&path))) {
+            return S_OK;
+        }
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(path->Open(&sink))) {
+            return S_OK;
+        }
+        const HRESULT hr = run->fontFace->GetGlyphRunOutline(
+            run->fontEmSize, run->glyphIndices, run->glyphAdvances,
+            run->glyphOffsets, run->glyphCount, run->isSideways,
+            (run->bidiLevel & 1) != 0, sink.Get());
+        sink->Close();
+        if (FAILED(hr)) {
+            return S_OK;
+        }
+        Add(path.Get(), baselineX, baselineY);
+        return S_OK;
+    }
+
+    // Neither of these is a glyph, so both arrive on their own and would lose
+    // their outline if they were left out.
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT baselineX,
+                                            FLOAT baselineY,
+                                            DWRITE_UNDERLINE const* u,
+                                            IUnknown*) override {
+        AddRect(baselineX, baselineY + u->offset, u->width, u->thickness);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT baselineX,
+                                                FLOAT baselineY,
+                                                DWRITE_STRIKETHROUGH const* s,
+                                                IUnknown*) override {
+        AddRect(baselineX, baselineY + s->offset, s->width, s->thickness);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT,
+                                               IDWriteInlineObject*, BOOL, BOOL,
+                                               IUnknown*) override {
+        return E_NOTIMPL;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1GeometryGroup> Group() noexcept {
+        std::vector<ID2D1Geometry*> raw;
+        raw.reserve(parts_.size());
+        for (auto& part : parts_) {
+            raw.push_back(part.Get());
+        }
+        Microsoft::WRL::ComPtr<ID2D1GeometryGroup> group;
+        if (!raw.empty()) {
+            factory_->CreateGeometryGroup(D2D1_FILL_MODE_WINDING, raw.data(),
+                                          static_cast<UINT32>(raw.size()),
+                                          &group);
+        }
+        return group;
+    }
+
+    size_t Parts() const noexcept { return parts_.size(); }
+
+private:
+    // The outline comes out at the origin, so each piece is moved to where the
+    // run actually sits.
+    void Add(ID2D1Geometry* shape, FLOAT x, FLOAT y) noexcept {
+        Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> moved;
+        if (SUCCEEDED(factory_->CreateTransformedGeometry(
+                shape, D2D1::Matrix3x2F::Translation(x, y), &moved))) {
+            parts_.push_back(moved);
+        }
+    }
+    void AddRect(FLOAT x, FLOAT y, FLOAT width, FLOAT thickness) noexcept {
+        Microsoft::WRL::ComPtr<ID2D1RectangleGeometry> rect;
+        if (SUCCEEDED(factory_->CreateRectangleGeometry(
+                D2D1::RectF(x, y, x + width, y + thickness), &rect))) {
+            Add(rect.Get(), 0.0f, 0.0f);
+        }
+    }
+
+    ID2D1Factory* factory_ = nullptr;
+    std::vector<Microsoft::WRL::ComPtr<ID2D1Geometry>> parts_;
+    ULONG refs_ = 1;
+};
 
 // Builds the layout used for both drawing and measuring, so the two can never
 // disagree about where the text sits.
@@ -1335,10 +1487,141 @@ IDWriteTextLayout* Renderer::TextLayout(const ccl::doc::TextAnnotation& text,
     return (layoutCache_[id] = layout).Get();
 }
 
+// TEMPORARY (2026-08-20): see g_outlineGeometry.
+ID2D1Geometry* Renderer::TextOutline(const ccl::doc::TextAnnotation& text,
+                                     unsigned int id) noexcept {
+    if (id != 0) {
+        const auto cached = outlineCache_.find(id);
+        if (cached != outlineCache_.end()) {
+            return cached->second.Get();
+        }
+    }
+    IDWriteTextLayout* layout = TextLayout(text, id);
+    if (layout == nullptr || context_ == nullptr) {
+        return nullptr;
+    }
+
+    const LONGLONG start = ccl::timing::Mark();
+    OutlineCollector* collector = new OutlineCollector(context_->Factory());
+    layout->Draw(nullptr, collector, 0.0f, 0.0f);
+    Microsoft::WRL::ComPtr<ID2D1GeometryGroup> group = collector->Group();
+    if (ccl::timing::g_enabled) {
+        wchar_t line[128];
+        ::swprintf_s(line, L"[timing] %-28s %8.2f ms  %zu chars, %zu parts\n",
+                     L"  outline build",
+                     ccl::timing::MillisecondsSince(start), text.text.size(),
+                     collector->Parts());
+        ccl::timing::Write(line);
+    }
+    collector->Release();
+    if (!group) {
+        return nullptr;
+    }
+    if (id == 0) {
+        transientOutline_ = group;
+        return transientOutline_.Get();
+    }
+    return (outlineCache_[id] = group).Get();
+}
+
+// TEMPORARY (2026-08-20): see g_bakeText.
+void Renderer::BakeTexts(float zoom) noexcept {
+    if (!g_bakeText || document_ == nullptr || !target_ || zoom <= 0.0f) {
+        return;
+    }
+    // While the zoom is still moving, what is already held is stretched to fit
+    // instead of being drawn again: a piece of text would otherwise be redrawn
+    // on every notch of the wheel. Anything with nothing held yet is drawn the
+    // long way by the frame, as it is when a bitmap would be too large.
+    const bool settled = zoom == lastZoom_;
+    lastZoom_ = zoom;
+    if (g_bakeSettled && !settled) {
+        return;
+    }
+    for (const auto& annotation : document_->Annotations()) {
+        if (annotation.kind != ccl::doc::AnnotationKind::Text ||
+            annotation.text.text.empty()) {
+            continue;
+        }
+        const auto found = bakedCache_.find(annotation.id);
+        if (found != bakedCache_.end() && found->second.scale == zoom) {
+            continue;
+        }
+
+        D2D1_RECT_F bounds{};
+        if (!MeasureText(annotation.text, bounds)) {
+            continue;
+        }
+        // Room for whatever sticks out past the glyphs.
+        const float spread =
+            (std::max)(g_outlineWidth > 0.0f ? g_outlineWidth
+                                             : annotation.text.fontSize * 0.06f,
+                       1.0f) + 2.0f;
+        bounds.left -= spread;
+        bounds.top -= spread;
+        bounds.right += spread;
+        bounds.bottom += spread;
+
+        const float wide = (bounds.right - bounds.left) * zoom;
+        const float tall = (bounds.bottom - bounds.top) * zoom;
+        // Past what a surface can be, the frame draws it the long way instead.
+        if (wide <= 0.0f || tall <= 0.0f || wide > 16000.0f || tall > 16000.0f) {
+            bakedCache_.erase(annotation.id);
+            continue;
+        }
+
+        Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> sheet;
+        if (FAILED(target_->CreateCompatibleRenderTarget(
+                D2D1::SizeF(wide, tall), &sheet)) ||
+            !sheet) {
+            continue;
+        }
+
+        auto savedTarget = target_;
+        auto savedBrush = brush_;
+        target_ = sheet;
+        brush_.Reset();
+        if (SUCCEEDED(target_->CreateSolidColorBrush(
+                D2D1::ColorF(D2D1::ColorF::White), &brush_))) {
+            baking_ = true;
+            target_->BeginDraw();
+            target_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+            target_->SetTransform(
+                D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top) *
+                D2D1::Matrix3x2F::Scale(zoom, zoom));
+            DrawText(annotation.text, annotation.id);
+            target_->SetTransform(D2D1::Matrix3x2F::Identity());
+            target_->EndDraw();
+            baking_ = false;
+        }
+        target_ = savedTarget;
+        brush_ = savedBrush;
+
+        BakedText baked;
+        baked.bounds = bounds;
+        baked.scale = zoom;
+        if (SUCCEEDED(sheet->GetBitmap(&baked.bitmap)) && baked.bitmap) {
+            bakedCache_[annotation.id] = std::move(baked);
+        }
+    }
+}
+
 void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
                         unsigned int id) noexcept {
     if (text.text.empty() || !brush_ || context_ == nullptr) {
         return;
+    }
+
+    // TEMPORARY (2026-08-20): the whole point of baking -- one blit, and none
+    // of the work below. Skipped while the bitmap is being filled, and on the
+    // off-screen targets, whose device is not the one that holds it.
+    if (g_bakeText && !baking_ && id != 0) {
+        const auto baked = bakedCache_.find(id);
+        if (baked != bakedCache_.end() && baked->second.bitmap) {
+            target_->DrawBitmap(baked->second.bitmap.Get(),
+                                baked->second.bounds);
+            return;
+        }
     }
 
     IDWriteTextLayout* layout = TextLayout(text, id);
@@ -1361,26 +1644,70 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
     // Screenshots are busy backgrounds, so the shadow and outline exist to keep
     // text readable rather than for decoration. Both are drawn by offsetting
     // the same layout, which costs a few extra draws but needs no geometry.
+    // TEMPORARY (2026-08-20): the geometry method being compared. The stroke
+    // straddles the contour, so twice the wanted width is laid down and the
+    // text drawn afterwards covers the half that fell inside.
+    //
+    // The view's zoom and scroll are already on the target, and the geometry is
+    // in the text's own coordinates, so each use is composed onto what is there
+    // rather than replacing it.
+    D2D1_MATRIX_3X2_F scene{};
+    target_->GetTransform(&scene);
+    ID2D1Geometry* outline = nullptr;
+    if (g_outlineGeometry && (text.outline || text.shadow)) {
+        outline = TextOutline(text, id);
+        if (outline != nullptr && !outlineStyle_) {
+            context_->Factory()->CreateStrokeStyle(
+                D2D1::StrokeStyleProperties(
+                    D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                    D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND, 10.0f,
+                    D2D1_DASH_STYLE_SOLID, 0.0f),
+                nullptr, 0, &outlineStyle_);
+        }
+    }
+
     if (text.shadow) {
-        const float offset = std::max(1.0f, text.fontSize * 0.06f);
+        const float offset = g_outlineWidth > 0.0f
+                                 ? g_outlineWidth
+                                 : std::max(1.0f, text.fontSize * 0.06f);
         brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.55f));
-        target_->DrawTextLayout(
-            D2D1::Point2F(origin.x + offset, origin.y + offset), layout,
-            brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        if (outline != nullptr) {
+            target_->SetTransform(
+                D2D1::Matrix3x2F::Translation(origin.x + offset,
+                                              origin.y + offset) *
+                scene);
+            target_->FillGeometry(outline, brush_.Get());
+            target_->SetTransform(scene);
+        } else {
+            target_->DrawTextLayout(
+                D2D1::Point2F(origin.x + offset, origin.y + offset), layout,
+                brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
     }
 
     if (text.outline) {
-        const float offset = std::max(1.0f, text.fontSize * 0.05f);
+        const float offset = g_outlineWidth > 0.0f
+                                 ? g_outlineWidth
+                                 : std::max(1.0f, text.fontSize * 0.05f);
         brush_->SetColor(ToD2D(text.outlineColor));
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0) {
-                    continue;
+        if (outline != nullptr) {
+            target_->SetTransform(
+                D2D1::Matrix3x2F::Translation(origin.x, origin.y) *
+                scene);
+            target_->DrawGeometry(outline, brush_.Get(), offset * 2.0f,
+                                  outlineStyle_.Get());
+            target_->SetTransform(scene);
+        } else {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) {
+                        continue;
+                    }
+                    target_->DrawTextLayout(
+                        D2D1::Point2F(origin.x + static_cast<float>(dx) * offset,
+                                      origin.y + static_cast<float>(dy) * offset),
+                        layout, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
-                target_->DrawTextLayout(
-                    D2D1::Point2F(origin.x + static_cast<float>(dx) * offset,
-                                  origin.y + static_cast<float>(dy) * offset),
-                    layout, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
     }
@@ -1395,6 +1722,18 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
             layout->SetDrawingEffect(runBrush.Get(),
                                      DWRITE_TEXT_RANGE{run.start, run.length});
         }
+    }
+
+    // TEMPORARY (2026-08-20): the body from the same shape. One colour for the
+    // lot, which is what the measurement needs -- per-range colour arrives on
+    // the parts and is a separate piece of work.
+    if (g_bodyGeometry && outline != nullptr) {
+        brush_->SetColor(ToD2D(text.color));
+        target_->SetTransform(
+            D2D1::Matrix3x2F::Translation(origin.x, origin.y) * scene);
+        target_->FillGeometry(outline, brush_.Get());
+        target_->SetTransform(scene);
+        return;
     }
 
     brush_->SetColor(ToD2D(text.color));
@@ -1428,6 +1767,10 @@ void Renderer::Draw(const ccl::view::ViewState& view,
     // The same goes for the scene, which is filled through a target of its own.
     // Skipped while a turn is being previewed: the transform changes on every
     // frame then, so there would be nothing to reuse.
+    // TEMPORARY (2026-08-20): the same goes for baking the text -- a target of
+    // its own, so before the frame opens and before the scene that uses it.
+    BakeTexts(view.Zoom());
+
     const bool previewing = previewRotation_ != 0.0f;
     const bool scened = !previewing && EnsureScene(view);
 
