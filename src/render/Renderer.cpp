@@ -54,6 +54,11 @@ void Renderer::InvalidateText(unsigned int id) noexcept {
     layoutCache_.erase(id);
 }
 
+void Renderer::InvalidateResults() noexcept {
+    layoutCache_.clear();
+    effectCache_.clear();
+}
+
 void Renderer::ReportStats() const noexcept {
     ccl::timing::ReportFrames(L"  picture", pictureStats_);
     ccl::timing::ReportFrames(L"  annotations", annotationStats_);

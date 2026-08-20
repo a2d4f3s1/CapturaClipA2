@@ -49,6 +49,17 @@ public:
     // new annotation with an id of its own, which has no cache entry yet.
     void InvalidateText(unsigned int id) noexcept;
 
+    // Drops everything worked out from what the annotations say -- laid-out
+    // glyphs and processed effect pixels -- for use when a step is undone or
+    // redone. Those put different values back under ids that already have
+    // results kept against them, and nothing about an id says which values it
+    // was worked out from.
+    //
+    // What was under an effect when it was placed is kept: that belongs to the
+    // moment of placing, not to the values, and reading it again would take it
+    // from a picture that has since changed.
+    void InvalidateResults() noexcept;
+
     // Where the time in a frame went, split so that rebuilding shapes on the
     // CPU can be told apart from the cost of putting pixels on the screen.
     // Written to the timing log when the window closes.

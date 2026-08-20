@@ -4812,6 +4812,11 @@ void ClipWindow::Undo() noexcept {
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
     resizingTextId_ = 0;
+    // A step that changed a piece of text or the strength of an effect has just
+    // put the earlier value back under the same id, and what was worked out
+    // from the later one is still being kept against it. Without this, undoing
+    // a size change left the text drawn at the size it had been given.
+    renderer_.InvalidateResults();
     // The step may have put a different area back, and a step that carried
     // none leaves the one in hand alone. Either way the folded shape has to
     // be built again from what is there now.
@@ -4846,6 +4851,8 @@ void ClipWindow::Redo() noexcept {
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     hoveredTextIndex_ = static_cast<size_t>(-1);
     resizingTextId_ = 0;
+    // Same as undo: the values under these ids have just been swapped.
+    renderer_.InvalidateResults();
     RefreshSelection();
     if (reshaped) {
         // The area is not thrown away here: the step carried the one that
