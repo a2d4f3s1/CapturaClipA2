@@ -2062,6 +2062,53 @@ void ClipWindow::ToggleTextOutline() noexcept {
     Draw();
 }
 
+bool ClipWindow::StyleHoveredText(bool ccl::doc::TextAnnotation::* whole,
+                                  bool ccl::doc::TextRun::* part) noexcept {
+    const size_t target = HoveredTextTarget();
+    if (target == static_cast<size_t>(-1)) {
+        return false;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[target];
+    ccl::doc::TextAnnotation& text = annotation.text;
+
+    const bool wanted = !(text.*whole);
+    text.*whole = wanted;
+    for (ccl::doc::TextRun& run : text.runs) {
+        run.*part = wanted;
+    }
+
+    // Bold and the rest change the shapes of the glyphs, so the layout kept
+    // under this id is no longer the one being asked for. Colour is the odd one
+    // out there: it is put on afresh every frame and needs no such notice.
+    renderer_.InvalidateText(annotation.id);
+    Draw();
+    return true;
+}
+
+bool ClipWindow::RefontHoveredText(const std::wstring& family) noexcept {
+    const size_t target = HoveredTextTarget();
+    if (target == static_cast<size_t>(-1)) {
+        return false;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[target];
+    ccl::doc::TextAnnotation& text = annotation.text;
+
+    text.fontFamily = family;
+    // Ranges carrying a face of their own would otherwise keep it and the piece
+    // would come out in two fonts, which is not what choosing one asks for.
+    for (ccl::doc::TextRun& run : text.runs) {
+        run.fontFamily = family;
+    }
+
+    renderer_.InvalidateText(annotation.id);
+    Draw();
+    return true;
+}
+
 void ClipWindow::ToggleTextShadow() noexcept {
     const size_t target = HoveredTextTarget();
     if (target == static_cast<size_t>(-1)) {
@@ -4142,9 +4189,13 @@ HMENU ClipWindow::BuildFontMenu() noexcept {
         return menu;
     }
 
-    // Which font the selection currently uses, so it can be ticked.
+    // Which font is in force, so it can be ticked: the piece being pointed at,
+    // or the selection in the box, or what the next piece will be given.
     std::wstring current;
-    if (editor_ != nullptr) {
+    const size_t pointed = HoveredTextTarget();
+    if (pointed != static_cast<size_t>(-1)) {
+        current = document_->Annotations()[pointed].text.fontFamily;
+    } else if (editor_ != nullptr) {
         CHARFORMAT2W format{};
         format.cbSize = sizeof(format);
         format.dwMask = CFM_FACE;
@@ -4341,29 +4392,45 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                       .c_str());
 
     const HMENU textStyle = ::CreatePopupMenu();
-    ::AppendMenuW(textStyle, tool_.textBold ? checked : plain, kMenuBold,
-                  L"太字\tCtrl+B");
-    ::AppendMenuW(textStyle, tool_.textItalic ? checked : plain, kMenuItalic,
-                  L"斜体\tCtrl+I");
-    ::AppendMenuW(textStyle, tool_.textUnderline ? checked : plain,
-                  kMenuUnderline, L"下線\tCtrl+U");
-    ::AppendMenuW(textStyle, tool_.textStrikethrough ? checked : plain,
-                  kMenuStrikethrough, L"打ち消し線");
+    // The same things in the same order as the menu the editing box offers, so
+    // that what can be changed about text does not depend on where the menu was
+    // opened from. The colour sits at the top level of this menu already, with
+    // a key of its own, and is not repeated here.
+    ::AppendMenuW(textStyle, MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(BuildFontMenu()), L"フォント");
     ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
-    // Pointing at a piece of text makes these say what that text is, because
-    // that is what switching them would change. With nothing pointed at they
-    // say what the next piece of text will be given. While the box is open they
-    // are shown but cannot be used: what is being typed is drawn by the box,
-    // which has neither an outline nor a shadow to switch.
+
+    // Pointing at a piece of text makes every one of these read that piece.
+    // With nothing pointed at they read what the next piece will be given.
     const size_t styleTarget = HoveredTextTarget();
+    const ccl::doc::TextAnnotation* pointed =
+        styleTarget != static_cast<size_t>(-1)
+            ? &document_->Annotations()[styleTarget].text
+            : nullptr;
+    const bool isBold = pointed != nullptr ? pointed->bold : tool_.textBold;
+    const bool isItalic =
+        pointed != nullptr ? pointed->italic : tool_.textItalic;
+    const bool isUnderline =
+        pointed != nullptr ? pointed->underline : tool_.textUnderline;
+    const bool isStruck = pointed != nullptr ? pointed->strikethrough
+                                             : tool_.textStrikethrough;
+
+    ::AppendMenuW(textStyle, isBold ? checked : plain, kMenuBold,
+                  L"太字\tCtrl+B");
+    ::AppendMenuW(textStyle, isItalic ? checked : plain, kMenuItalic,
+                  L"斜体\tCtrl+I");
+    ::AppendMenuW(textStyle, isUnderline ? checked : plain, kMenuUnderline,
+                  L"下線\tCtrl+U");
+    ::AppendMenuW(textStyle, isStruck ? checked : plain, kMenuStrikethrough,
+                  L"打ち消し線");
+    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
+    // While the box is open these two are shown but cannot be used: what is
+    // being typed is drawn by the box, which has neither an outline nor a
+    // shadow to switch.
     const bool hasOutline =
-        styleTarget != static_cast<size_t>(-1)
-            ? document_->Annotations()[styleTarget].text.outline
-            : tool_.textOutline;
+        pointed != nullptr ? pointed->outline : tool_.textOutline;
     const bool hasShadow =
-        styleTarget != static_cast<size_t>(-1)
-            ? document_->Annotations()[styleTarget].text.shadow
-            : tool_.textShadow;
+        pointed != nullptr ? pointed->shadow : tool_.textShadow;
     const UINT outlineFlags =
         (hasOutline ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
     const UINT shadowFlags =
@@ -4506,7 +4573,11 @@ void ClipWindow::OnCommand(int command) noexcept {
         const auto& fonts = InstalledFonts(context_->Text());
         const size_t index = id - kMenuFontBase;
         if (index < fonts.size()) {
-            SetTextFont(fonts[index]);
+            // The piece being pointed at takes it; failing that, the box being
+            // typed into; failing that, whatever is typed next.
+            if (!RefontHoveredText(fonts[index])) {
+                SetTextFont(fonts[index]);
+            }
         }
         return;
     }
@@ -4599,19 +4670,38 @@ void ClipWindow::OnCommand(int command) noexcept {
             tool_.usePressure = !tool_.usePressure;
             return;
 
+        // Pointing at a piece of text makes it the target, the way the colour
+        // and the size already do. With nothing pointed at, these say what the
+        // next piece of text will be given.
         case kMenuBold:
+            if (StyleHoveredText(&ccl::doc::TextAnnotation::bold,
+                                 &ccl::doc::TextRun::bold)) {
+                return;
+            }
             tool_.textBold = !tool_.textBold;
             ApplyTextEffect(CFM_BOLD, CFE_BOLD, tool_.textBold);
             return;
         case kMenuItalic:
+            if (StyleHoveredText(&ccl::doc::TextAnnotation::italic,
+                                 &ccl::doc::TextRun::italic)) {
+                return;
+            }
             tool_.textItalic = !tool_.textItalic;
             ApplyTextEffect(CFM_ITALIC, CFE_ITALIC, tool_.textItalic);
             return;
         case kMenuUnderline:
+            if (StyleHoveredText(&ccl::doc::TextAnnotation::underline,
+                                 &ccl::doc::TextRun::underline)) {
+                return;
+            }
             tool_.textUnderline = !tool_.textUnderline;
             ApplyTextEffect(CFM_UNDERLINE, CFE_UNDERLINE, tool_.textUnderline);
             return;
         case kMenuStrikethrough:
+            if (StyleHoveredText(&ccl::doc::TextAnnotation::strikethrough,
+                                 &ccl::doc::TextRun::strikethrough)) {
+                return;
+            }
             tool_.textStrikethrough = !tool_.textStrikethrough;
             ApplyTextEffect(CFM_STRIKEOUT, CFE_STRIKEOUT,
                             tool_.textStrikethrough);

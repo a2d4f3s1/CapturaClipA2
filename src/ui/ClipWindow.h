@@ -243,6 +243,17 @@ private:
     // nothing pointed at -- on whatever is typed next.
     void ToggleTextOutline() noexcept;
     void ToggleTextShadow() noexcept;
+    // Flips one of the four switches on the text being hovered. Says whether
+    // there was a text to flip it on: with none, the caller carries on and
+    // changes what the next piece of text will be given instead.
+    //
+    // The whole piece takes the new value, ranges included. Outside the editor
+    // there is no selection to aim at, so there is nothing finer to act on --
+    // the same bargain the colour already makes.
+    bool StyleHoveredText(bool ccl::doc::TextAnnotation::* whole,
+                          bool ccl::doc::TextRun::* part) noexcept;
+    // The same for the font, which is a name rather than a switch.
+    bool RefontHoveredText(const std::wstring& family) noexcept;
     void SetTextFont(const std::wstring& family) noexcept;
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
