@@ -1171,6 +1171,7 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
 
     target_ = offscreen;
     brush_.Reset();
+    elsewhere_ = true;
 
     bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
         D2D1::ColorF(D2D1::ColorF::White), &brush_));
@@ -1207,6 +1208,7 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
     target_ = savedTarget;
     brush_ = savedBrush;
     effectCache_ = std::move(savedCache);
+    elsewhere_ = false;
 
     return ok && SUCCEEDED(surface->CopyPixels(nullptr, stride, bytes, pixels));
 }
@@ -1689,7 +1691,7 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
     // blit, at the size it was drawn for. Skipped while a sheet is being
     // filled, and on the off-screen targets, whose device is not the one that
     // holds it.
-    if (!baking_ && id != 0) {
+    if (!baking_ && !elsewhere_ && id != 0) {
         const auto baked = bakedCache_.find(id);
         if (baked != bakedCache_.end() && baked->second.bitmap) {
             const D2D1_RECT_F& from = baked->second.offset;
@@ -2106,6 +2108,7 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
     target_ = offscreen;
     brush_.Reset();
     image_.Reset();
+    elsewhere_ = true;
 
     bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
                   D2D1::ColorF(D2D1::ColorF::White), &brush_)) &&
@@ -2156,6 +2159,7 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
     brush_ = savedBrush;
     image_ = savedImage;
     effectCache_ = std::move(savedCache);
+    elsewhere_ = false;
 
     if (!ok || !result.Create(static_cast<int>(width), static_cast<int>(height))) {
         result.Reset();

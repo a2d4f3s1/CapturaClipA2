@@ -323,6 +323,12 @@ private:
     };
     std::unordered_map<unsigned int, BakedText> bakedCache_;
     bool baking_ = false;
+    // True while drawing into a surface of another device -- saving, turning,
+    // and taking the copy an effect hides. The sheets belong to the window's
+    // device and cannot be handed to those: passing one fails the whole draw,
+    // which is how the annotations came to be missing from what an effect had
+    // covered.
+    bool elsewhere_ = false;
     // The zoom the last frame ran at. Two frames at the same zoom mean the
     // wheel has stopped.
     float lastZoom_ = -1.0f;
