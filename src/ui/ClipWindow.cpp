@@ -254,6 +254,9 @@ enum MenuId : UINT {
     kMenuExit,
     kMenuTextSize,
     kMenuOutlineWidth,
+    kMenuShadowLength,
+    kMenuShadowColor,
+    kMenuShadowOpacity,
 
     // Range bases, kept together at the end. Putting one in the middle renumbers
     // everything after it into that range, which is how the colour entry ended
@@ -261,8 +264,16 @@ enum MenuId : UINT {
     kMenuToolBase = 200,    // + Tool
     kMenuWidthBase = 400,   // + index into kWidthPresets
     kMenuZoomBase = 500,    // + zoom in hundreds of percent
+    kMenuShadowWayBase = 600,  // + which way the shadow is thrown, 0 to 8
     kMenuFontBase = 1000,   // + index into the installed font list
 };
+
+// The nine ways round, in the order they are numbered. The last is not a
+// direction at all: it leaves the shadow under the letters, where only its
+// spread shows.
+constexpr const wchar_t* kShadowWayNames[] = {
+    L"上",   L"右上", L"右",   L"右下",             L"下",
+    L"左下", L"左",   L"左上", L"真下（にじみだけ）"};
 
 ccl::doc::Color FromColorRef(COLORREF value) noexcept {
     return ccl::doc::Color{GetRValue(value) / 255.0f, GetGValue(value) / 255.0f,
@@ -2142,6 +2153,85 @@ void ClipWindow::ToggleTextShadow() noexcept {
     Draw();
 }
 
+void ClipWindow::SetShadowDirection(int way) noexcept {
+    const size_t target = HoveredTextTarget();
+    if (target == static_cast<size_t>(-1)) {
+        tool_.textShadowDirection = way;
+        return;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    ccl::doc::Annotation& annotation = document_->MutableAnnotations()[target];
+    annotation.text.shadowDirection = way;
+    // The glyphs are unchanged; only where the shadow lands.
+    renderer_.InvalidateTextPixels(annotation.id);
+    Draw();
+}
+
+void ClipWindow::ChooseShadowColor() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    POINT screen = lastCursor_;
+    ::ClientToScreen(hwnd_, &screen);
+
+    // The piece being pointed at takes it; failing that, it is what the next
+    // piece will be given.
+    const size_t target = HoveredTextTarget();
+    const ccl::doc::Color original =
+        target != static_cast<size_t>(-1)
+            ? document_->Annotations()[target].text.shadowColor
+            : tool_.textShadowColor;
+
+    ccl::doc::TextAnnotation before;
+    if (target != static_cast<size_t>(-1)) {
+        before = document_->Annotations()[target].text;
+    }
+
+    // How strong the shadow is stays where it was: the palette mixes a colour
+    // and has nowhere to show a strength, which is why the two are set apart.
+    const auto keepStrength = [original](ccl::doc::Color colour) {
+        colour.a = original.a;
+        return colour;
+    };
+
+    ++suppressCommitDepth_;
+    ColorPopup popup;
+    const auto chosen = popup.Show(
+        hwnd_, screen, original, tool_.quickColors, tool_.RecentColors(),
+        settings_ != nullptr ? settings_->paletteScalePercent : 100,
+        [this, target, keepStrength](const ccl::doc::Color& colour) {
+            // Shown as it is mixed, without recording a step for every shade
+            // the pointer passes over.
+            if (target != static_cast<size_t>(-1)) {
+                ccl::doc::Annotation& annotation =
+                    document_->MutableAnnotations()[target];
+                annotation.text.shadowColor = keepStrength(colour);
+                renderer_.InvalidateTextPixels(annotation.id);
+                Draw();
+            }
+        });
+
+    if (target != static_cast<size_t>(-1) &&
+        target < document_->Annotations().size()) {
+        // What the preview painted over is put back, so that accepting records
+        // one step and walking away records none.
+        document_->MutableAnnotations()[target].text = before;
+        if (chosen.has_value()) {
+            history_.Record(document_->Annotations(), ToolForHistory());
+            ccl::doc::Annotation& annotation =
+                document_->MutableAnnotations()[target];
+            annotation.text.shadowColor = keepStrength(*chosen);
+            renderer_.InvalidateTextPixels(annotation.id);
+        }
+    } else if (chosen.has_value()) {
+        tool_.textShadowColor = keepStrength(*chosen);
+    }
+
+    --suppressCommitDepth_;
+    Draw();
+}
+
 void ClipWindow::PaintText(size_t index, const ccl::doc::Color& colour) noexcept {
     if (document_ == nullptr || index >= document_->Annotations().size()) {
         return;
@@ -2236,6 +2326,22 @@ LRESULT CALLBACK ClipWindow::NumberProc(HWND hwnd, UINT msg, WPARAM wParam,
     return ::DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+const ClipWindow::NumberField& ClipWindow::FieldFor(NumberKind kind) noexcept {
+    // The same bounds the settings file is held to, so a value typed here and
+    // one edited there cannot disagree about what is allowed. In the order the
+    // kinds are declared.
+    static constexpr NumberField kFields[] = {
+        {4.0f, 400.0f, true},   // FontSize: different glyphs
+        {1.0f, 20.0f, false},   // OutlineWidth
+        {2.0f, 20.0f, false},   // ShadowLength
+        {1.0f, 100.0f, false},  // ShadowOpacity, in percent
+    };
+    static_assert(ARRAYSIZE(kFields) == static_cast<size_t>(NumberKind::kCount),
+                  "every kind needs a row");
+    const size_t at = static_cast<size_t>(kind);
+    return kFields[at < ARRAYSIZE(kFields) ? at : 0];
+}
+
 void ClipWindow::BeginNumberEntry(NumberKind kind) noexcept {
     if (document_ == nullptr || hwnd_ == nullptr) {
         return;
@@ -2253,10 +2359,29 @@ void ClipWindow::BeginNumberEntry(NumberKind kind) noexcept {
         const ccl::doc::TextAnnotation& text =
             document_->Annotations()[numberTarget_].text;
         numberId_ = document_->Annotations()[numberTarget_].id;
-        value = kind == NumberKind::FontSize ? text.fontSize : text.outlineWidth;
+        switch (kind) {
+            case NumberKind::FontSize: value = text.fontSize; break;
+            case NumberKind::OutlineWidth: value = text.outlineWidth; break;
+            case NumberKind::ShadowLength: value = text.shadowLength; break;
+            case NumberKind::ShadowOpacity:
+                value = text.shadowColor.a * 100.0f;
+                break;
+            default: break;
+        }
     } else {
-        value = kind == NumberKind::FontSize ? settings_->textFontSize
-                                             : tool_.textOutlineWidth;
+        switch (kind) {
+            case NumberKind::FontSize: value = settings_->textFontSize; break;
+            case NumberKind::OutlineWidth:
+                value = tool_.textOutlineWidth;
+                break;
+            case NumberKind::ShadowLength:
+                value = tool_.textShadowLength;
+                break;
+            case NumberKind::ShadowOpacity:
+                value = tool_.textShadowColor.a * 100.0f;
+                break;
+            default: break;
+        }
     }
     numberBefore_ = value;
 
@@ -2306,10 +2431,21 @@ void ClipWindow::ApplyNumber(float value) noexcept {
     }
 
     if (numberTarget_ == static_cast<size_t>(-1)) {
-        if (numberKind_ == NumberKind::FontSize) {
-            settings_->textFontSize = value;
-        } else {
-            tool_.textOutlineWidth = value;
+        // Nothing pointed at, so this is what the next piece of text will be
+        // given. The size still lives in the settings rather than beside the
+        // others; moving it is a separate piece of work.
+        switch (numberKind_) {
+            case NumberKind::FontSize: settings_->textFontSize = value; break;
+            case NumberKind::OutlineWidth:
+                tool_.textOutlineWidth = value;
+                break;
+            case NumberKind::ShadowLength:
+                tool_.textShadowLength = value;
+                break;
+            case NumberKind::ShadowOpacity:
+                tool_.textShadowColor.a = value / 100.0f;
+                break;
+            default: break;
         }
         return;
     }
@@ -2319,24 +2455,34 @@ void ClipWindow::ApplyNumber(float value) noexcept {
 
     ccl::doc::TextAnnotation& text =
         document_->MutableAnnotations()[numberTarget_].text;
-    if (numberKind_ == NumberKind::FontSize) {
-        // Ranges carrying a size of their own move in proportion, the way the
-        // bracket keys move them, so a word made bigger stays bigger.
-        if (text.fontSize > 0.0f && value != text.fontSize) {
-            const float ratio = value / text.fontSize;
-            for (ccl::doc::TextRun& run : text.runs) {
-                if (run.fontSize > 0.0f) {
-                    run.fontSize *= ratio;
+    switch (numberKind_) {
+        case NumberKind::FontSize:
+            // Ranges carrying a size of their own move in proportion, the way
+            // the bracket keys move them, so a word made bigger stays bigger.
+            if (text.fontSize > 0.0f && value != text.fontSize) {
+                const float ratio = value / text.fontSize;
+                for (ccl::doc::TextRun& run : text.runs) {
+                    if (run.fontSize > 0.0f) {
+                        run.fontSize *= ratio;
+                    }
                 }
             }
-        }
-        text.fontSize = value;
-        // A different size means different glyphs, so what was traced for this
-        // piece is no longer what is being asked for.
+            text.fontSize = value;
+            break;
+        case NumberKind::OutlineWidth: text.outlineWidth = value; break;
+        case NumberKind::ShadowLength: text.shadowLength = value; break;
+        case NumberKind::ShadowOpacity:
+            text.shadowColor.a = value / 100.0f;
+            break;
+        default: break;
+    }
+
+    // A different size means different glyphs, so what was traced for this
+    // piece is no longer what is being asked for. Everything else leaves the
+    // glyphs alone and changes only the pixels drawn from them.
+    if (FieldFor(numberKind_).reshapes) {
         renderer_.InvalidateText(numberId_);
     } else {
-        text.outlineWidth = value;
-        // The glyphs are the same; only the pixels drawn from them differ.
         renderer_.InvalidateTextPixels(numberId_);
     }
     Draw();
@@ -2353,13 +2499,9 @@ void ClipWindow::UpdateNumberEntry() noexcept {
     if (end == text) {
         return;
     }
-    // The same bounds the settings file is held to, so a value typed here and
-    // one edited there cannot disagree about what is allowed.
-    const float value =
-        numberKind_ == NumberKind::FontSize
-            ? std::clamp(static_cast<float>(typed), 4.0f, 400.0f)
-            : std::clamp(static_cast<float>(typed), 1.0f, 20.0f);
-    ApplyNumber(value);
+    const NumberField& field = FieldFor(numberKind_);
+    ApplyNumber(
+        std::clamp(static_cast<float>(typed), field.low, field.high));
 }
 
 void ClipWindow::EndNumberEntry(bool keep) noexcept {
@@ -2384,10 +2526,18 @@ void ClipWindow::EndNumberEntry(bool keep) noexcept {
     // was already showing would return to a size the text never really had.
     if (numberTarget_ != static_cast<size_t>(-1) && document_ != nullptr &&
         numberTarget_ < document_->Annotations().size()) {
-        const float chosen =
-            numberKind_ == NumberKind::FontSize
-                ? document_->Annotations()[numberTarget_].text.fontSize
-                : document_->Annotations()[numberTarget_].text.outlineWidth;
+        const ccl::doc::TextAnnotation& text =
+            document_->Annotations()[numberTarget_].text;
+        float chosen = numberBefore_;
+        switch (numberKind_) {
+            case NumberKind::FontSize: chosen = text.fontSize; break;
+            case NumberKind::OutlineWidth: chosen = text.outlineWidth; break;
+            case NumberKind::ShadowLength: chosen = text.shadowLength; break;
+            case NumberKind::ShadowOpacity:
+                chosen = text.shadowColor.a * 100.0f;
+                break;
+            default: break;
+        }
         if (chosen != numberBefore_) {
             ApplyNumber(numberBefore_);
             history_.Record(document_->Annotations(), ToolForHistory());
@@ -4674,6 +4824,27 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
                   MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
                   kMenuOutlineWidth, L"縁の太さ...");
     ::AppendMenuW(textStyle, shadowFlags, kMenuTextShadow, L"影");
+    // Under the switch they belong to, the way the edge's thickness sits under
+    // the edge. All four say what the shadow looks like, so they stay together
+    // and in the order it is described: how far, which way, what colour, how
+    // strong.
+    const UINT shadowValueFlags =
+        MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0);
+    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowLength, L"影の長さ...");
+    const HMENU shadowWays = ::CreatePopupMenu();
+    const int currentWay =
+        pointed != nullptr ? pointed->shadowDirection : tool_.textShadowDirection;
+    for (int way = 0; way < static_cast<int>(ARRAYSIZE(kShadowWayNames)); ++way) {
+        ::AppendMenuW(shadowWays,
+                      (way == currentWay ? checked : plain) |
+                          (editor_ != nullptr ? MF_GRAYED : 0),
+                      kMenuShadowWayBase + way, kShadowWayNames[way]);
+    }
+    ::AppendMenuW(textStyle, MF_POPUP | (editor_ != nullptr ? MF_GRAYED : 0),
+                  reinterpret_cast<UINT_PTR>(shadowWays), L"影の向き");
+    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowColor, L"影の色...");
+    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowOpacity,
+                  L"影の濃さ...");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
                   L"文字\tCtrl+B I U");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -4816,6 +4987,12 @@ void ClipWindow::OnCommand(int command) noexcept {
                 SetTextFont(fonts[index]);
             }
         }
+        return;
+    }
+
+    if (id >= kMenuShadowWayBase &&
+        id < kMenuShadowWayBase + ARRAYSIZE(kShadowWayNames)) {
+        SetShadowDirection(static_cast<int>(id - kMenuShadowWayBase));
         return;
     }
 
@@ -4990,6 +5167,15 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuOutlineWidth:
             BeginNumberEntry(NumberKind::OutlineWidth);
+            return;
+        case kMenuShadowLength:
+            BeginNumberEntry(NumberKind::ShadowLength);
+            return;
+        case kMenuShadowOpacity:
+            BeginNumberEntry(NumberKind::ShadowOpacity);
+            return;
+        case kMenuShadowColor:
+            ChooseShadowColor();
             return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);

@@ -233,7 +233,25 @@ private:
     // box appears where the menu item was, on this window -- there is no
     // dialog. Acts on the piece being pointed at, or, with nothing pointed at,
     // on what the next piece will be given.
-    enum class NumberKind { FontSize, OutlineWidth };
+    // The values the little box that opens under the pointer can edit. Kept
+    // beside a table of what each one allows (`kNumberFields`), so that adding
+    // one is adding a row rather than another arm to four separate branches.
+    enum class NumberKind {
+        FontSize,
+        OutlineWidth,
+        ShadowLength,
+        ShadowOpacity,
+        kCount
+    };
+    // What one of those values allows, and whether changing it means the
+    // glyphs have to be traced again.
+    struct NumberField {
+        float low;
+        float high;
+        bool reshapes;
+    };
+    static const NumberField& FieldFor(NumberKind kind) noexcept;
+
     void BeginNumberEntry(NumberKind kind) noexcept;
     // Reads what has been typed and shows it on the text as it goes.
     void UpdateNumberEntry() noexcept;
@@ -258,6 +276,13 @@ private:
     // nothing pointed at -- on whatever is typed next.
     void ToggleTextOutline() noexcept;
     void ToggleTextShadow() noexcept;
+    // Which way the shadow is thrown, on the text being pointed at or -- with
+    // nothing pointed at -- on whatever is typed next. 8 leaves it underneath,
+    // where only its spread shows.
+    void SetShadowDirection(int way) noexcept;
+    // The colour the shadow is cast in. How strong it is stays as it was: the
+    // palette has nowhere to show a strength, so that is typed separately.
+    void ChooseShadowColor() noexcept;
     // Flips one of the four switches on the text being hovered. Says whether
     // there was a text to flip it on: with none, the caller carries on and
     // changes what the next piece of text will be given instead.
