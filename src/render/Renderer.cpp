@@ -1,3 +1,11 @@
+// Turns the effect class ids into data rather than declarations. Has to come
+// before anything that reaches d2d1effects.h -- which Renderer.h does -- or the
+// header is already past by the time this is read. Done here and nowhere else:
+// a second translation unit doing the same would give the linker two of each.
+#include <initguid.h>
+
+#include <d2d1effects.h>
+
 #include "render/Renderer.h"
 
 #include <algorithm>
@@ -18,6 +26,40 @@ namespace {
 
 D2D1_COLOR_F ToD2D(const ccl::doc::Color& color) noexcept {
     return D2D1::ColorF(color.r, color.g, color.b, color.a);
+}
+
+// Nine ways for a shadow to fall: 0 to 7 clockwise from straight up, and 8
+// straight underneath, where the throw is nothing and only the spread shows.
+constexpr float kShadowAcross[] = {0.0f,   0.7071f,  1.0f,  0.7071f, 0.0f,
+                                   -0.7071f, -1.0f, -0.7071f, 0.0f};
+constexpr float kShadowDown[] = {-1.0f, -0.7071f, 0.0f,  0.7071f, 1.0f,
+                                 0.7071f, 0.0f, -0.7071f, 0.0f};
+
+// How far the shadow is thrown, in the text's own coordinates.
+D2D1_POINT_2F ShadowThrow(const ccl::doc::TextAnnotation& text) noexcept {
+    const int way =
+        text.shadowDirection >= 0 &&
+                text.shadowDirection < static_cast<int>(ARRAYSIZE(kShadowAcross))
+            ? text.shadowDirection
+            : 3;
+    return D2D1::Point2F(kShadowAcross[way] * text.shadowLength,
+                         kShadowDown[way] * text.shadowLength);
+}
+
+// How far it spreads: half of how far it is thrown. Deriving it means one
+// number settles the whole shadow, and there is no way to ask for a hard edge
+// -- which is deliberate, since a hard shadow is a copy of the letters sitting
+// beside them rather than something cast by them.
+float ShadowSpread(const ccl::doc::TextAnnotation& text) noexcept {
+    return text.shadowLength * 0.5f;
+}
+
+// The scale a transform carries, however it is composed. Taken from the area
+// it multiplies by rather than from one entry, so that the turn applied while
+// a rotation is being previewed does not read as a change of size.
+float ScaleOf(const D2D1_MATRIX_3X2_F& matrix) noexcept {
+    return std::sqrt(
+        std::fabs(matrix.m11 * matrix.m22 - matrix.m12 * matrix.m21));
 }
 
 }  // namespace
@@ -1619,13 +1661,17 @@ void Renderer::BakeTexts(float zoom) noexcept {
             continue;
         }
         // Room for whatever stands out past the glyphs: the edge goes round
-        // them, the shadow falls to one side of them, and a rounded join adds
-        // a little more at the corners.
+        // them, the shadow falls to one side of them and spreads past where it
+        // lands, and a rounded join adds a little more at the corners.
+        const float reach =
+            annotation.text.shadow
+                ? annotation.text.shadowLength +
+                      ShadowSpread(annotation.text) * 3.0f
+                : 0.0f;
         const float spread =
             (std::max)(annotation.text.outline ? annotation.text.outlineWidth
                                                : 0.0f,
-                       annotation.text.shadow ? annotation.text.shadowLength
-                                              : 0.0f) +
+                       reach) +
             2.0f;
         bounds.left -= spread;
         bounds.top -= spread;
@@ -1681,6 +1727,102 @@ void Renderer::BakeTexts(float zoom) noexcept {
     }
 }
 
+void Renderer::DrawTextShadow(ID2D1Geometry* shape,
+                              const ccl::doc::TextAnnotation& text,
+                              const D2D1_MATRIX_3X2_F& placed) noexcept {
+    if (shape == nullptr || !target_ || !brush_) {
+        return;
+    }
+
+    const D2D1_POINT_2F throw_ = ShadowThrow(text);
+    // The throw goes into the transform rather than being added to the result,
+    // so that it turns and scales with everything else: a shadow cast down-
+    // right stays down-right of the letters at any zoom, and follows them
+    // round while a rotation is being previewed.
+    const D2D1_MATRIX_3X2_F thrown =
+        D2D1::Matrix3x2F::Translation(throw_.x, throw_.y) * placed;
+
+    // What to fall back on. A shadow with a hard edge is not what was asked
+    // for, but it beats a piece of text that suddenly has none.
+    const auto plain = [&]() {
+        brush_->SetColor(ToD2D(text.shadowColor));
+        target_->SetTransform(thrown);
+        target_->FillGeometry(shape, brush_.Get());
+    };
+
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext> context;
+    if (FAILED(target_.As(&context)) || !context) {
+        plain();
+        return;
+    }
+
+    // Both the throw and the spread are whole pixels at 100%, so the spread
+    // has to be taken up to the pixels actually being drawn to.
+    const float spread = ShadowSpread(text) * ScaleOf(placed);
+    if (spread <= 0.0f) {
+        plain();
+        return;
+    }
+
+    D2D1_RECT_F bounds{};
+    if (FAILED(shape->GetBounds(thrown, &bounds))) {
+        plain();
+        return;
+    }
+    // Three deviations out, a Gaussian has nothing left worth keeping.
+    const float margin = spread * 3.0f + 2.0f;
+    bounds.left -= margin;
+    bounds.top -= margin;
+    bounds.right += margin;
+    bounds.bottom += margin;
+
+    const float wide = bounds.right - bounds.left;
+    const float tall = bounds.bottom - bounds.top;
+    if (wide <= 0.0f || tall <= 0.0f || wide > 16000.0f || tall > 16000.0f) {
+        plain();
+        return;
+    }
+
+    // A surface of its own, because the spread has to reach past the letters
+    // without taking the letters with it.
+    Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> sheet;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ink;
+    if (FAILED(target_->CreateCompatibleRenderTarget(D2D1::SizeF(wide, tall),
+                                                     &sheet)) ||
+        !sheet ||
+        FAILED(sheet->CreateSolidColorBrush(ToD2D(text.shadowColor), &ink))) {
+        plain();
+        return;
+    }
+
+    sheet->BeginDraw();
+    sheet->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    sheet->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    sheet->SetTransform(
+        thrown * D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top));
+    sheet->FillGeometry(shape, ink.Get());
+    sheet->SetTransform(D2D1::Matrix3x2F::Identity());
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> filled;
+    if (FAILED(sheet->EndDraw()) || FAILED(sheet->GetBitmap(&filled)) ||
+        !filled) {
+        plain();
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1Effect> blur;
+    if (FAILED(context->CreateEffect(CLSID_D2D1GaussianBlur, &blur)) || !blur) {
+        plain();
+        return;
+    }
+    blur->SetInput(0, filled.Get());
+    blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, spread);
+
+    // The surface was filled in the pixels being drawn to, so it goes back
+    // with no transform of its own, at the corner it was measured from.
+    context->SetTransform(D2D1::Matrix3x2F::Identity());
+    context->DrawImage(blur.Get(), D2D1::Point2F(bounds.left, bounds.top));
+}
+
 void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
                         unsigned int id) noexcept {
     if (text.text.empty() || !brush_ || context_ == nullptr) {
@@ -1723,26 +1865,8 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 
     // Screenshots are busy backgrounds, so the shadow and the outline are there
     // to keep text readable rather than to decorate it.
-    if (text.shadow && text.shadowLength > 0.0f) {
-        // Eight ways round, clockwise from straight up. A length of zero needs
-        // no direction of its own: it puts the shadow under the text, where
-        // none of it shows -- which is how one is set aside without losing the
-        // direction it was cast in.
-        static constexpr float kAcross[] = {0.0f,   0.7071f,  1.0f,  0.7071f,
-                                            0.0f,   -0.7071f, -1.0f, -0.7071f};
-        static constexpr float kDown[] = {-1.0f,   -0.7071f, 0.0f,  0.7071f,
-                                          1.0f,    0.7071f,  0.0f,  -0.7071f};
-        const int way =
-            text.shadowDirection >= 0 &&
-                    text.shadowDirection < static_cast<int>(ARRAYSIZE(kAcross))
-                ? text.shadowDirection
-                : 3;
-        brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.55f));
-        target_->SetTransform(
-            D2D1::Matrix3x2F::Translation(kAcross[way] * text.shadowLength,
-                                          kDown[way] * text.shadowLength) *
-            placed);
-        target_->FillGeometry(shape->group.Get(), brush_.Get());
+    if (text.shadow && text.shadowColor.a > 0.0f) {
+        DrawTextShadow(shape->group.Get(), text, placed);
         target_->SetTransform(placed);
     }
 

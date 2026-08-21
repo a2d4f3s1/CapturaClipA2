@@ -242,6 +242,21 @@ private:
     // from this one shape.
     const TextShape* TextShapeFor(const ccl::doc::TextAnnotation& text,
                                   unsigned int id) noexcept;
+    // Lays the shadow down: the shape filled onto a surface of its own, spread
+    // by a blur, and put back offset.
+    //
+    // A surface of its own is what the spread needs -- blurring in place would
+    // take the letters with it -- and it is why this cannot simply be a fill
+    // like the outline is. `placed` is the transform the text is drawn under,
+    // so the surface is measured in the pixels actually being drawn to and the
+    // spread stays the same width whatever the zoom.
+    //
+    // Falls back to a hard-edged offset fill if a device context or a surface
+    // cannot be had: a shadow in the wrong style beats a piece of text that
+    // suddenly has none.
+    void DrawTextShadow(ID2D1Geometry* shape,
+                        const ccl::doc::TextAnnotation& text,
+                        const D2D1_MATRIX_3X2_F& placed) noexcept;
     void DrawEffect(const ccl::doc::EffectAnnotation& effect,
                     unsigned int id) noexcept;
     // Takes a copy of what lies under each effect that has not got one yet:
