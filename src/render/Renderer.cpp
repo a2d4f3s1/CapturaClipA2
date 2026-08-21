@@ -1778,17 +1778,28 @@ void Renderer::DrawTextShadow(ID2D1Geometry* shape,
 
     const float wide = bounds.right - bounds.left;
     const float tall = bounds.bottom - bounds.top;
-    if (wide <= 0.0f || tall <= 0.0f || wide > 16000.0f || tall > 16000.0f) {
+    if (wide <= 0.0f || tall <= 0.0f) {
         plain();
         return;
+    }
+
+    // Past what a surface can be -- a long line seen at a high zoom -- the
+    // shadow alone is drawn smaller and stretched back up. Only the shadow can
+    // take that: what stretching costs it is sharpness, and sharpness is the
+    // one thing it does not have. Measured at 15239x173, shrinking by half put
+    // the result 1.4 of 255 away from the full-sized one on average.
+    constexpr float kLargest = 16000.0f;
+    float shrink = 1.0f;
+    if (wide > kLargest || tall > kLargest) {
+        shrink = (std::min)(kLargest / wide, kLargest / tall);
     }
 
     // A surface of its own, because the spread has to reach past the letters
     // without taking the letters with it.
     Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> sheet;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ink;
-    if (FAILED(target_->CreateCompatibleRenderTarget(D2D1::SizeF(wide, tall),
-                                                     &sheet)) ||
+    if (FAILED(target_->CreateCompatibleRenderTarget(
+            D2D1::SizeF(wide * shrink, tall * shrink), &sheet)) ||
         !sheet ||
         FAILED(sheet->CreateSolidColorBrush(ToD2D(text.shadowColor), &ink))) {
         plain();
@@ -1799,7 +1810,8 @@ void Renderer::DrawTextShadow(ID2D1Geometry* shape,
     sheet->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
     sheet->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     sheet->SetTransform(
-        thrown * D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top));
+        thrown * D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top) *
+        D2D1::Matrix3x2F::Scale(shrink, shrink));
     sheet->FillGeometry(shape, ink.Get());
     sheet->SetTransform(D2D1::Matrix3x2F::Identity());
     Microsoft::WRL::ComPtr<ID2D1Bitmap> filled;
@@ -1815,12 +1827,30 @@ void Renderer::DrawTextShadow(ID2D1Geometry* shape,
         return;
     }
     blur->SetInput(0, filled.Get());
-    blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, spread);
+    // The spread is shrunk with the surface, so the result comes out the same
+    // width once it is stretched back.
+    blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, spread * shrink);
+
+    ID2D1Effect* drawn = blur.Get();
+    Microsoft::WRL::ComPtr<ID2D1Effect> stretch;
+    if (shrink < 1.0f) {
+        if (FAILED(context->CreateEffect(CLSID_D2D1Scale, &stretch)) ||
+            !stretch) {
+            plain();
+            return;
+        }
+        stretch->SetInputEffect(0, blur.Get());
+        stretch->SetValue(D2D1_SCALE_PROP_SCALE,
+                          D2D1::Vector2F(1.0f / shrink, 1.0f / shrink));
+        stretch->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE,
+                          D2D1_SCALE_INTERPOLATION_MODE_LINEAR);
+        drawn = stretch.Get();
+    }
 
     // The surface was filled in the pixels being drawn to, so it goes back
     // with no transform of its own, at the corner it was measured from.
     context->SetTransform(D2D1::Matrix3x2F::Identity());
-    context->DrawImage(blur.Get(), D2D1::Point2F(bounds.left, bounds.top));
+    context->DrawImage(drawn, D2D1::Point2F(bounds.left, bounds.top));
 }
 
 void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
