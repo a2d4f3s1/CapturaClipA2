@@ -213,6 +213,8 @@ enum ControlId : UINT {
     kIdOutlineWidth,
     kIdShadowLength,
     kIdShadowDirection,
+    kIdShadowColor,
+    kIdShadowOpacity,
 
     kIdFormat,
     kIdJpegQuality,
@@ -281,6 +283,7 @@ struct Dialog {
 
     // Live colour values for the swatch buttons, which draw themselves.
     ccl::doc::Color penColor;
+    ccl::doc::Color shadowColor;
     ccl::doc::QuickColors quickColors{};
 
     // Which rows share their assignment with another row. Worked out when the
@@ -611,13 +614,21 @@ void BuildText(Dialog& dialog) noexcept {
     const HWND way =
         AddRow(dialog, L"影の向き", L"COMBOBOX", CBS_DROPDOWNLIST | WS_VSCROLL,
                kIdShadowDirection, kFieldWidth, 10);
-    for (const wchar_t* name :
-         {L"上", L"右上", L"右", L"右下", L"下", L"左下", L"左", L"左上"}) {
+    // The ninth goes on the end so that the eight already written in the
+    // settings file keep the numbers they had.
+    for (const wchar_t* name : {L"上", L"右上", L"右", L"右下", L"下", L"左下",
+                                L"左", L"左上", L"真下（にじみだけ）"}) {
         ComboBox_AddString(way, name);
     }
+    AddRow(dialog, L"影の色", L"BUTTON", BS_OWNERDRAW, kIdShadowColor,
+           kSwatchSize);
+    AddRow(dialog, L"影の濃さ (%)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdShadowOpacity,
+           kNarrowField);
     AddNote(dialog,
             L"縁も影も、文字の大きさとは無関係の太さ・長さです。"
-            L"影の長さを 0 にすると字の真下に入り、見えなくなります。",
+            L"影のにじみは長さの半分で、長くするほど広く淡くなります。"
+            L"向きを「真下」にすると、ずれずに字のまわりへ広がります。",
             false);
     EndPage(dialog);
 }
@@ -1133,6 +1144,9 @@ void Populate(Dialog& dialog) noexcept {
     SetNumber(dialog.Field(kIdShadowLength), values.textShadowLength);
     ComboBox_SetCurSel(dialog.Field(kIdShadowDirection),
                        values.textShadowDirection);
+    dialog.shadowColor = values.textShadowColor;
+    ::InvalidateRect(dialog.Field(kIdShadowColor), nullptr, TRUE);
+    SetNumber(dialog.Field(kIdShadowOpacity), values.textShadowOpacity);
 
     ComboBox_SetCurSel(dialog.Field(kIdFormat),
                        static_cast<int>(values.defaultFormat));
@@ -1224,6 +1238,9 @@ void Collect(Dialog& dialog) noexcept {
             values.textShadowDirection = way;
         }
     }
+    values.textShadowColor = dialog.shadowColor;
+    values.textShadowOpacity =
+        ReadFloat(dialog.Field(kIdShadowOpacity), values.textShadowOpacity);
 
     switch (ComboBox_GetCurSel(dialog.Field(kIdFormat))) {
         case 1: values.defaultFormat = ccl::app::ImageFormat::Jpeg; break;
@@ -1266,6 +1283,8 @@ void DrawSwatch(Dialog& dialog, const DRAWITEMSTRUCT& item) noexcept {
     const ccl::doc::Color* color = nullptr;
     if (item.CtlID == kIdPenColor) {
         color = &dialog.penColor;
+    } else if (item.CtlID == kIdShadowColor) {
+        color = &dialog.shadowColor;
     } else if (item.CtlID >= kIdQuickColorBase &&
                item.CtlID < kIdQuickColorBase + 8) {
         color = &dialog.quickColors[item.CtlID - kIdQuickColorBase];
@@ -1431,6 +1450,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (id == kIdPenColor) {
                 if (PickColor(*dialog, dialog->penColor)) {
                     ::InvalidateRect(dialog->Field(kIdPenColor), nullptr, TRUE);
+                }
+                return 0;
+            }
+            if (id == kIdShadowColor) {
+                if (PickColor(*dialog, dialog->shadowColor)) {
+                    ::InvalidateRect(dialog->Field(kIdShadowColor), nullptr,
+                                     TRUE);
                 }
                 return 0;
             }
