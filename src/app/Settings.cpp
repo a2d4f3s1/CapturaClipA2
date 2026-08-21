@@ -194,6 +194,11 @@ void Settings::Load() noexcept {
     textShadowDirection = static_cast<int>(
         ReadFloat(L"Text", L"ShadowDirection",
                   static_cast<float>(textShadowDirection), path_));
+    textShadowColor = ParseColor(
+        ReadString(L"Text", L"ShadowColor", ColorText(textShadowColor), path_),
+        textShadowColor);
+    textShadowOpacity =
+        ReadFloat(L"Text", L"ShadowOpacity", textShadowOpacity, path_);
 
     usePenPressure = ReadBool(L"Drawing", L"UsePenPressure", usePenPressure, path_);
     pressureMinScale =
@@ -308,15 +313,21 @@ void Settings::Clamp() noexcept {
     textOutlineWidth = std::roundf(textOutlineWidth);
     if (textOutlineWidth < 1.0f) textOutlineWidth = 1.0f;
     if (textOutlineWidth > 20.0f) textOutlineWidth = 20.0f;
-    // Zero is a real length: it puts the shadow under the text, where nothing
-    // of it shows. That is how a shadow is set aside without losing the
-    // direction it was cast in.
+    // Two pixels is the shortest throw worth having: at one, which way the
+    // shadow went cannot be told from one thrown straight underneath. Casting
+    // it underneath is what direction 8 is for, and turning it off is what the
+    // switch is for, so neither needs a length of its own.
     textShadowLength = std::roundf(textShadowLength);
-    if (textShadowLength < 0.0f) textShadowLength = 0.0f;
+    if (textShadowLength < 2.0f) textShadowLength = 2.0f;
     if (textShadowLength > 20.0f) textShadowLength = 20.0f;
-    if (textShadowDirection < 0 || textShadowDirection > 7) {
+    if (textShadowDirection < 0 || textShadowDirection > 8) {
         textShadowDirection = 3;
     }
+    // A shadow of nothing is a shadow turned off, which the switch already
+    // says. Whole percent: the spinner and the file agree on what is allowed.
+    textShadowOpacity = std::roundf(textShadowOpacity);
+    if (textShadowOpacity < 1.0f) textShadowOpacity = 1.0f;
+    if (textShadowOpacity > 100.0f) textShadowOpacity = 100.0f;
     // A capture that waits minutes before grabbing the screen is a hang, not a
     // setting.
     if (preparationMs > 10000) preparationMs = 10000;
@@ -362,12 +373,17 @@ void Settings::Save() const noexcept {
                L"Shadow=%d\n"
                L"Outline=%d\n"
                L"; Thickness of the outline and length of the shadow, in whole\n"
-               L"; pixels. Neither follows the size of the text.\n"
+               L"; pixels. Neither follows the size of the text. The shadow is\n"
+               L"; thrown at least 2, and spreads by half of what it is thrown.\n"
                L"OutlineWidth=%g\n"
                L"ShadowLength=%g\n"
                L"; Which way the shadow falls: 0 is straight up, then clockwise\n"
-               L"; to 7. A length of 0 hides it under the text.\n"
+               L"; to 7. 8 casts it straight underneath, where only the spread\n"
+               L"; shows -- a glow rather than a shadow.\n"
                L"ShadowDirection=%d\n"
+               L"; What the shadow is cast in, and how strong it is in percent.\n"
+               L"ShadowColor=%s\n"
+               L"ShadowOpacity=%g\n"
                L"\n"
                L"[Drawing]\n"
                L"; Vary stroke width with pen pressure. Needs a pressure-\n"
@@ -490,6 +506,7 @@ void Settings::Save() const noexcept {
                preparationMs, copyOnCapture ? 1 : 0, textFontFamily.c_str(),
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
                textOutlineWidth, textShadowLength, textShadowDirection,
+               ColorText(textShadowColor).c_str(), textShadowOpacity,
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
                ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
                arrowScale, arrowAspect, arrowRounding, arrowTurnDegrees,

@@ -146,13 +146,21 @@ struct TextAnnotation {
     // weights depending on whether the size was changed from outside or from
     // within the editor, which is what these replaced.
     //
-    // The shadow is cast in one of eight directions, numbered clockwise from
-    // straight up. A length of zero is a real choice: it puts the shadow under
-    // the text where none of it shows, which sets one aside without losing the
-    // direction it was cast in.
+    // The shadow is thrown one of nine ways: 0 to 7 go clockwise from straight
+    // up, and 8 puts it under the text, where the spread alone shows -- a glow
+    // rather than a shadow. Two pixels is the shortest throw worth having; at
+    // one, which way it went cannot be told from straight underneath.
+    //
+    // How far it spreads is not stored: it is half the distance thrown. One
+    // number then settles the whole shadow, and every shadow is a soft one.
     float outlineWidth = 2.0f;
     float shadowLength = 2.0f;
     int shadowDirection = 3;  // down-right, where a shadow is usually expected
+
+    // What the shadow is cast in, the alpha carrying how strong it is. Held
+    // apart from the outline's colour: the two are chosen separately, and a
+    // shadow is usually not the colour an edge would be.
+    Color shadowColor{0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 enum class EffectKind {

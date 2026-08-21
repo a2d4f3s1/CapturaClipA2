@@ -69,11 +69,25 @@ public:
     // grew with the font came out at two different weights depending on where
     // the size had been changed from.
     //
-    // The shadow falls one of eight ways round, clockwise from straight up,
-    // with a ninth that puts it under the text where it cannot be seen.
+    // The shadow is thrown one of nine ways: 0 to 7 clockwise from straight up,
+    // and 8 straight underneath, where only its spread shows. How far it
+    // spreads follows the distance thrown, so there is nothing to set for it.
     float textOutlineWidth = 2.0f;
     float textShadowLength = 2.0f;
     int textShadowDirection = 3;
+    // The colour is held without its strength because the settings file writes
+    // colours as six hex digits and has nowhere to put an alpha. The two are
+    // put together when a piece of text is given them.
+    ccl::doc::Color textShadowColor{0.0f, 0.0f, 0.0f, 1.0f};
+    float textShadowOpacity = 100.0f;  // percent
+
+    // The two halves above put back together, which is the form everything
+    // outside this class wants.
+    ccl::doc::Color ShadowColor() const noexcept {
+        ccl::doc::Color colour = textShadowColor;
+        colour.a = textShadowOpacity / 100.0f;
+        return colour;
+    }
 
     // Drawing
     bool usePenPressure = true;

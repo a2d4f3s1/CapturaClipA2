@@ -2874,6 +2874,7 @@ void ClipWindow::CommitText() noexcept {
         annotation.text.outlineWidth = tool_.textOutlineWidth;
         annotation.text.shadowLength = tool_.textShadowLength;
         annotation.text.shadowDirection = tool_.textShadowDirection;
+        annotation.text.shadowColor = tool_.textShadowColor;
     }
     annotation.text.runs = std::move(runs);
 
@@ -5368,6 +5369,7 @@ void ClipWindow::OpenSettings() noexcept {
     tool_.textOutlineWidth = settings_->textOutlineWidth;
     tool_.textShadowLength = settings_->textShadowLength;
     tool_.textShadowDirection = settings_->textShadowDirection;
+    tool_.textShadowColor = settings_->ShadowColor();
 
     UpdateTitle();
     Draw();
@@ -5629,6 +5631,7 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     tool_.textOutlineWidth = settings.textOutlineWidth;
     tool_.textShadowLength = settings.textShadowLength;
     tool_.textShadowDirection = settings.textShadowDirection;
+    tool_.textShadowColor = settings.ShadowColor();
     tool_.SeedDefaults(settings.penColor, settings.penWidth,
                        settings.eraserWidth, settings.quickColors);
     ccl::timing::Stopwatch watch;

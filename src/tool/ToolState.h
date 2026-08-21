@@ -42,11 +42,14 @@ public:
     bool textShadow = false;
     bool textOutline = true;
     // Whole pixels at 100%, and nothing to do with how large the text is. The
-    // shadow falls one of eight ways round; a length of zero puts it under the
-    // text, where none of it shows.
+    // shadow is thrown one of nine ways: 0 to 7 clockwise from straight up, and
+    // 8 straight underneath, where only its spread shows.
     float textOutlineWidth = 2.0f;
     float textShadowLength = 2.0f;
     int textShadowDirection = 3;  // down-right
+    // Carries how strong the shadow is in its alpha, unlike the settings file,
+    // which has to keep the two apart.
+    ccl::doc::Color textShadowColor{0.0f, 0.0f, 0.0f, 1.0f};
 
     // Strength last used for each obscuring effect, so the next one starts
     // where the last was left. Negative means "not chosen yet", in which case
