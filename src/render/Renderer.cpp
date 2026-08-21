@@ -956,12 +956,47 @@ Microsoft::WRL::ComPtr<IDWriteTextLayout> BuildLayout(
         return layout;
     }
 
+    const DWRITE_FONT_WEIGHT weight =
+        text.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
+    const DWRITE_FONT_STYLE slant =
+        text.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+
     Microsoft::WRL::ComPtr<IDWriteTextFormat> format;
-    if (FAILED(writer->CreateTextFormat(
-            text.fontFamily.c_str(), nullptr,
-            text.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-            text.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, text.fontSize, L"", &format))) {
+    HRESULT made = writer->CreateTextFormat(
+        text.fontFamily.c_str(), nullptr, weight, slant,
+        DWRITE_FONT_STRETCH_NORMAL, text.fontSize, L"", &format);
+
+    if (FAILED(made)) {
+        // Nothing drawn is the worst thing that can happen to a piece of text:
+        // the window is the only place that picture exists, and a piece that
+        // silently disappears takes what it said with it. So a second attempt
+        // is made with values that cannot be refused -- a size DirectWrite will
+        // accept, and the face used when none is asked for.
+        //
+        // Measured (2026-08-21): of the 365 names the menu offers, the 693 the
+        // settings offer, and names that are not installed at all, none is
+        // refused. A size of zero or less is refused. That is the way in.
+        const float size =
+            text.fontSize > 0.0f ? (std::min)(text.fontSize, 400.0f) : 30.0f;
+        made = writer->CreateTextFormat(L"", nullptr, weight, slant,
+                                        DWRITE_FONT_STRETCH_NORMAL, size, L"",
+                                        &format);
+        if (ccl::timing::g_enabled) {
+            // Drawing something other than what was asked for is a repair, and
+            // a repair that leaves no trace is indistinguishable from the bug
+            // it covers. This is where to look when a piece of text comes out
+            // in the wrong face.
+            wchar_t line[192];
+            ::swprintf_s(line,
+                         L"[timing] text fallback            size %g -> %g  "
+                         L"face '%s' -> default  %s\n",
+                         text.fontSize, size, text.fontFamily.c_str(),
+                         SUCCEEDED(made) ? L"recovered" : L"still refused");
+            ccl::timing::Write(line);
+        }
+    }
+
+    if (FAILED(made)) {
         return layout;
     }
 
