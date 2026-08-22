@@ -210,6 +210,15 @@ private:
     void TurnOffIme() noexcept;
     bool EditingText() const noexcept { return editor_ != nullptr; }
 
+    // What the next piece of text will be given. Everything that needs the
+    // size or the face goes through these, so that a value changed during the
+    // session cannot be read back out of the settings file by mistake -- the
+    // two used to be the same store, and there were a dozen places reading it.
+    float CurrentTextSize() const noexcept { return tool_.textFontSize; }
+    const std::wstring& CurrentTextFont() const noexcept {
+        return tool_.textFontFamily;
+    }
+
     // Index of the text annotation under a point, or npos. Clicking existing
     // text reopens it for editing rather than starting a second one on top.
     size_t FindTextAt(D2D1_POINT_2F image) noexcept;

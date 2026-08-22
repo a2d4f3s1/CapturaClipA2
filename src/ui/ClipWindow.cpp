@@ -1686,7 +1686,7 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
     const float zoom = view_.Zoom();
     const float fontSize =
-        editingExisting_ ? editingOriginal_.fontSize : settings_->textFontSize;
+        editingExisting_ ? editingOriginal_.fontSize : CurrentTextSize();
     const int fontPixels =
         std::max(4, static_cast<int>(std::lround(fontSize * zoom)));
 
@@ -1808,7 +1808,7 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
         const LONG baseHeight =
             PixelsToTwips(editingOriginal_.fontSize * zoom, editorDpi);
         const COLORREF baseColour = ToColorRef(tool_.Color());
-        const std::wstring& baseFace = settings_->textFontFamily;
+        const std::wstring& baseFace = CurrentTextFont();
 
         for (const ccl::doc::TextRun& run : restored) {
             const float runSize = run.fontSize > 0.0f
@@ -1963,7 +1963,7 @@ void ClipWindow::StepTextSize(int steps) noexcept {
     const float zoom = std::max(0.01f, view_.Zoom());
     float size = TwipsToPixels(current.yHeight, dpi) / zoom;
     if (size <= 0.0f) {
-        size = settings_ != nullptr ? settings_->textFontSize : 30.0f;
+        size = CurrentTextSize();
     }
 
     size = SteppedFontSize(size, steps);
@@ -2021,7 +2021,7 @@ void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
     }
 
     const float fontSize =
-        editingExisting_ ? editingOriginal_.fontSize : settings_->textFontSize;
+        editingExisting_ ? editingOriginal_.fontSize : CurrentTextSize();
 
     CHARFORMAT2W format{};
     format.cbSize = sizeof(format);
@@ -2034,7 +2034,7 @@ void ClipWindow::ApplyCharFormat(bool wholeText) noexcept {
                        (tool_.textItalic ? CFE_ITALIC : 0) |
                        (tool_.textUnderline ? CFE_UNDERLINE : 0) |
                        (tool_.textStrikethrough ? CFE_STRIKEOUT : 0);
-    ::wcsncpy_s(format.szFaceName, settings_->textFontFamily.c_str(), _TRUNCATE);
+    ::wcsncpy_s(format.szFaceName, CurrentTextFont().c_str(), _TRUNCATE);
 
     // Applied to the selection so that styling affects the chosen characters,
     // or -- with nothing selected -- whatever is typed next.
@@ -2370,7 +2370,7 @@ void ClipWindow::BeginNumberEntry(NumberKind kind) noexcept {
         }
     } else {
         switch (kind) {
-            case NumberKind::FontSize: value = settings_->textFontSize; break;
+            case NumberKind::FontSize: value = CurrentTextSize(); break;
             case NumberKind::OutlineWidth:
                 value = tool_.textOutlineWidth;
                 break;
@@ -2432,10 +2432,10 @@ void ClipWindow::ApplyNumber(float value) noexcept {
 
     if (numberTarget_ == static_cast<size_t>(-1)) {
         // Nothing pointed at, so this is what the next piece of text will be
-        // given. The size still lives in the settings rather than beside the
-        // others; moving it is a separate piece of work.
+        // given: the session's own values, none of which reach the settings
+        // file.
         switch (numberKind_) {
-            case NumberKind::FontSize: settings_->textFontSize = value; break;
+            case NumberKind::FontSize: tool_.textFontSize = value; break;
             case NumberKind::OutlineWidth:
                 tool_.textOutlineWidth = value;
                 break;
@@ -2447,6 +2447,10 @@ void ClipWindow::ApplyNumber(float value) noexcept {
                 break;
             default: break;
         }
+        // The caption carries the size the next piece of text will be given,
+        // and said the old one until something else happened to redraw it.
+        // Nothing on the picture changes here, so there is nothing to draw.
+        UpdateTitle();
         return;
     }
     if (numberTarget_ >= document_->Annotations().size()) {
@@ -2822,9 +2826,9 @@ ccl::doc::TextAnnotation ClipWindow::EditorSnapshot() noexcept {
         snapshot.runs = MoveRuns(ReadRuns(length), StoredOffsets(raw));
     }
 
-    snapshot.fontSize = editingExisting_ ? editingOriginal_.fontSize
-                                         : settings_->textFontSize;
-    snapshot.fontFamily = settings_->textFontFamily;
+    snapshot.fontSize =
+        editingExisting_ ? editingOriginal_.fontSize : CurrentTextSize();
+    snapshot.fontFamily = CurrentTextFont();
     snapshot.color = tool_.Color();
     snapshot.bold = tool_.textBold;
     snapshot.italic = tool_.textItalic;
@@ -3005,8 +3009,8 @@ void ClipWindow::CommitText() noexcept {
     annotation.text.y = editorY_;
 
     if (!wasEditing) {
-        annotation.text.fontSize = settings_->textFontSize;
-        annotation.text.fontFamily = settings_->textFontFamily;
+        annotation.text.fontSize = CurrentTextSize();
+        annotation.text.fontFamily = CurrentTextFont();
     }
 
     annotation.text.color = tool_.Color();
@@ -4246,7 +4250,7 @@ void ClipWindow::UpdateTitle() noexcept {
             break;
         case ccl::tool::Tool::Text:
             ::swprintf_s(title, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
-                         settings_ != nullptr ? settings_->textFontSize : 0.0f);
+                         CurrentTextSize());
             break;
         case ccl::tool::Tool::Select:
         case ccl::tool::Tool::Lasso: {
@@ -4577,8 +4581,8 @@ HMENU ClipWindow::BuildFontMenu() noexcept {
         ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
                        reinterpret_cast<LPARAM>(&format));
         current = format.szFaceName;
-    } else if (settings_ != nullptr) {
-        current = settings_->textFontFamily;
+    } else {
+        current = CurrentTextFont();
     }
 
     const auto& fonts = InstalledFonts(context_->Text());
@@ -5528,6 +5532,11 @@ void ClipWindow::OpenSettings() noexcept {
         CommitText();
     }
 
+    // Held so that what the dialog actually changed can be told from what it
+    // merely showed. Anything it left alone keeps the value this session is
+    // working with, which is not always what the settings file says.
+    const ccl::app::Settings before = *settings_;
+
     // The window takes focus while it is up, which the editor would otherwise
     // read as clicking away.
     ++suppressCommitDepth_;
@@ -5544,18 +5553,34 @@ void ClipWindow::OpenSettings() noexcept {
     renderer_.SetArrowShape(settings_->arrowScale, settings_->arrowAspect,
                             settings_->arrowRounding);
     view_.SetZoomStepPercent(settings_->zoomStepPercent);
-    tool_.usePressure = settings_->usePenPressure;
-    tool_.quickColors = settings_->quickColors;
+
     // The text defaults too. They were seeded when the window opened and left
     // alone after, so changing them here did nothing until the next run -- the
-    // settings appeared to be ignored. Whatever was switched from the menu
-    // during this session gives way to what has just been chosen here.
-    tool_.textShadow = settings_->textShadow;
-    tool_.textOutline = settings_->textOutline;
-    tool_.textOutlineWidth = settings_->textOutlineWidth;
-    tool_.textShadowLength = settings_->textShadowLength;
-    tool_.textShadowDirection = settings_->textShadowDirection;
-    tool_.textShadowColor = settings_->ShadowColor();
+    // settings appeared to be ignored.
+    //
+    // Only what was actually altered in the dialog is taken. Taking all of it
+    // meant that opening the settings and pressing OK put back every value the
+    // menu had changed during the session, whether or not the dialog had
+    // anything to say about it.
+    const auto take = [](auto& session, const auto& now, const auto& was) {
+        if (now != was) {
+            session = now;
+        }
+    };
+    take(tool_.usePressure, settings_->usePenPressure, before.usePenPressure);
+    take(tool_.quickColors, settings_->quickColors, before.quickColors);
+    take(tool_.textFontSize, settings_->textFontSize, before.textFontSize);
+    take(tool_.textFontFamily, settings_->textFontFamily,
+         before.textFontFamily);
+    take(tool_.textShadow, settings_->textShadow, before.textShadow);
+    take(tool_.textOutline, settings_->textOutline, before.textOutline);
+    take(tool_.textOutlineWidth, settings_->textOutlineWidth,
+         before.textOutlineWidth);
+    take(tool_.textShadowLength, settings_->textShadowLength,
+         before.textShadowLength);
+    take(tool_.textShadowDirection, settings_->textShadowDirection,
+         before.textShadowDirection);
+    take(tool_.textShadowColor, settings_->ShadowColor(), before.ShadowColor());
 
     UpdateTitle();
     Draw();
@@ -5812,6 +5837,8 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
                             settings.arrowRounding);
     renderer_.SetBorderWidth(BorderWidth());
     tool_.usePressure = settings.usePenPressure;
+    tool_.textFontSize = settings.textFontSize;
+    tool_.textFontFamily = settings.textFontFamily;
     tool_.textShadow = settings.textShadow;
     tool_.textOutline = settings.textOutline;
     tool_.textOutlineWidth = settings.textOutlineWidth;

@@ -13,6 +13,11 @@ struct Color {
     float g = 0.0f;
     float b = 0.0f;
     float a = 1.0f;
+
+    // Compared exactly, field by field, and only ever to answer "is this still
+    // the value it was given". Colours here are carried about rather than
+    // calculated, so either it is the same one or it came from somewhere else.
+    friend bool operator==(const Color&, const Color&) noexcept = default;
 };
 
 // The colours reachable with Shift+1..8, which are also the palette's fixed top

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
 #include <vector>
 
 #include "doc/Annotation.h"
@@ -37,6 +38,13 @@ public:
     bool textItalic = false;
     bool textUnderline = false;
     bool textStrikethrough = false;
+    // What the next piece of text is given. Seeded from the settings file like
+    // the rest of these and changed from the menu during a session -- which is
+    // why it lives here rather than in the settings: written there, a size
+    // meant for one piece of text became the saved default the next time the
+    // settings dialog was closed with OK.
+    float textFontSize = 30.0f;
+    std::wstring textFontFamily = L"Meiryo";
     // Backing that keeps text readable over a screenshot. Seeded from the
     // settings file and toggleable per piece of text.
     bool textShadow = false;
