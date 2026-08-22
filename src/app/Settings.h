@@ -80,6 +80,10 @@ public:
     // put together when a piece of text is given them.
     ccl::doc::Color textShadowColor{0.0f, 0.0f, 0.0f, 1.0f};
     float textShadowOpacity = 100.0f;  // percent
+    // The edge is drawn in this. Kept whole, unlike the shadow's, because an
+    // edge is either there or it is not: a half-transparent one lets the busy
+    // background it is there to hide come through.
+    ccl::doc::Color textOutlineColor{0.0f, 0.0f, 0.0f, 1.0f};
 
     // The two halves above put back together, which is the form everything
     // outside this class wants.

@@ -291,7 +291,24 @@ private:
     void SetShadowDirection(int way) noexcept;
     // The colour the shadow is cast in. How strong it is stays as it was: the
     // palette has nowhere to show a strength, so that is typed separately.
-    void ChooseShadowColor() noexcept;
+    // `owner` is what the palette is opened under -- see ChooseOutlineColor.
+    void ChooseShadowColor(HWND owner) noexcept;
+    // The same, for the edge. Kept apart rather than parameterised: the shadow
+    // has to hold its strength aside while a colour is mixed, and the edge has
+    // no strength to hold.
+    //
+    // `owner` is what the palette is opened under. The decoration panel passes
+    // itself, so that the palette counts as one of its own and does not read
+    // as "the pointer went elsewhere".
+    void ChooseOutlineColor(HWND owner) noexcept;
+
+    // The eight edge-and-shadow settings on one panel, so that dressing a
+    // piece of text does not mean opening the menu once per setting. Every row
+    // goes back through the call the menu would have made, so there is one
+    // rule for what a change means and one place that records it.
+    void OpenDecorPanel() noexcept;
+    // A value from the panel, put through the same apply as the number box.
+    void ApplyDecorNumber(NumberKind kind, float value) noexcept;
     // Flips one of the four switches on the text being hovered. Says whether
     // there was a text to flip it on: with none, the caller carries on and
     // changes what the next piece of text will be given instead.
@@ -578,6 +595,11 @@ private:
     // enough is treated as a click and opens the text for editing instead.
     // Text under the pointer, outlined so it is clear what a click would edit.
     size_t hoveredTextIndex_ = static_cast<size_t>(-1);
+    // True while the decoration panel is up. What it acts on is settled when
+    // it opens, so the piece being pointed at is held still for as long as it
+    // is: without this, walking the pointer past the panel would move the
+    // outline onto another piece while the panel went on changing the first.
+    bool decorOpen_ = false;
     // The text whose size is being stepped, so that a run of presses records
     // one undo step rather than one per press. Zero while nothing is.
     unsigned int resizingTextId_ = 0;

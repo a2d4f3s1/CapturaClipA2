@@ -47,6 +47,7 @@ constexpr CommandInfo kCommands[] = {
     {L"Mosaic", L"モザイク", {'M', false, false, false}},
     {L"Blur", L"ぼかし", {'M', false, true, false}},
     {L"InsertArrowhead", L"矢印の頭を挿入", {'R', false, false, false}},
+    {L"TextDecor", L"文字の飾り", {'D', true, false, false}},
 };
 
 static_assert(ARRAYSIZE(kCommands) == static_cast<size_t>(Command::Count),

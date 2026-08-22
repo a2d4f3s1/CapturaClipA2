@@ -38,6 +38,7 @@ set(APP_SOURCES
     src/ui/ClipWindow.cpp
     src/ui/ColorPopup.cpp
     src/ui/ColorPreview.cpp
+    src/ui/DecorPanel.cpp
     src/ui/RotateDialog.cpp
     src/ui/SettingsDialog.cpp
     src/util/Dpi.cpp
@@ -66,6 +67,7 @@ set(APP_HEADERS
     src/ui/ClipWindow.h
     src/ui/ColorPopup.h
     src/ui/ColorPreview.h
+    src/ui/DecorPanel.h
     src/ui/RotateDialog.h
     src/res/Resources.h
     src/ui/SettingsDialog.h

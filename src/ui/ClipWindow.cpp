@@ -23,6 +23,7 @@
 #include "render/D2DContext.h"
 #include "res/Resources.h"
 #include "ui/ColorPopup.h"
+#include "ui/DecorPanel.h"
 #include "ui/RotateDialog.h"
 #include "ui/SettingsDialog.h"
 #include "util/Dpi.h"
@@ -257,6 +258,8 @@ enum MenuId : UINT {
     kMenuShadowLength,
     kMenuShadowColor,
     kMenuShadowOpacity,
+    kMenuOutlineColor,
+    kMenuTextDecor,
 
     // Range bases, kept together at the end. Putting one in the middle renumbers
     // everything after it into that range, which is how the colour entry ended
@@ -2153,6 +2156,212 @@ void ClipWindow::ToggleTextShadow() noexcept {
     Draw();
 }
 
+void ClipWindow::ChooseOutlineColor(HWND owner) noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    POINT screen = lastCursor_;
+    ::ClientToScreen(hwnd_, &screen);
+
+    // The piece being pointed at takes it; failing that, it is what the next
+    // piece will be given.
+    const size_t target = HoveredTextTarget();
+    const ccl::doc::Color original =
+        target != static_cast<size_t>(-1)
+            ? document_->Annotations()[target].text.outlineColor
+            : tool_.textOutlineColor;
+
+    ccl::doc::TextAnnotation before;
+    if (target != static_cast<size_t>(-1)) {
+        before = document_->Annotations()[target].text;
+    }
+
+    ++suppressCommitDepth_;
+    ColorPopup popup;
+    const auto chosen = popup.Show(
+        owner != nullptr ? owner : hwnd_, screen, original, tool_.quickColors,
+        tool_.RecentColors(),
+        settings_ != nullptr ? settings_->paletteScalePercent : 100,
+        [this, target](const ccl::doc::Color& colour) {
+            // Shown as it is mixed, without recording a step for every shade
+            // the pointer passes over.
+            if (target != static_cast<size_t>(-1)) {
+                ccl::doc::Annotation& annotation =
+                    document_->MutableAnnotations()[target];
+                annotation.text.outlineColor = colour;
+                renderer_.InvalidateTextPixels(annotation.id);
+                Draw();
+            }
+        });
+
+    if (target != static_cast<size_t>(-1) &&
+        target < document_->Annotations().size()) {
+        // What the preview painted over is put back, so that accepting records
+        // one step and walking away records none.
+        document_->MutableAnnotations()[target].text = before;
+        if (chosen.has_value()) {
+            history_.Record(document_->Annotations(), ToolForHistory());
+            ccl::doc::Annotation& annotation =
+                document_->MutableAnnotations()[target];
+            annotation.text.outlineColor = *chosen;
+            renderer_.InvalidateTextPixels(annotation.id);
+        }
+    } else if (chosen.has_value()) {
+        tool_.textOutlineColor = *chosen;
+    }
+
+    --suppressCommitDepth_;
+    Draw();
+}
+
+void ClipWindow::ApplyDecorNumber(NumberKind kind, float value) noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    // The state the little number box would have put up, so that the apply
+    // below settles the range, the target and the undo step exactly as it does
+    // for a value typed there.
+    numberKind_ = kind;
+    numberTarget_ = HoveredTextTarget();
+    numberId_ = numberTarget_ != static_cast<size_t>(-1)
+                    ? document_->Annotations()[numberTarget_].id
+                    : 0;
+    const NumberField& field = FieldFor(kind);
+    const float wanted = std::clamp(value, field.low, field.high);
+
+    // What the row holds now. Leaving a box alone and moving on is not a
+    // change: without this, walking the focus round the panel would leave
+    // steps behind that undo to the very same picture.
+    float now = 0.0f;
+    if (numberTarget_ != static_cast<size_t>(-1)) {
+        const ccl::doc::TextAnnotation& text =
+            document_->Annotations()[numberTarget_].text;
+        switch (kind) {
+            case NumberKind::FontSize: now = text.fontSize; break;
+            case NumberKind::OutlineWidth: now = text.outlineWidth; break;
+            case NumberKind::ShadowLength: now = text.shadowLength; break;
+            case NumberKind::ShadowOpacity:
+                now = text.shadowColor.a * 100.0f;
+                break;
+            default: break;
+        }
+    } else {
+        switch (kind) {
+            case NumberKind::FontSize: now = CurrentTextSize(); break;
+            case NumberKind::OutlineWidth: now = tool_.textOutlineWidth; break;
+            case NumberKind::ShadowLength: now = tool_.textShadowLength; break;
+            case NumberKind::ShadowOpacity:
+                now = tool_.textShadowColor.a * 100.0f;
+                break;
+            default: break;
+        }
+    }
+    if (std::fabs(now - wanted) < 0.05f) {
+        return;
+    }
+
+    // ApplyNumber puts the value in but records nothing: the box it belongs to
+    // records once, when it is dismissed, so that walking a value up and down
+    // does not fill the history. A row on the panel is settled the moment it
+    // is left, so the step is recorded here instead.
+    if (numberTarget_ != static_cast<size_t>(-1)) {
+        history_.Record(document_->Annotations(), ToolForHistory());
+    }
+    ApplyNumber(wanted);
+}
+
+void ClipWindow::OpenDecorPanel() noexcept {
+    if (document_ == nullptr || hwnd_ == nullptr || editor_ != nullptr) {
+        return;
+    }
+    EndNumberEntry(true);
+
+    POINT screen = lastCursor_;
+    ::ClientToScreen(hwnd_, &screen);
+
+    // Read afresh after every change: what a value settled at is decided by
+    // the apply, not by what was typed, and a colour is chosen behind the
+    // panel's back.
+    const auto gather = [this]() {
+        ccl::ui::DecorValues values;
+        const size_t target = HoveredTextTarget();
+        if (target != static_cast<size_t>(-1)) {
+            const ccl::doc::TextAnnotation& text =
+                document_->Annotations()[target].text;
+            values.outline = text.outline;
+            values.outlineWidth = text.outlineWidth;
+            values.outlineColor = text.outlineColor;
+            values.shadow = text.shadow;
+            values.shadowLength = text.shadowLength;
+            values.shadowDirection = text.shadowDirection;
+            values.shadowColor = text.shadowColor;
+            values.shadowOpacity = text.shadowColor.a * 100.0f;
+        } else {
+            values.outline = tool_.textOutline;
+            values.outlineWidth = tool_.textOutlineWidth;
+            values.outlineColor = tool_.textOutlineColor;
+            values.shadow = tool_.textShadow;
+            values.shadowLength = tool_.textShadowLength;
+            values.shadowDirection = tool_.textShadowDirection;
+            values.shadowColor = tool_.textShadowColor;
+            values.shadowOpacity = tool_.textShadowColor.a * 100.0f;
+        }
+        return values;
+    };
+
+    // Held still while the panel is up, so that what it acts on cannot change
+    // under it, and so that the outline round that piece stays where it is.
+    decorOpen_ = true;
+    ++suppressCommitDepth_;
+
+    ccl::ui::DecorPanel panel;
+    panel.Show(
+        hwnd_, screen, gather(),
+        settings_ != nullptr ? settings_->paletteScalePercent : 100,
+        [this, &panel, &gather](ccl::ui::DecorPanel::Field field,
+                       const ccl::ui::DecorValues& values) {
+            using Field = ccl::ui::DecorPanel::Field;
+            switch (field) {
+                case Field::Outline: ToggleTextOutline(); break;
+                case Field::Shadow: ToggleTextShadow(); break;
+                case Field::OutlineWidth:
+                    ApplyDecorNumber(NumberKind::OutlineWidth,
+                                     values.outlineWidth);
+                    break;
+                case Field::ShadowLength:
+                    ApplyDecorNumber(NumberKind::ShadowLength,
+                                     values.shadowLength);
+                    break;
+                case Field::ShadowOpacity:
+                    ApplyDecorNumber(NumberKind::ShadowOpacity,
+                                     values.shadowOpacity);
+                    break;
+                case Field::ShadowDirection:
+                    SetShadowDirection(values.shadowDirection);
+                    break;
+                default: break;
+            }
+            // Toggling and stepping do not redraw when they act on what the
+            // next piece will be given, since nothing on the picture changed.
+            Draw();
+            panel.Refresh(gather());
+        },
+        [this, &panel, &gather](ccl::ui::DecorPanel::Field field, HWND owner) {
+            using Field = ccl::ui::DecorPanel::Field;
+            if (field == Field::OutlineColor) {
+                ChooseOutlineColor(owner);
+            } else {
+                ChooseShadowColor(owner);
+            }
+            panel.Refresh(gather());
+        });
+
+    --suppressCommitDepth_;
+    decorOpen_ = false;
+    UpdateTitle();
+    Draw();
+}
+
 void ClipWindow::SetShadowDirection(int way) noexcept {
     const size_t target = HoveredTextTarget();
     if (target == static_cast<size_t>(-1)) {
@@ -2168,7 +2377,7 @@ void ClipWindow::SetShadowDirection(int way) noexcept {
     Draw();
 }
 
-void ClipWindow::ChooseShadowColor() noexcept {
+void ClipWindow::ChooseShadowColor(HWND owner) noexcept {
     if (document_ == nullptr) {
         return;
     }
@@ -2198,7 +2407,8 @@ void ClipWindow::ChooseShadowColor() noexcept {
     ++suppressCommitDepth_;
     ColorPopup popup;
     const auto chosen = popup.Show(
-        hwnd_, screen, original, tool_.quickColors, tool_.RecentColors(),
+        owner != nullptr ? owner : hwnd_, screen, original, tool_.quickColors,
+        tool_.RecentColors(),
         settings_ != nullptr ? settings_->paletteScalePercent : 100,
         [this, target, keepStrength](const ccl::doc::Color& colour) {
             // Shown as it is mixed, without recording a step for every shade
@@ -3029,6 +3239,7 @@ void ClipWindow::CommitText() noexcept {
         annotation.text.shadowLength = tool_.textShadowLength;
         annotation.text.shadowDirection = tool_.textShadowDirection;
         annotation.text.shadowColor = tool_.textShadowColor;
+        annotation.text.outlineColor = tool_.textOutlineColor;
     }
     annotation.text.runs = std::move(runs);
 
@@ -3620,7 +3831,8 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 
     // With the text tool, outline whatever is under the pointer so it is
     // obvious what clicking would open.
-    if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr) {
+    if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr &&
+        !decorOpen_) {
         const size_t hovered = FindTextAt(ToImage(client));
         if (hovered != hoveredTextIndex_) {
             hoveredTextIndex_ = hovered;
@@ -3897,6 +4109,9 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
             return true;
         case ccl::app::Command::InsertArrowhead:
             InsertArrowhead();
+            return true;
+        case ccl::app::Command::TextDecor:
+            OpenDecorPanel();
             return true;
         case ccl::app::Command::Eyedropper:
             OnCommand(kMenuEyedropper);
@@ -4827,6 +5042,18 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(textStyle,
                   MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
                   kMenuOutlineWidth, L"縁の太さ...");
+    ::AppendMenuW(textStyle,
+                  MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
+                  kMenuOutlineColor, L"縁の色...");
+    // All of the above on one panel. Kept at the head of what it covers rather
+    // than at the top of the menu: it is another way to reach these rows, not
+    // a thing of its own.
+    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(
+        textStyle, MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
+        kMenuTextDecor,
+        withKey(L"飾り...", ccl::app::Command::TextDecor).c_str());
+    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(textStyle, shadowFlags, kMenuTextShadow, L"影");
     // Under the switch they belong to, the way the edge's thickness sits under
     // the edge. All four say what the shadow looks like, so they stay together
@@ -5179,7 +5406,13 @@ void ClipWindow::OnCommand(int command) noexcept {
             BeginNumberEntry(NumberKind::ShadowOpacity);
             return;
         case kMenuShadowColor:
-            ChooseShadowColor();
+            ChooseShadowColor(nullptr);
+            return;
+        case kMenuOutlineColor:
+            ChooseOutlineColor(nullptr);
+            return;
+        case kMenuTextDecor:
+            OpenDecorPanel();
             return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
@@ -5581,6 +5814,8 @@ void ClipWindow::OpenSettings() noexcept {
     take(tool_.textShadowDirection, settings_->textShadowDirection,
          before.textShadowDirection);
     take(tool_.textShadowColor, settings_->ShadowColor(), before.ShadowColor());
+    take(tool_.textOutlineColor, settings_->textOutlineColor,
+         before.textOutlineColor);
 
     UpdateTitle();
     Draw();
@@ -5845,6 +6080,7 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     tool_.textShadowLength = settings.textShadowLength;
     tool_.textShadowDirection = settings.textShadowDirection;
     tool_.textShadowColor = settings.ShadowColor();
+    tool_.textOutlineColor = settings.textOutlineColor;
     tool_.SeedDefaults(settings.penColor, settings.penWidth,
                        settings.eraserWidth, settings.quickColors);
     ccl::timing::Stopwatch watch;

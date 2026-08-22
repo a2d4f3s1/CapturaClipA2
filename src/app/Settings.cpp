@@ -197,6 +197,9 @@ void Settings::Load() noexcept {
     textShadowColor = ParseColor(
         ReadString(L"Text", L"ShadowColor", ColorText(textShadowColor), path_),
         textShadowColor);
+    textOutlineColor = ParseColor(
+        ReadString(L"Text", L"OutlineColor", ColorText(textOutlineColor), path_),
+        textOutlineColor);
     textShadowOpacity =
         ReadFloat(L"Text", L"ShadowOpacity", textShadowOpacity, path_);
 
@@ -384,6 +387,8 @@ void Settings::Save() const noexcept {
                L"; What the shadow is cast in, and how strong it is in percent.\n"
                L"ShadowColor=%s\n"
                L"ShadowOpacity=%g\n"
+               L"; What the outline is drawn in.\n"
+               L"OutlineColor=%s\n"
                L"\n"
                L"[Drawing]\n"
                L"; Vary stroke width with pen pressure. Needs a pressure-\n"
@@ -507,6 +512,7 @@ void Settings::Save() const noexcept {
                textFontSize, textShadow ? 1 : 0, textOutline ? 1 : 0,
                textOutlineWidth, textShadowLength, textShadowDirection,
                ColorText(textShadowColor).c_str(), textShadowOpacity,
+               ColorText(textOutlineColor).c_str(),
                usePenPressure ? 1 : 0, pressureMinScale, penWidth,
                ColorText(penColor).c_str(), eraserWidth, lineSnapDegrees,
                arrowScale, arrowAspect, arrowRounding, arrowTurnDegrees,

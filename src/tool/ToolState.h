@@ -58,6 +58,7 @@ public:
     // Carries how strong the shadow is in its alpha, unlike the settings file,
     // which has to keep the two apart.
     ccl::doc::Color textShadowColor{0.0f, 0.0f, 0.0f, 1.0f};
+    ccl::doc::Color textOutlineColor{0.0f, 0.0f, 0.0f, 1.0f};
 
     // Strength last used for each obscuring effect, so the next one starts
     // where the last was left. Negative means "not chosen yet", in which case
