@@ -228,8 +228,6 @@ enum MenuId : UINT {
     kMenuItalic,
     kMenuUnderline,
     kMenuStrikethrough,
-    kMenuTextOutline,
-    kMenuTextShadow,
     kMenuFill,
     kMenuFillMarker,
     kMenuOutline,
@@ -254,11 +252,6 @@ enum MenuId : UINT {
     kMenuColorPicker,
     kMenuExit,
     kMenuTextSize,
-    kMenuOutlineWidth,
-    kMenuShadowLength,
-    kMenuShadowColor,
-    kMenuShadowOpacity,
-    kMenuOutlineColor,
     kMenuTextDecor,
 
     // Range bases, kept together at the end. Putting one in the middle renumbers
@@ -267,16 +260,8 @@ enum MenuId : UINT {
     kMenuToolBase = 200,    // + Tool
     kMenuWidthBase = 400,   // + index into kWidthPresets
     kMenuZoomBase = 500,    // + zoom in hundreds of percent
-    kMenuShadowWayBase = 600,  // + which way the shadow is thrown, 0 to 8
     kMenuFontBase = 1000,   // + index into the installed font list
 };
-
-// The nine ways round, in the order they are numbered. The last is not a
-// direction at all: it leaves the shadow under the letters, where only its
-// spread shows.
-constexpr const wchar_t* kShadowWayNames[] = {
-    L"上",   L"右上", L"右",   L"右下",             L"下",
-    L"左下", L"左",   L"左上", L"真下（にじみだけ）"};
 
 ccl::doc::Color FromColorRef(COLORREF value) noexcept {
     return ccl::doc::Color{GetRValue(value) / 255.0f, GetGValue(value) / 255.0f,
@@ -4840,15 +4825,20 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     ::AppendMenuW(menu, tool_.textStrikethrough ? checked : plain,
                   kMenuStrikethrough, L"打ち消し線");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Offered but not usable from in here. The outline and the shadow are drawn
+    // Offered but not usable from in here. The edge and the shadow are drawn
     // when the text is, not while it is being typed, so switching one now would
     // change nothing on screen; they are changed from outside instead, on the
     // text being pointed at. Left visible rather than removed, so that looking
     // for them finds them, greyed, where they have always been.
     const UINT locked = MF_STRING | MF_GRAYED;
-    ::AppendMenuW(menu, locked, kMenuTextOutline, L"縁取り");
-    ::AppendMenuW(menu, locked, kMenuOutlineWidth, L"縁の太さ...");
-    ::AppendMenuW(menu, locked, kMenuTextShadow, L"影");
+    // Shown with its key, from the bindings rather than written in, so the
+    // menu still tells the truth after the key has been reassigned.
+    const std::wstring decor =
+        L"飾り..." + (settings_ != nullptr
+                          ? settings_->shortcuts.MenuSuffix(
+                                ccl::app::Command::TextDecor)
+                          : std::wstring());
+    ::AppendMenuW(menu, locked, kMenuTextDecor, decor.c_str());
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, plain, kMenuCommitText, L"確定\tEsc");
 
@@ -5025,57 +5015,17 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(textStyle, isStruck ? checked : plain, kMenuStrikethrough,
                   L"打ち消し線");
     ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
-    // While the box is open these two are shown but cannot be used: what is
-    // being typed is drawn by the box, which has neither an outline nor a
-    // shadow to switch.
-    const bool hasOutline =
-        pointed != nullptr ? pointed->outline : tool_.textOutline;
-    const bool hasShadow =
-        pointed != nullptr ? pointed->shadow : tool_.textShadow;
-    const UINT outlineFlags =
-        (hasOutline ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
-    const UINT shadowFlags =
-        (hasShadow ? checked : plain) | (editor_ != nullptr ? MF_GRAYED : 0);
-    ::AppendMenuW(textStyle, outlineFlags, kMenuTextOutline, L"縁取り");
-    // Under the switch it belongs to, rather than beside the size: it is the
-    // thickness of that edge, not another size of the text.
-    ::AppendMenuW(textStyle,
-                  MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
-                  kMenuOutlineWidth, L"縁の太さ...");
-    ::AppendMenuW(textStyle,
-                  MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
-                  kMenuOutlineColor, L"縁の色...");
-    // All of the above on one panel. Kept at the head of what it covers rather
-    // than at the top of the menu: it is another way to reach these rows, not
-    // a thing of its own.
-    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
+    // The edge and the shadow are on the panel, switches and all. They had ten
+    // rows between them here once, which made this a list to be read rather
+    // than a thing to point at -- and changing two of them meant opening the
+    // menu twice.
+    //
+    // Greyed while the box is open, as those rows were: what is being typed is
+    // drawn by the box, which has neither an edge nor a shadow to switch.
     ::AppendMenuW(
         textStyle, MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0),
         kMenuTextDecor,
         withKey(L"飾り...", ccl::app::Command::TextDecor).c_str());
-    ::AppendMenuW(textStyle, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(textStyle, shadowFlags, kMenuTextShadow, L"影");
-    // Under the switch they belong to, the way the edge's thickness sits under
-    // the edge. All four say what the shadow looks like, so they stay together
-    // and in the order it is described: how far, which way, what colour, how
-    // strong.
-    const UINT shadowValueFlags =
-        MF_STRING | (editor_ != nullptr ? MF_GRAYED : 0);
-    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowLength, L"影の長さ...");
-    const HMENU shadowWays = ::CreatePopupMenu();
-    const int currentWay =
-        pointed != nullptr ? pointed->shadowDirection : tool_.textShadowDirection;
-    for (int way = 0; way < static_cast<int>(ARRAYSIZE(kShadowWayNames)); ++way) {
-        ::AppendMenuW(shadowWays,
-                      (way == currentWay ? checked : plain) |
-                          (editor_ != nullptr ? MF_GRAYED : 0),
-                      kMenuShadowWayBase + way, kShadowWayNames[way]);
-    }
-    ::AppendMenuW(textStyle, MF_POPUP | (editor_ != nullptr ? MF_GRAYED : 0),
-                  reinterpret_cast<UINT_PTR>(shadowWays), L"影の向き");
-    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowColor, L"影の色...");
-    ::AppendMenuW(textStyle, shadowValueFlags, kMenuShadowOpacity,
-                  L"影の濃さ...");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(textStyle),
                   L"文字\tCtrl+B I U");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -5221,12 +5171,6 @@ void ClipWindow::OnCommand(int command) noexcept {
         return;
     }
 
-    if (id >= kMenuShadowWayBase &&
-        id < kMenuShadowWayBase + ARRAYSIZE(kShadowWayNames)) {
-        SetShadowDirection(static_cast<int>(id - kMenuShadowWayBase));
-        return;
-    }
-
     if (id >= kMenuZoomBase) {
         const ZoomAnchor anchor = KeyZoomAnchor();
         view_.SetZoom(static_cast<float>(id - kMenuZoomBase) / 100.0f);
@@ -5351,12 +5295,6 @@ void ClipWindow::OnCommand(int command) noexcept {
             ApplyTextEffect(CFM_STRIKEOUT, CFE_STRIKEOUT,
                             tool_.textStrikethrough);
             return;
-        case kMenuTextOutline:
-            ToggleTextOutline();
-            return;
-        case kMenuTextShadow:
-            ToggleTextShadow();
-            return;
         case kMenuCommitText:
             CommitText();
             return;
@@ -5395,21 +5333,6 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuTextSize:
             BeginNumberEntry(NumberKind::FontSize);
-            return;
-        case kMenuOutlineWidth:
-            BeginNumberEntry(NumberKind::OutlineWidth);
-            return;
-        case kMenuShadowLength:
-            BeginNumberEntry(NumberKind::ShadowLength);
-            return;
-        case kMenuShadowOpacity:
-            BeginNumberEntry(NumberKind::ShadowOpacity);
-            return;
-        case kMenuShadowColor:
-            ChooseShadowColor(nullptr);
-            return;
-        case kMenuOutlineColor:
-            ChooseOutlineColor(nullptr);
             return;
         case kMenuTextDecor:
             OpenDecorPanel();
