@@ -1917,6 +1917,12 @@ void ClipWindow::OpenEditor(POINT client) noexcept {
 
 void ClipWindow::SetTextFont(const std::wstring& family) noexcept {
     if (editor_ == nullptr) {
+        // Nothing is being typed and nothing is being pointed at, so this is
+        // the face the next piece of text will be given. Choosing one here did
+        // nothing at all until the session's own values were separated from
+        // the settings file: there was nowhere to put it that would not have
+        // become the saved default.
+        tool_.textFontFamily = family;
         return;
     }
 
