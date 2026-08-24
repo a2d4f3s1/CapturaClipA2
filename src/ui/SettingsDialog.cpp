@@ -142,6 +142,8 @@ constexpr AssignRow kAssignRows[] = {
      kGroupObject},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectToBack),
      kGroupObject},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectRotate),
+     kGroupObject},
 
     {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::Scroll), kGroupView},
     {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Zoom), kGroupView},

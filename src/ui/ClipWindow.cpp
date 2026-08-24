@@ -235,6 +235,11 @@ enum MenuId : UINT {
     kMenuMosaic,
     kMenuBlur,
     kMenuClearSelection,
+    kMenuObjectRotate,
+    kMenuObjectRaise,
+    kMenuObjectLower,
+    kMenuObjectToFront,
+    kMenuObjectToBack,
     kMenuCrop,
     kMenuRotateLeft,
     kMenuRotateRight,
@@ -1231,8 +1236,17 @@ bool ClipWindow::AnnotationBounds(const ccl::doc::Annotation& annotation,
             }
             return any;
         }
-        case ccl::doc::AnnotationKind::Text:
-            return renderer_.MeasureText(annotation.text, bounds);
+        case ccl::doc::AnnotationKind::Text: {
+            if (!renderer_.MeasureText(annotation.text, bounds)) {
+                return false;
+            }
+            if (annotation.text.angle != 0.0f) {
+                bounds = ccl::render::TurnedBounds(
+                    bounds, annotation.text.angle,
+                    D2D1::Point2F(annotation.text.x, annotation.text.y));
+            }
+            return true;
+        }
         case ccl::doc::AnnotationKind::Area: {
             if (!ShapesBounds(annotation.area.shape, bounds)) {
                 return false;
@@ -1253,6 +1267,45 @@ bool ClipWindow::AnnotationBounds(const ccl::doc::Annotation& annotation,
             return true;
     }
     return false;
+}
+
+bool ClipWindow::TextHit(const ccl::doc::TextAnnotation& text,
+                         D2D1_POINT_2F at) noexcept {
+    D2D1_RECT_F box{};
+    if (!renderer_.MeasureText(text, box)) {
+        return false;
+    }
+    if (text.angle != 0.0f) {
+        const D2D1_MATRIX_3X2_F back = D2D1::Matrix3x2F::Rotation(
+            -text.angle, D2D1::Point2F(text.x, text.y));
+        at = D2D1::Matrix3x2F::ReinterpretBaseType(&back)->TransformPoint(at);
+    }
+    return PointInRect(box, at.x, at.y);
+}
+
+bool ClipWindow::TextOutlinePoints(const ccl::doc::TextAnnotation& text,
+                                   std::vector<D2D1_POINT_2F>& out) noexcept {
+    D2D1_RECT_F box{};
+    if (!renderer_.MeasureText(text, box)) {
+        return false;
+    }
+    ccl::doc::SelectionShape asShape;
+    asShape.left = box.left;
+    asShape.top = box.top;
+    asShape.right = box.right;
+    asShape.bottom = box.bottom;
+    const size_t first = out.size();
+    ShapePoints(asShape, out);
+    if (text.angle == 0.0f) {
+        return true;
+    }
+    const D2D1_MATRIX_3X2_F turn =
+        D2D1::Matrix3x2F::Rotation(text.angle, D2D1::Point2F(text.x, text.y));
+    for (size_t i = first; i < out.size(); ++i) {
+        out[i] =
+            D2D1::Matrix3x2F::ReinterpretBaseType(&turn)->TransformPoint(out[i]);
+    }
+    return true;
 }
 
 bool ClipWindow::AnnotationTouched(
@@ -1308,17 +1361,10 @@ bool ClipWindow::AnnotationTouched(
             break;
         }
         case ccl::doc::AnnotationKind::Text: {
-            D2D1_RECT_F box{};
-            if (!AnnotationBounds(annotation, box)) {
+            std::vector<D2D1_POINT_2F> points;
+            if (!TextOutlinePoints(annotation.text, points)) {
                 return false;
             }
-            std::vector<D2D1_POINT_2F> points;
-            ccl::doc::SelectionShape asShape;
-            asShape.left = box.left;
-            asShape.top = box.top;
-            asShape.right = box.right;
-            asShape.bottom = box.bottom;
-            ShapePoints(asShape, points);
             for (const D2D1_POINT_2F& point : points) {
                 if (bandReaches(point.x, point.y)) {
                     return true;
@@ -1354,14 +1400,11 @@ bool ClipWindow::AnnotationTouched(
                     return true;
                 }
                 break;
-            case ccl::doc::AnnotationKind::Text: {
-                D2D1_RECT_F box{};
-                if (AnnotationBounds(annotation, box) &&
-                    PointInRect(box, point.x, point.y)) {
+            case ccl::doc::AnnotationKind::Text:
+                if (TextHit(annotation.text, point)) {
                     return true;
                 }
                 break;
-            }
             default:
                 break;
         }
@@ -1462,6 +1505,140 @@ void ClipWindow::EndPickedDrag() noexcept {
     pickedDragMoved_ = false;
     pickedOriginals_.clear();
     ::ReleaseCapture();
+    UpdateTitle();
+    Draw();
+}
+
+bool ClipWindow::PickedBounds(D2D1_RECT_F& bounds) noexcept {
+    if (document_ == nullptr || pickedIds_.empty()) {
+        return false;
+    }
+    bool any = false;
+    for (const ccl::doc::Annotation& annotation : document_->Annotations()) {
+        if (std::find(pickedIds_.begin(), pickedIds_.end(), annotation.id) ==
+            pickedIds_.end()) {
+            continue;
+        }
+        D2D1_RECT_F box{};
+        if (!AnnotationBounds(annotation, box)) {
+            continue;
+        }
+        if (!any) {
+            bounds = box;
+            any = true;
+            continue;
+        }
+        bounds.left = (std::min)(bounds.left, box.left);
+        bounds.top = (std::min)(bounds.top, box.top);
+        bounds.right = (std::max)(bounds.right, box.right);
+        bounds.bottom = (std::max)(bounds.bottom, box.bottom);
+    }
+    return any;
+}
+
+void ClipWindow::ApplyPickedTurn(
+    const std::vector<ccl::doc::Annotation>& originals, D2D1_POINT_2F about,
+    float degrees) noexcept {
+    if (document_ == nullptr || originals.empty()) {
+        return;
+    }
+    const D2D1_MATRIX_3X2_F turn =
+        D2D1::Matrix3x2F::Rotation(degrees, about);
+
+    ccl::doc::AnnotationList& annotations = document_->MutableAnnotations();
+    for (ccl::doc::Annotation& annotation : annotations) {
+        for (const ccl::doc::Annotation& original : originals) {
+            if (original.id != annotation.id) {
+                continue;
+            }
+            annotation = original;
+            switch (annotation.kind) {
+                case ccl::doc::AnnotationKind::Stroke:
+                    for (ccl::doc::StrokePoint& point :
+                         annotation.stroke.points) {
+                        const D2D1_POINT_2F moved =
+                            D2D1::Matrix3x2F::ReinterpretBaseType(&turn)
+                                ->TransformPoint(
+                                    D2D1::Point2F(point.x, point.y));
+                        point.x = moved.x;
+                        point.y = moved.y;
+                    }
+                    break;
+                case ccl::doc::AnnotationKind::Area:
+                    ccl::doc::TurnShapes(annotation.area.shape, degrees,
+                                         about.x, about.y);
+                    break;
+                case ccl::doc::AnnotationKind::Text: {
+                    // The corner is carried round, and the piece is told to sit
+                    // that much further round itself. Together they come to the
+                    // same place a rigid turn would put it.
+                    const D2D1_POINT_2F moved =
+                        D2D1::Matrix3x2F::ReinterpretBaseType(&turn)
+                            ->TransformPoint(D2D1::Point2F(annotation.text.x,
+                                                           annotation.text.y));
+                    annotation.text.x = moved.x;
+                    annotation.text.y = moved.y;
+                    annotation.text.angle += degrees;
+                    break;
+                }
+                case ccl::doc::AnnotationKind::Effect:
+                    break;
+            }
+            renderer_.InvalidateShape(annotation.id);
+            break;
+        }
+    }
+}
+
+void ClipWindow::RotatePicked() noexcept {
+    if (document_ == nullptr || pickedIds_.empty() ||
+        !IsObjectTool(tool_.tool)) {
+        return;
+    }
+
+    D2D1_RECT_F bounds{};
+    if (!PickedBounds(bounds)) {
+        return;
+    }
+    // The middle of what is picked, which is the point that stays where it is
+    // -- the same choice turning the whole picture makes about the picture.
+    const D2D1_POINT_2F about =
+        D2D1::Point2F((bounds.left + bounds.right) * 0.5f,
+                      (bounds.top + bounds.bottom) * 0.5f);
+
+    std::vector<ccl::doc::Annotation> originals;
+    for (const ccl::doc::Annotation& annotation : document_->Annotations()) {
+        if (std::find(pickedIds_.begin(), pickedIds_.end(), annotation.id) !=
+            pickedIds_.end()) {
+            originals.push_back(annotation);
+        }
+    }
+    if (originals.empty()) {
+        return;
+    }
+
+    // Held rather than recorded now: a turn that is thought better of should
+    // leave no step behind, and the pieces are moved about while the angle is
+    // being chosen.
+    const ccl::doc::AnnotationList before = document_->Annotations();
+
+    const auto degrees =
+        ccl::ui::ShowRotateDialog(hwnd_, [this, &originals, about](float angle) {
+            // Shown by turning the pieces themselves rather than by laying a
+            // transform over the drawing: what is on screen while the angle is
+            // chosen is then the result, not a picture of it.
+            ApplyPickedTurn(originals, about, angle);
+            Draw();
+        });
+
+    if (!degrees.has_value()) {
+        ApplyPickedTurn(originals, about, 0.0f);
+        Draw();
+        return;
+    }
+
+    ApplyPickedTurn(originals, about, *degrees);
+    history_.Record(before, ToolForHistory());
     UpdateTitle();
     Draw();
 }
@@ -2138,12 +2315,7 @@ size_t ClipWindow::FindTextAt(D2D1_POINT_2F image) noexcept {
             continue;
         }
 
-        D2D1_RECT_F bounds{};
-        if (!renderer_.MeasureText(annotation.text, bounds)) {
-            continue;
-        }
-        if (image.x >= bounds.left && image.x <= bounds.right &&
-            image.y >= bounds.top && image.y <= bounds.bottom) {
+        if (TextHit(annotation.text, image)) {
             return i - 1;
         }
     }
@@ -4727,6 +4899,9 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
         case ccl::app::Command::ObjectToBack:
             ReorderPicked(-1, true);
             return true;
+        case ccl::app::Command::ObjectRotate:
+            RotatePicked();
+            return true;
         // Routed through the menu commands so there is one path to each of
         // these, whether it was reached by key or by menu. Each does nothing
         // without an area selected, which is the whole of the condition: an
@@ -5758,6 +5933,29 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(selection),
                   L"選択範囲");
 
+    // What was drawn on the picture, rather than an area of it. Kept as a block
+    // of its own next to the area one: the two read alike and act on different
+    // things, so putting them together is what makes the difference visible.
+    const UINT objectState =
+        pickedIds_.empty() ? (plain | MF_GRAYED) : plain;
+    const HMENU objects = ::CreatePopupMenu();
+    ::AppendMenuW(objects, objectState, kMenuObjectRotate,
+                  withKey(L"回転...", ccl::app::Command::ObjectRotate).c_str());
+    ::AppendMenuW(objects, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(objects, objectState, kMenuObjectRaise,
+                  withKey(L"前へ出す", ccl::app::Command::ObjectRaise).c_str());
+    ::AppendMenuW(
+        objects, objectState, kMenuObjectLower,
+        withKey(L"後ろへ送る", ccl::app::Command::ObjectLower).c_str());
+    ::AppendMenuW(
+        objects, objectState, kMenuObjectToFront,
+        withKey(L"最前面へ", ccl::app::Command::ObjectToFront).c_str());
+    ::AppendMenuW(
+        objects, objectState, kMenuObjectToBack,
+        withKey(L"最背面へ", ccl::app::Command::ObjectToBack).c_str());
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(objects),
+                  L"オブジェクト");
+
     // Reshaping the picture. Every one of these burns the annotations in, so
     // they are kept together and away from the tools.
     const HMENU image = ::CreatePopupMenu();
@@ -5999,6 +6197,21 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuOutlineMarker:
             PaintSelection(ccl::doc::kHighlighterOpacity, tool_.Width());
+            return;
+        case kMenuObjectRotate:
+            RotatePicked();
+            return;
+        case kMenuObjectRaise:
+            ReorderPicked(1, false);
+            return;
+        case kMenuObjectLower:
+            ReorderPicked(-1, false);
+            return;
+        case kMenuObjectToFront:
+            ReorderPicked(1, true);
+            return;
+        case kMenuObjectToBack:
+            ReorderPicked(-1, true);
             return;
         case kMenuMosaic:
             ApplyEffectToSelection(ccl::doc::EffectKind::Mosaic);

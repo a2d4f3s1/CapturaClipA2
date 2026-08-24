@@ -72,4 +72,13 @@ bool IsSingleRect(const SelectionShapes& shapes) noexcept;
 // moving it means moving that shape.
 void TranslateShapes(SelectionShapes& shapes, float dx, float dy) noexcept;
 
+// Turns every piece about a point, clockwise, in degrees.
+//
+// A rectangle becomes a four-cornered polygon on the way: this holds either an
+// upright rectangle or a path, and a turned rectangle is neither. The picture
+// that comes out is the same one; what is lost is only the knowledge that it
+// used to be a rectangle.
+void TurnShapes(SelectionShapes& shapes, float degrees, float aboutX,
+                float aboutY) noexcept;
+
 }  // namespace ccl::doc

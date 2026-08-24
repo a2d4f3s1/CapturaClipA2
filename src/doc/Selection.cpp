@@ -1,6 +1,7 @@
 #include "doc/Selection.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace ccl::doc {
 namespace {
@@ -123,6 +124,41 @@ bool SelectionNearEdge(const SelectionShapes& shapes, float x, float y,
 
 bool IsSingleRect(const SelectionShapes& shapes) noexcept {
     return shapes.size() == 1 && !shapes.front().lasso;
+}
+
+void TurnShapes(SelectionShapes& shapes, float degrees, float aboutX,
+                float aboutY) noexcept {
+    // Clockwise on screen for a positive angle, which is what turning by hand
+    // looks like -- the picture's vertical runs downwards, so the signs come
+    // out the other way round from the ones in a textbook.
+    const float radians = degrees * 3.14159265358979323846f / 180.0f;
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+
+    for (SelectionShape& shape : shapes) {
+        if (!shape.lasso) {
+            const float left = shape.left;
+            const float top = shape.top;
+            const float right = shape.right;
+            const float bottom = shape.bottom;
+            shape.lasso = true;
+            shape.points.clear();
+            shape.points.push_back({left, top});
+            shape.points.push_back({right, top});
+            shape.points.push_back({right, bottom});
+            shape.points.push_back({left, bottom});
+            shape.left = 0.0f;
+            shape.top = 0.0f;
+            shape.right = 0.0f;
+            shape.bottom = 0.0f;
+        }
+        for (SelectionPoint& point : shape.points) {
+            const float dx = point.x - aboutX;
+            const float dy = point.y - aboutY;
+            point.x = aboutX + dx * cosine - dy * sine;
+            point.y = aboutY + dx * sine + dy * cosine;
+        }
+    }
 }
 
 void TranslateShapes(SelectionShapes& shapes, float dx, float dy) noexcept {

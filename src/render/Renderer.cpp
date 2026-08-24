@@ -64,6 +64,31 @@ float ScaleOf(const D2D1_MATRIX_3X2_F& matrix) noexcept {
 
 }  // namespace
 
+D2D1_RECT_F TurnedBounds(const D2D1_RECT_F& box, float degrees,
+                         D2D1_POINT_2F about) noexcept {
+    const D2D1_MATRIX_3X2_F turn = D2D1::Matrix3x2F::Rotation(degrees, about);
+    const D2D1_POINT_2F corners[4] = {
+        D2D1::Point2F(box.left, box.top), D2D1::Point2F(box.right, box.top),
+        D2D1::Point2F(box.right, box.bottom),
+        D2D1::Point2F(box.left, box.bottom)};
+
+    D2D1_RECT_F turned{};
+    for (int i = 0; i < 4; ++i) {
+        const D2D1_POINT_2F moved =
+            D2D1::Matrix3x2F::ReinterpretBaseType(&turn)->TransformPoint(
+                corners[i]);
+        if (i == 0) {
+            turned = D2D1::RectF(moved.x, moved.y, moved.x, moved.y);
+            continue;
+        }
+        turned.left = (std::min)(turned.left, moved.x);
+        turned.top = (std::min)(turned.top, moved.y);
+        turned.right = (std::max)(turned.right, moved.x);
+        turned.bottom = (std::max)(turned.bottom, moved.y);
+    }
+    return turned;
+}
+
 void Renderer::Attach(D2DContext& context, HWND hwnd) noexcept {
     context_ = &context;
     hwnd_ = hwnd;
@@ -111,6 +136,12 @@ void Renderer::InvalidateResults() noexcept {
     shapeCache_.clear();
     bakedCache_.clear();
     effectCache_.clear();
+    // The paths traced by lines and the shapes of painted patches belong here
+    // too. They did not while nothing could change one in place -- an
+    // annotation was made or unmade, never altered -- but moving and turning
+    // do exactly that, and a step back then put the old coordinates in the
+    // document while the picture went on being drawn from the new ones.
+    geometryCache_.clear();
 }
 
 void Renderer::ReportStats() const noexcept {
@@ -1691,7 +1722,8 @@ void Renderer::BakeTexts(float zoom) noexcept {
             continue;
         }
         const auto found = bakedCache_.find(annotation.id);
-        if (found != bakedCache_.end() && found->second.scale == zoom) {
+        if (found != bakedCache_.end() && found->second.scale == zoom &&
+            found->second.angle == annotation.text.angle) {
             continue;
         }
 
@@ -1716,6 +1748,15 @@ void Renderer::BakeTexts(float zoom) noexcept {
         bounds.top -= spread;
         bounds.right += spread;
         bounds.bottom += spread;
+
+        // A turned piece needs a sheet big enough for where its corners land.
+        // Turned about its own corner, so that is the point the corners are
+        // swung around.
+        if (annotation.text.angle != 0.0f) {
+            bounds = TurnedBounds(bounds, annotation.text.angle,
+                                  D2D1::Point2F(annotation.text.x,
+                                                annotation.text.y));
+        }
 
         const float wide = (bounds.right - bounds.left) * zoom;
         const float tall = (bounds.bottom - bounds.top) * zoom;
@@ -1760,6 +1801,7 @@ void Renderer::BakeTexts(float zoom) noexcept {
                                    bounds.right - annotation.text.x,
                                    bounds.bottom - annotation.text.y);
         baked.scale = zoom;
+        baked.angle = annotation.text.angle;
         if (SUCCEEDED(sheet->GetBitmap(&baked.bitmap)) && baked.bitmap) {
             bakedCache_[annotation.id] = std::move(baked);
         }
@@ -1928,7 +1970,14 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
     // and scroll, or a turn being previewed.
     D2D1_MATRIX_3X2_F scene{};
     target_->GetTransform(&scene);
+    // Turned first, about the text's own corner, and then carried to where the
+    // corner sits. Composed this way round the shadow's throw is turned with
+    // the letters, which is what a decoration attached to them should do.
     const D2D1_MATRIX_3X2_F placed =
+        (text.angle == 0.0f
+             ? D2D1::Matrix3x2F::Identity()
+             : D2D1::Matrix3x2F::Rotation(text.angle,
+                                          D2D1::Point2F(0.0f, 0.0f))) *
         D2D1::Matrix3x2F::Translation(text.x, text.y) * scene;
     target_->SetTransform(placed);
 

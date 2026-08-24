@@ -136,6 +136,15 @@ struct TextAnnotation {
     // string; when present they override it for the ranges they cover.
     std::vector<TextRun> runs;
 
+    // How far the text is turned, in degrees clockwise, about the corner above.
+    //
+    // About its own corner rather than its middle, so that drawing it never has
+    // to measure it first -- measuring lays the text out again, and that would
+    // land on every frame. Turning a piece about some other point is done by
+    // turning this corner about that point as well, which comes to the same
+    // place: a turn of a turn is a turn, and the corner is carried by it.
+    float angle = 0.0f;
+
     // Width the text wraps at, in image pixels. Zero means no wrapping. Stored
     // so the drawn result breaks in the same places it did while being typed.
     float wrapWidth = 0.0f;

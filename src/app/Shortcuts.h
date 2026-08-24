@@ -41,6 +41,7 @@ enum class Command {
     ObjectLower,
     ObjectToFront,
     ObjectToBack,
+    ObjectRotate,
     ColorPicker,
     Highlighter,
     Antialias,

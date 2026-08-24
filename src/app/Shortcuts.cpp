@@ -44,6 +44,9 @@ constexpr CommandInfo kCommands[] = {
     {L"ObjectLower", L"後ろへ送る", {VK_NEXT, false, false, false}},
     {L"ObjectToFront", L"最前面へ", {VK_PRIOR, true, false, false}},
     {L"ObjectToBack", L"最背面へ", {VK_NEXT, true, false, false}},
+    // Ctrl+R, next to the R that puts an arrowhead on a line: both are about
+    // which way something points.
+    {L"ObjectRotate", L"回転...", {'R', true, false, false}},
     {L"ColorPicker", L"色を選ぶ", {'I', false, false, false}},
     {L"Highlighter", L"蛍光マーカー", {'H', false, false, false}},
     {L"Antialias", L"なめらかにする", {'A', false, false, false}},

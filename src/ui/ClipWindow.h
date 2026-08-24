@@ -429,6 +429,15 @@ private:
     // measured.
     bool AnnotationBounds(const ccl::doc::Annotation& annotation,
                           D2D1_RECT_F& bounds) noexcept;
+    // True when the point falls on the text, allowing for how far it is turned.
+    // The point is turned back rather than the box being turned forward: a
+    // turned box is no longer a box, and the comparison would need a polygon.
+    bool TextHit(const ccl::doc::TextAnnotation& text,
+                 D2D1_POINT_2F at) noexcept;
+    // The text's box as it actually sits -- corners, middle and edge midpoints,
+    // turned. Used to ask whether a band drawn on the picture reaches it.
+    bool TextOutlinePoints(const ccl::doc::TextAnnotation& text,
+                           std::vector<D2D1_POINT_2F>& out) noexcept;
     // True when the band just dragged out reaches any part of the annotation.
     // Taken at the annotation's own points rather than at its box, so that a
     // lasso drawn between two strokes does not pick up both.
@@ -453,6 +462,17 @@ private:
     // place. Several pieces keep their order relative to each other, so a
     // group sent forward arrives looking the same as it left.
     void ReorderPicked(int toward, bool allTheWay) noexcept;
+    // Asks how far to turn what is picked, showing the result on the picture
+    // while the angle is chosen, as turning the whole picture does.
+    void RotatePicked() noexcept;
+    // Puts the pieces back as they were and turns them by `degrees` about
+    // `about`. Rebuilt from the copies every time rather than turned again and
+    // again, so that walking the angle up and back down lands exactly where it
+    // started.
+    void ApplyPickedTurn(const std::vector<ccl::doc::Annotation>& originals,
+                         D2D1_POINT_2F about, float degrees) noexcept;
+    // The box round everything picked, in image coordinates.
+    bool PickedBounds(D2D1_RECT_F& bounds) noexcept;
     // Drops anything picked that no longer exists, which is what undo and the
     // eraser can leave behind.
     void PrunePicked() noexcept;

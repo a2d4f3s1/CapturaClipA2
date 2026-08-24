@@ -24,6 +24,13 @@ inline constexpr int kWindowBorder = 1;
 
 class D2DContext;
 
+// The box that holds a box after it has been turned. Used where something has
+// to be big enough for a turned piece -- the sheet it is drawn on, the frame
+// that says it is picked out -- and in both places an upright box round the
+// turned one is what is wanted, not the turned box itself.
+D2D1_RECT_F TurnedBounds(const D2D1_RECT_F& box, float degrees,
+                         D2D1_POINT_2F about) noexcept;
+
 // A piece of the shape a piece of text traces, and which run of that text it
 // belongs to. The run is kept rather than the colour: the shape outlives many
 // frames, and recolouring must not mean tracing the glyphs again.
@@ -346,6 +353,11 @@ private:
         Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
         D2D1_RECT_F offset{};   // image units, from the text's own position
         float scale = 0.0f;     // device pixels per image pixel
+        // The turn the sheet was drawn at. Held so that turning a piece
+        // prepares a new sheet rather than turning the one already drawn:
+        // turning a picture of letters resamples it, and the diagonals of the
+        // strokes come out soft. Drawn turned, nothing is ever resampled.
+        float angle = 0.0f;
     };
     std::unordered_map<unsigned int, BakedText> bakedCache_;
     bool baking_ = false;
