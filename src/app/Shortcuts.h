@@ -34,6 +34,13 @@ enum class Command {
     ToolObjectSelect,
     ToolObjectLasso,
     Eyedropper,
+    // Where what is picked sits in the stack. These do nothing unless something
+    // is picked, so they are quiet everywhere else without being told about
+    // tools -- the same arrangement the area commands use.
+    ObjectRaise,
+    ObjectLower,
+    ObjectToFront,
+    ObjectToBack,
     ColorPicker,
     Highlighter,
     Antialias,

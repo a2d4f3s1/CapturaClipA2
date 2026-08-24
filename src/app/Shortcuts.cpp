@@ -37,6 +37,13 @@ constexpr CommandInfo kCommands[] = {
     // Shift+I rather than I, which the palette already has. Both are about
     // choosing a colour, so they are kept on the same key.
     {L"Eyedropper", L"ツール: スポイト", {'I', false, true, false}},
+    // PageUp and PageDown, which nothing else uses. The arrow keys were the
+    // other candidate and were left alone: they scroll, and Ctrl with up or
+    // down already turns an arrowhead while there is one to turn.
+    {L"ObjectRaise", L"前へ出す", {VK_PRIOR, false, false, false}},
+    {L"ObjectLower", L"後ろへ送る", {VK_NEXT, false, false, false}},
+    {L"ObjectToFront", L"最前面へ", {VK_PRIOR, true, false, false}},
+    {L"ObjectToBack", L"最背面へ", {VK_NEXT, true, false, false}},
     {L"ColorPicker", L"色を選ぶ", {'I', false, false, false}},
     {L"Highlighter", L"蛍光マーカー", {'H', false, false, false}},
     {L"Antialias", L"なめらかにする", {'A', false, false, false}},

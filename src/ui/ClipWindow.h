@@ -448,6 +448,11 @@ private:
     void BeginPickedDrag(POINT client) noexcept;
     void ContinuePickedDrag(POINT client) noexcept;
     void EndPickedDrag() noexcept;
+    // Moves what is picked through the stack. `toward` is +1 for the front and
+    // -1 for the back; `allTheWay` sends it past everything rather than one
+    // place. Several pieces keep their order relative to each other, so a
+    // group sent forward arrives looking the same as it left.
+    void ReorderPicked(int toward, bool allTheWay) noexcept;
     // Drops anything picked that no longer exists, which is what undo and the
     // eraser can leave behind.
     void PrunePicked() noexcept;

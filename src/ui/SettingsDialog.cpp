@@ -42,6 +42,10 @@ enum Group : int {
     kGroupTool,
     kGroupDraw,
     kGroupSelection,
+    // Kept apart from the one above. That one is about an area of the picture;
+    // this one is about the things drawn on it, and folding them together
+    // would make "selected" mean two different things on one list.
+    kGroupObject,
     kGroupView,
     kGroupWindow,
     kGroupCount,
@@ -49,7 +53,7 @@ enum Group : int {
 
 const wchar_t* const kGroupNames[kGroupCount] = {
     L"編集",   L"ファイル", L"ツール",     L"描く",
-    L"選択範囲", L"表示",     L"ウィンドウ",
+    L"選択範囲", L"オブジェクト", L"表示",     L"ウィンドウ",
 };
 
 // What a row of the list is assigned from. The three are separate spaces: a
@@ -129,6 +133,15 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::Mosaic),
      kGroupSelection},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Blur), kGroupSelection},
+
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectRaise),
+     kGroupObject},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectLower),
+     kGroupObject},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectToFront),
+     kGroupObject},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ObjectToBack),
+     kGroupObject},
 
     {RowKind::Drag, static_cast<int>(ccl::app::MouseCommand::Scroll), kGroupView},
     {RowKind::Wheel, static_cast<int>(ccl::app::MouseCommand::Zoom), kGroupView},

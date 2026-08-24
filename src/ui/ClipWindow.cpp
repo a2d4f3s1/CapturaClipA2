@@ -1466,6 +1466,83 @@ void ClipWindow::EndPickedDrag() noexcept {
     Draw();
 }
 
+void ClipWindow::ReorderPicked(int toward, bool allTheWay) noexcept {
+    if (document_ == nullptr || pickedIds_.empty()) {
+        return;
+    }
+    // Worked out on a copy first. Asking the document for a writable list moves
+    // its revision on whether or not anything is written, and a press that
+    // cannot move anything -- what is picked is already at the front -- should
+    // leave no step behind and no frame to draw.
+    ccl::doc::AnnotationList list = document_->Annotations();
+    const size_t count = list.size();
+    if (count < 2) {
+        return;
+    }
+
+    // Plain chars rather than a vector of bool: that one hands out a proxy
+    // instead of a reference, and the swaps below cannot take hold of it.
+    std::vector<char> picked(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+        picked[i] = std::find(pickedIds_.begin(), pickedIds_.end(),
+                              list[i].id) != pickedIds_.end()
+                        ? 1
+                        : 0;
+    }
+
+    if (allTheWay) {
+        // Drawn later means drawn on top, so the front of the stack is the end
+        // of the list.
+        ccl::doc::AnnotationList moved;
+        ccl::doc::AnnotationList rest;
+        for (size_t i = 0; i < count; ++i) {
+            (picked[i] ? moved : rest).push_back(list[i]);
+        }
+        list.clear();
+        if (toward > 0) {
+            list.insert(list.end(), rest.begin(), rest.end());
+            list.insert(list.end(), moved.begin(), moved.end());
+        } else {
+            list.insert(list.end(), moved.begin(), moved.end());
+            list.insert(list.end(), rest.begin(), rest.end());
+        }
+    } else if (toward > 0) {
+        // From the end, so that a run of picked pieces travels as one block
+        // rather than the first of them overtaking the rest.
+        for (size_t i = count - 1; i > 0; --i) {
+            if (picked[i - 1] && !picked[i]) {
+                std::swap(list[i - 1], list[i]);
+                std::swap(picked[i - 1], picked[i]);
+            }
+        }
+    } else {
+        for (size_t i = 1; i < count; ++i) {
+            if (picked[i] && !picked[i - 1]) {
+                std::swap(list[i - 1], list[i]);
+                std::swap(picked[i - 1], picked[i]);
+            }
+        }
+    }
+
+    bool changed = false;
+    const ccl::doc::AnnotationList& before = document_->Annotations();
+    for (size_t i = 0; i < count; ++i) {
+        if (before[i].id != list[i].id) {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) {
+        return;
+    }
+
+    history_.Record(document_->Annotations(), ToolForHistory());
+    document_->MutableAnnotations() = std::move(list);
+    // Nothing worked out for a piece has to be thrown away: what is kept is
+    // kept against the id, and the ids have only changed places.
+    Draw();
+}
+
 void ClipWindow::ApplyObjectBand(ccl::doc::SelectionOp op) noexcept {
     if (document_ == nullptr) {
         return;
@@ -4633,6 +4710,22 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
             SelectTool(tool_.tool == ccl::tool::Tool::ObjectLasso
                            ? toolBeforeObjects_
                            : ccl::tool::Tool::ObjectLasso);
+            return true;
+        // Quiet unless something is picked, which is what ReorderPicked checks.
+        // Taken here rather than only in the picking tools: what is picked is
+        // let go of on the way out of them, so there is nothing to act on
+        // anywhere else anyway.
+        case ccl::app::Command::ObjectRaise:
+            ReorderPicked(1, false);
+            return true;
+        case ccl::app::Command::ObjectLower:
+            ReorderPicked(-1, false);
+            return true;
+        case ccl::app::Command::ObjectToFront:
+            ReorderPicked(1, true);
+            return true;
+        case ccl::app::Command::ObjectToBack:
+            ReorderPicked(-1, true);
             return true;
         // Routed through the menu commands so there is one path to each of
         // these, whether it was reached by key or by menu. Each does nothing
