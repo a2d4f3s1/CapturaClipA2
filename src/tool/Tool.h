@@ -20,6 +20,16 @@ enum class Tool {
     // mode of the one above, so that which of the two is in use is visible
     // without looking for it -- the two share the area they select.
     Lasso,
+    // The two above pick out an area of the picture. These two pick out the
+    // things that were drawn on it -- a line, a patch of paint, a piece of
+    // text -- so that they can be moved, turned, or sent behind one another
+    // after the fact.
+    //
+    // Tools of their own for the same reason the lasso is one: what the left
+    // button is about to do differs, and which of the two kinds of selecting
+    // is in use should be visible without having to try it.
+    ObjectSelect,
+    ObjectLasso,
 };
 
 }  // namespace ccl::tool

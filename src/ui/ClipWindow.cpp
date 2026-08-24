@@ -533,6 +533,64 @@ bool StrokeHit(const ccl::doc::Stroke& stroke, D2D1_POINT_2F point,
     return false;
 }
 
+// Points that stand for a piece of a selection when asking whether it meets
+// something. Corners, middle and edge midpoints for a rectangle; the recorded
+// path for a lasso.
+//
+// Points rather than a folded geometry, for the same reason the eraser works
+// this way: the question is asked while a band is being dragged out, and
+// building a shape each time to answer it is work out of all proportion.
+void ShapePoints(const ccl::doc::SelectionShape& shape,
+                 std::vector<D2D1_POINT_2F>& out) {
+    if (shape.lasso) {
+        for (const ccl::doc::SelectionPoint& point : shape.points) {
+            out.push_back(D2D1::Point2F(point.x, point.y));
+        }
+        return;
+    }
+    const float left = (std::min)(shape.left, shape.right);
+    const float right = (std::max)(shape.left, shape.right);
+    const float top = (std::min)(shape.top, shape.bottom);
+    const float bottom = (std::max)(shape.top, shape.bottom);
+    const float midX = (left + right) * 0.5f;
+    const float midY = (top + bottom) * 0.5f;
+    out.push_back(D2D1::Point2F(left, top));
+    out.push_back(D2D1::Point2F(right, top));
+    out.push_back(D2D1::Point2F(right, bottom));
+    out.push_back(D2D1::Point2F(left, bottom));
+    out.push_back(D2D1::Point2F(midX, midY));
+    out.push_back(D2D1::Point2F(midX, top));
+    out.push_back(D2D1::Point2F(midX, bottom));
+    out.push_back(D2D1::Point2F(left, midY));
+    out.push_back(D2D1::Point2F(right, midY));
+}
+
+// The box a set of pieces occupies. False when there are no pieces.
+bool ShapesBounds(const ccl::doc::SelectionShapes& shapes,
+                  D2D1_RECT_F& bounds) noexcept {
+    bool any = false;
+    for (const ccl::doc::SelectionShape& shape : shapes) {
+        std::vector<D2D1_POINT_2F> points;
+        ShapePoints(shape, points);
+        for (const D2D1_POINT_2F& point : points) {
+            if (!any) {
+                bounds = D2D1::RectF(point.x, point.y, point.x, point.y);
+                any = true;
+                continue;
+            }
+            bounds.left = (std::min)(bounds.left, point.x);
+            bounds.top = (std::min)(bounds.top, point.y);
+            bounds.right = (std::max)(bounds.right, point.x);
+            bounds.bottom = (std::max)(bounds.bottom, point.y);
+        }
+    }
+    return any;
+}
+
+bool PointInRect(const D2D1_RECT_F& box, float x, float y) noexcept {
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
+
 }  // namespace
 
 LRESULT CALLBACK ClipWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
@@ -920,7 +978,15 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // Recorded all the same. Losing the pointer part way through is not
             // something that was asked for, so getting back what was there has
             // to be possible.
-            if (selecting_) {
+            if (selecting_ && IsObjectTool(tool_.tool)) {
+                // Nothing to record: a band that picks out pieces settles no
+                // area, and what was picked before the press is untouched
+                // until the button comes up.
+                selecting_ = false;
+                pending_ = ccl::doc::SelectionShape{};
+                RefreshSelection();
+                Draw();
+            } else if (selecting_) {
                 if (document_ != nullptr) {
                     history_.RecordSelection(document_->Annotations(),
                                              selectionBeforeDrag_,
@@ -1081,12 +1147,247 @@ void ClipWindow::ClearSelection() noexcept {
     removingGeometry_.Clear();
 }
 
+void ClipWindow::ClearPicked() noexcept { pickedIds_.clear(); }
+
+void ClipWindow::PrunePicked() noexcept {
+    if (pickedIds_.empty() || document_ == nullptr) {
+        pickedIds_.clear();
+        return;
+    }
+    const ccl::doc::AnnotationList& annotations = document_->Annotations();
+    std::vector<unsigned int> kept;
+    for (unsigned int id : pickedIds_) {
+        for (const ccl::doc::Annotation& annotation : annotations) {
+            if (annotation.id == id) {
+                kept.push_back(id);
+                break;
+            }
+        }
+    }
+    pickedIds_ = std::move(kept);
+}
+
+bool ClipWindow::AnnotationBounds(const ccl::doc::Annotation& annotation,
+                                  D2D1_RECT_F& bounds) noexcept {
+    switch (annotation.kind) {
+        case ccl::doc::AnnotationKind::Stroke: {
+            const ccl::doc::Stroke& stroke = annotation.stroke;
+            if (stroke.points.empty()) {
+                return false;
+            }
+            bool any = false;
+            for (const ccl::doc::StrokePoint& point : stroke.points) {
+                // Half the width each way: the line is drawn about its path,
+                // not to one side of it.
+                const float reach = point.width * 0.5f;
+                const D2D1_RECT_F box =
+                    D2D1::RectF(point.x - reach, point.y - reach,
+                                point.x + reach, point.y + reach);
+                if (!any) {
+                    bounds = box;
+                    any = true;
+                    continue;
+                }
+                bounds.left = (std::min)(bounds.left, box.left);
+                bounds.top = (std::min)(bounds.top, box.top);
+                bounds.right = (std::max)(bounds.right, box.right);
+                bounds.bottom = (std::max)(bounds.bottom, box.bottom);
+            }
+            return any;
+        }
+        case ccl::doc::AnnotationKind::Text:
+            return renderer_.MeasureText(annotation.text, bounds);
+        case ccl::doc::AnnotationKind::Area: {
+            if (!ShapesBounds(annotation.area.shape, bounds)) {
+                return false;
+            }
+            // A traced edge stands half its width outside the shape it
+            // follows, the same way a stroke does.
+            const float reach = annotation.area.width * 0.5f;
+            bounds.left -= reach;
+            bounds.top -= reach;
+            bounds.right += reach;
+            bounds.bottom += reach;
+            return true;
+        }
+        case ccl::doc::AnnotationKind::Effect:
+            bounds = D2D1::RectF(annotation.effect.left, annotation.effect.top,
+                                 annotation.effect.right,
+                                 annotation.effect.bottom);
+            return true;
+    }
+    return false;
+}
+
+bool ClipWindow::AnnotationTouched(
+    const ccl::doc::SelectionShapes& band,
+    const ccl::doc::Annotation& annotation) noexcept {
+    // Obscuring effects are left out. What they show was cut out of the
+    // picture when they were placed and does not follow them, so moving one
+    // would carry the wrong pixels about.
+    if (annotation.kind == ccl::doc::AnnotationKind::Effect) {
+        return false;
+    }
+
+    // Asked both ways round. A band drawn across a stroke meets it at the
+    // stroke's own points; a band drawn inside a large patch of paint -- or a
+    // click, which is a band with no size at all -- meets nothing of the kind,
+    // and is only found by asking whether the band itself lands on the paint.
+    const auto bandReaches = [&](float x, float y) {
+        return ccl::doc::SelectionContains(band, x, y);
+    };
+
+    switch (annotation.kind) {
+        case ccl::doc::AnnotationKind::Stroke: {
+            const ccl::doc::Stroke& stroke = annotation.stroke;
+            for (size_t i = 0; i < stroke.points.size(); ++i) {
+                if (bandReaches(stroke.points[i].x, stroke.points[i].y)) {
+                    return true;
+                }
+                // Halfway along each segment as well: a straight line is two
+                // points a long way apart, and a band crossing its middle
+                // touches neither end.
+                if (i > 0) {
+                    const float midX =
+                        (stroke.points[i - 1].x + stroke.points[i].x) * 0.5f;
+                    const float midY =
+                        (stroke.points[i - 1].y + stroke.points[i].y) * 0.5f;
+                    if (bandReaches(midX, midY)) {
+                        return true;
+                    }
+                }
+            }
+            break;
+        }
+        case ccl::doc::AnnotationKind::Area: {
+            for (const ccl::doc::SelectionShape& shape : annotation.area.shape) {
+                std::vector<D2D1_POINT_2F> points;
+                ShapePoints(shape, points);
+                for (const D2D1_POINT_2F& point : points) {
+                    if (bandReaches(point.x, point.y)) {
+                        return true;
+                    }
+                }
+            }
+            break;
+        }
+        case ccl::doc::AnnotationKind::Text: {
+            D2D1_RECT_F box{};
+            if (!AnnotationBounds(annotation, box)) {
+                return false;
+            }
+            std::vector<D2D1_POINT_2F> points;
+            ccl::doc::SelectionShape asShape;
+            asShape.left = box.left;
+            asShape.top = box.top;
+            asShape.right = box.right;
+            asShape.bottom = box.bottom;
+            ShapePoints(asShape, points);
+            for (const D2D1_POINT_2F& point : points) {
+                if (bandReaches(point.x, point.y)) {
+                    return true;
+                }
+            }
+            break;
+        }
+        default:
+            return false;
+    }
+
+    // The other way round: does the band land on the annotation?
+    std::vector<D2D1_POINT_2F> bandPoints;
+    for (const ccl::doc::SelectionShape& shape : band) {
+        ShapePoints(shape, bandPoints);
+    }
+    for (const D2D1_POINT_2F& point : bandPoints) {
+        switch (annotation.kind) {
+            case ccl::doc::AnnotationKind::Stroke:
+                if (StrokeHit(annotation.stroke, point, 0.0f)) {
+                    return true;
+                }
+                break;
+            case ccl::doc::AnnotationKind::Area:
+                if (annotation.area.width > 0.0f) {
+                    if (ccl::doc::SelectionNearEdge(
+                            annotation.area.shape, point.x, point.y,
+                            annotation.area.width * 0.5f)) {
+                        return true;
+                    }
+                } else if (ccl::doc::SelectionContains(annotation.area.shape,
+                                                       point.x, point.y)) {
+                    return true;
+                }
+                break;
+            case ccl::doc::AnnotationKind::Text: {
+                D2D1_RECT_F box{};
+                if (AnnotationBounds(annotation, box) &&
+                    PointInRect(box, point.x, point.y)) {
+                    return true;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+void ClipWindow::ApplyObjectBand(ccl::doc::SelectionOp op) noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
+    ccl::doc::SelectionShapes band;
+    ccl::doc::SelectionShape shape = pending_;
+    // Taken as a piece in its own right: what it means for what is already
+    // picked is decided here, not by the folding.
+    shape.op = ccl::doc::SelectionOp::Replace;
+    band.push_back(shape);
+
+    std::vector<unsigned int> hits;
+    for (const ccl::doc::Annotation& annotation : document_->Annotations()) {
+        if (AnnotationTouched(band, annotation)) {
+            hits.push_back(annotation.id);
+        }
+    }
+
+    const auto holds = [](const std::vector<unsigned int>& list,
+                          unsigned int id) {
+        return std::find(list.begin(), list.end(), id) != list.end();
+    };
+
+    if (op == ccl::doc::SelectionOp::Replace) {
+        pickedIds_ = std::move(hits);
+        return;
+    }
+    if (op == ccl::doc::SelectionOp::Add) {
+        for (unsigned int id : hits) {
+            if (!holds(pickedIds_, id)) {
+                pickedIds_.push_back(id);
+            }
+        }
+        return;
+    }
+    std::vector<unsigned int> kept;
+    for (unsigned int id : pickedIds_) {
+        if (!holds(hits, id)) {
+            kept.push_back(id);
+        }
+    }
+    pickedIds_ = std::move(kept);
+}
+
 bool ClipWindow::SelectionIsSingleRect() const noexcept {
     return HasSelection() && ccl::doc::IsSingleRect(CurrentShapes());
 }
 
 bool ClipWindow::IsSelectionTool(ccl::tool::Tool tool) noexcept {
     return tool == ccl::tool::Tool::Select || tool == ccl::tool::Tool::Lasso;
+}
+
+bool ClipWindow::IsObjectTool(ccl::tool::Tool tool) noexcept {
+    return tool == ccl::tool::Tool::ObjectSelect ||
+           tool == ccl::tool::Tool::ObjectLasso;
 }
 
 ccl::tool::Tool ClipWindow::ToolForHistory() const noexcept {
@@ -1556,6 +1857,31 @@ void ClipWindow::UpdateCursor() noexcept {
 
     if (IsSelectionTool(tool_.tool)) {
         ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+        return;
+    }
+
+    if (IsObjectTool(tool_.tool)) {
+        // A crosshair to draw the band with, as the area tools use. Over a
+        // piece that is already picked it becomes the four-way arrow, which is
+        // what the text tool shows where a press would move something.
+        bool overPicked = false;
+        if (document_ != nullptr && !pickedIds_.empty()) {
+            const D2D1_POINT_2F at = ToImage(lastCursor_);
+            for (const ccl::doc::Annotation& annotation :
+                 document_->Annotations()) {
+                if (std::find(pickedIds_.begin(), pickedIds_.end(),
+                              annotation.id) == pickedIds_.end()) {
+                    continue;
+                }
+                D2D1_RECT_F box{};
+                if (AnnotationBounds(annotation, box) &&
+                    PointInRect(box, at.x, at.y)) {
+                    overPicked = true;
+                    break;
+                }
+            }
+        }
+        ::SetCursor(::LoadCursorW(nullptr, overPicked ? IDC_SIZEALL : IDC_CROSS));
         return;
     }
 
@@ -3608,7 +3934,7 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
     // again", which is the one place a colour cannot be used anyway -- nothing
     // there draws with it.
     if (IsKeyDown(VK_MENU) && tool_.tool != ccl::tool::Tool::Eyedropper &&
-        !IsSelectionTool(tool_.tool)) {
+        !IsSelectionTool(tool_.tool) && !IsObjectTool(tool_.tool)) {
         SelectTool(ccl::tool::Tool::Eyedropper);
         sampling_ = true;
         PickColorAt(client);
@@ -3683,6 +4009,39 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
                 pending_.lasso = true;
                 // Back to the fine spacing for each new lasso: the last one
                 // having been long says nothing about this one.
+                lassoSpacing_ = kLassoSpacing;
+                pending_.points.push_back({start.x, start.y});
+            } else {
+                pending_.left = start.x;
+                pending_.top = start.y;
+                pending_.right = start.x;
+                pending_.bottom = start.y;
+            }
+            selecting_ = true;
+            RefreshSelection();
+
+            ::SetCapture(hwnd_);
+            Draw();
+            return;
+        }
+
+        case ccl::tool::Tool::ObjectSelect:
+        case ccl::tool::Tool::ObjectLasso: {
+            // The same band the area tools drag out, and the same modifiers.
+            // What differs is what happens when it is let go of: here it picks
+            // out the pieces it reached rather than settling as an area.
+            ccl::doc::SelectionOp op = ccl::doc::SelectionOp::Replace;
+            if (IsKeyDown(VK_SHIFT)) {
+                op = ccl::doc::SelectionOp::Add;
+            } else if (IsKeyDown(VK_MENU)) {
+                op = ccl::doc::SelectionOp::Subtract;
+            }
+
+            const D2D1_POINT_2F start = ToImage(client);
+            pending_ = ccl::doc::SelectionShape{};
+            pending_.op = op;
+            if (tool_.tool == ccl::tool::Tool::ObjectLasso) {
+                pending_.lasso = true;
                 lassoSpacing_ = kLassoSpacing;
                 pending_.points.push_back({start.x, start.y});
             } else {
@@ -3846,6 +4205,22 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftUp() noexcept {
+    if (selecting_ && IsObjectTool(tool_.tool)) {
+        // Settled before the capture is let go of, as the area tools do: the
+        // release sends WM_CAPTURECHANGED straight back here, and that path
+        // drops a drag still marked as running.
+        const ccl::doc::SelectionOp op = pending_.op;
+        ApplyObjectBand(op);
+        selecting_ = false;
+        pending_ = ccl::doc::SelectionShape{};
+        ::ReleaseCapture();
+        RefreshSelection();
+        UpdateTitle();
+        UpdateCursor();
+        Draw();
+        return;
+    }
+
     if (selecting_) {
         // Settled before the capture is let go of, not after: releasing it
         // sends WM_CAPTURECHANGED straight back here, and that path drops a
@@ -4075,6 +4450,19 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
             return true;
         case ccl::app::Command::ToolLasso:
             SelectTool(ccl::tool::Tool::Lasso);
+            return true;
+        // Pressed a second time, these hand the tool back rather than doing
+        // nothing. Reaching for a piece in the middle of drawing is a detour,
+        // and a detour needs a way back that is not "remember what you had".
+        case ccl::app::Command::ToolObjectSelect:
+            SelectTool(tool_.tool == ccl::tool::Tool::ObjectSelect
+                           ? toolBeforeObjects_
+                           : ccl::tool::Tool::ObjectSelect);
+            return true;
+        case ccl::app::Command::ToolObjectLasso:
+            SelectTool(tool_.tool == ccl::tool::Tool::ObjectLasso
+                           ? toolBeforeObjects_
+                           : ccl::tool::Tool::ObjectLasso);
             return true;
         // Routed through the menu commands so there is one path to each of
         // these, whether it was reached by key or by menu. Each does nothing
@@ -4458,6 +4846,21 @@ void ClipWindow::UpdateTitle() noexcept {
             ::swprintf_s(title, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
                          CurrentTextSize());
             break;
+        case ccl::tool::Tool::ObjectSelect:
+        case ccl::tool::Tool::ObjectLasso: {
+            const wchar_t* pickName =
+                tool_.tool == ccl::tool::Tool::ObjectLasso ? L"ObjectLasso"
+                                                           : L"Objects";
+            if (pickedIds_.empty()) {
+                ::swprintf_s(title, L"%s  %d%%  %s", name.c_str(), zoom,
+                             pickName);
+            } else {
+                ::swprintf_s(title, L"%s  %d%%  %s %d", name.c_str(), zoom,
+                             pickName, static_cast<int>(pickedIds_.size()));
+            }
+            break;
+        }
+
         case ccl::tool::Tool::Select:
         case ccl::tool::Tool::Lasso: {
             // Which of the two is in use, since neither has a cursor of its
@@ -4633,6 +5036,20 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
                                      ToolForHistory());
         }
         ClearSelection();
+    }
+
+    // What is picked out follows the same rule as the selected area: it belongs
+    // to the tools that pick, and is let go of on the way out. Not recorded as
+    // a step, unlike the area -- an area cannot be drawn again over the same
+    // place, but the same pieces can be picked again by pressing on them.
+    if (!IsObjectTool(tool) && !eyedropperAside) {
+        ClearPicked();
+    }
+    // Where to return to when the same key is pressed again. Taken on the way
+    // in only, so that going from one kind of picking to the other does not
+    // make the way back point at picking.
+    if (IsObjectTool(tool) && !IsObjectTool(tool_.tool) && !eyedropperAside) {
+        toolBeforeObjects_ = tool_.tool;
     }
 
     if (tool != ccl::tool::Tool::Text) {
@@ -4933,6 +5350,10 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     toolEntry(ccl::tool::Tool::Select, L"範囲選択",
               ccl::app::Command::ToolSelect);
     toolEntry(ccl::tool::Tool::Lasso, L"投げ縄", ccl::app::Command::ToolLasso);
+    toolEntry(ccl::tool::Tool::ObjectSelect, L"オブジェクト選択",
+              ccl::app::Command::ToolObjectSelect);
+    toolEntry(ccl::tool::Tool::ObjectLasso, L"オブジェクト投げ縄",
+              ccl::app::Command::ToolObjectLasso);
     ::AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(tools, tool_.tool == ccl::tool::Tool::Eyedropper ? checked
                                                                   : plain,
@@ -5502,6 +5923,10 @@ void ClipWindow::Undo() noexcept {
     // from the later one is still being kept against it. Without this, undoing
     // a size change left the text drawn at the size it had been given.
     renderer_.InvalidateResults();
+    // A step may have taken away pieces that were picked out, or put back a
+    // list they were never in. Ids are never reused, so anything no longer
+    // there is gone for good and is dropped.
+    PrunePicked();
     // The step may have put a different area back, and a step that carried
     // none leaves the one in hand alone. Either way the folded shape has to
     // be built again from what is there now.
@@ -5538,6 +5963,10 @@ void ClipWindow::Redo() noexcept {
     resizingTextId_ = 0;
     // Same as undo: the values under these ids have just been swapped.
     renderer_.InvalidateResults();
+    // A step may have taken away pieces that were picked out, or put back a
+    // list they were never in. Ids are never reused, so anything no longer
+    // there is gone for good and is dropped.
+    PrunePicked();
     RefreshSelection();
     if (reshaped) {
         // The area is not thrown away here: the step carried the one that
@@ -5959,6 +6388,27 @@ void ClipWindow::Draw() noexcept {
             selection = selectionGeometry_.Get();
         }
         removing = removingGeometry_.Get();
+    } else if (IsObjectTool(tool_.tool) && selecting_) {
+        // Only while the band is being dragged out. Nothing settles here, so
+        // there is no shape to keep showing once the button comes up.
+        selection = selectionGeometry_.Get();
+        removing = removingGeometry_.Get();
+    }
+
+    std::vector<D2D1_RECT_F> picked;
+    if (IsObjectTool(tool_.tool) && document_ != nullptr &&
+        !pickedIds_.empty()) {
+        for (const ccl::doc::Annotation& annotation :
+             document_->Annotations()) {
+            if (std::find(pickedIds_.begin(), pickedIds_.end(), annotation.id) ==
+                pickedIds_.end()) {
+                continue;
+            }
+            D2D1_RECT_F box{};
+            if (AnnotationBounds(annotation, box)) {
+                picked.push_back(box);
+            }
+        }
     }
 
     if (tool_.tool == ccl::tool::Tool::Text &&
@@ -5973,7 +6423,8 @@ void ClipWindow::Draw() noexcept {
 
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr,
-                   hasHighlight ? &highlight : nullptr, selection, removing);
+                   hasHighlight ? &highlight : nullptr, selection, removing,
+                   picked.empty() ? nullptr : picked.data(), picked.size());
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.

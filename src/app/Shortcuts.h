@@ -28,6 +28,11 @@ enum class Command {
     ToolText,
     ToolSelect,
     ToolLasso,
+    // Picking out what was drawn rather than an area of the picture. Ctrl with
+    // the keys the two area tools already use, since the question is the same
+    // one -- by corner or by hand -- asked about a different thing.
+    ToolObjectSelect,
+    ToolObjectLasso,
     Eyedropper,
     ColorPicker,
     Highlighter,

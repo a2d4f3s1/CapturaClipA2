@@ -104,7 +104,13 @@ public:
               const BrushCursor* cursor = nullptr,
               const D2D1_RECT_F* highlight = nullptr,
               ID2D1Geometry* selection = nullptr,
-              ID2D1Geometry* removing = nullptr) noexcept;
+              ID2D1Geometry* removing = nullptr,
+              // The pieces picked out to be moved, turned or reordered, each
+              // framed where it sits. A list rather than one box, because
+              // several can be picked at once -- which is the whole point of
+              // picking rather than pointing.
+              const D2D1_RECT_F* picked = nullptr,
+              size_t pickedCount = 0) noexcept;
 
     // Draws the picture and its annotations into a new buffer at full size,
     // producing the image as it is actually seen. Everything that leaves the

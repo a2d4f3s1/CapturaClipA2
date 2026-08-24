@@ -419,6 +419,28 @@ private:
     // them keeps what is selected, since picking a different way to draw the
     // same area is not finishing with it.
     static bool IsSelectionTool(ccl::tool::Tool tool) noexcept;
+    // Tools whose business is the things drawn on the picture rather than an
+    // area of it. Kept apart from the pair above: the two kinds of selecting
+    // do not share what they hold, and switching between kinds is finishing
+    // with one of them.
+    static bool IsObjectTool(ccl::tool::Tool tool) noexcept;
+    // The box a piece of annotation occupies, in image coordinates. False when
+    // it has no extent to speak of -- an empty stroke, text that cannot be
+    // measured.
+    bool AnnotationBounds(const ccl::doc::Annotation& annotation,
+                          D2D1_RECT_F& bounds) noexcept;
+    // True when the band just dragged out reaches any part of the annotation.
+    // Taken at the annotation's own points rather than at its box, so that a
+    // lasso drawn between two strokes does not pick up both.
+    bool AnnotationTouched(const ccl::doc::SelectionShapes& band,
+                           const ccl::doc::Annotation& annotation) noexcept;
+    // Folds the band into what is already picked, the way the modifier keys
+    // asked for, and settles the result.
+    void ApplyObjectBand(ccl::doc::SelectionOp op) noexcept;
+    void ClearPicked() noexcept;
+    // Drops anything picked that no longer exists, which is what undo and the
+    // eraser can leave behind.
+    void PrunePicked() noexcept;
     // The tool an undo step should remember. While the eyedropper is armed it
     // is the tool underneath, since the eyedropper is somewhere the program
     // passes through rather than somewhere it is.
@@ -615,6 +637,15 @@ private:
     float textDragOriginX_ = 0.0f;
     float textDragOriginY_ = 0.0f;
     bool textDragMoved_ = false;
+
+    // What is picked out, by id rather than by position in the list: the list
+    // is reordered by the very commands this exists to serve, and ids are
+    // handed out once and never reused.
+    std::vector<unsigned int> pickedIds_;
+    // The tool to go back to when the object keys are pressed a second time.
+    // Reaching for a piece in the middle of drawing is a detour, so there has
+    // to be a way back that is not "remember what you were using".
+    ccl::tool::Tool toolBeforeObjects_ = ccl::tool::Tool::Pen;
 
     LONGLONG releasedAt_ = 0;
     bool reportedFirstFrame_ = false;

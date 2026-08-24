@@ -1974,7 +1974,8 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active, const BrushCursor* cursor,
                     const D2D1_RECT_F* highlight, ID2D1Geometry* selection,
-                    ID2D1Geometry* removing) noexcept {
+                    ID2D1Geometry* removing, const D2D1_RECT_F* picked,
+                    size_t pickedCount) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -2112,6 +2113,31 @@ void Renderer::Draw(const ccl::view::ViewState& view,
             D2D1::RectF(highlight->left - margin, highlight->top - margin,
                         highlight->right + margin, highlight->bottom + margin),
             brush_.Get(), lineWidth);
+    }
+
+    if (picked != nullptr && pickedCount > 0 && brush_) {
+        // Two lines, dark outside and light inside, so a frame reads whatever
+        // it happens to be sitting on -- the same reasoning as the brush ring.
+        // The hover outline is a single blue line, which keeps the two
+        // apart: one says what a press would take hold of, this says what is
+        // already held.
+        const float lineWidth = 1.0f / zoom;
+        const float margin = 3.0f * lineWidth;
+
+        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        for (size_t i = 0; i < pickedCount; ++i) {
+            const D2D1_RECT_F box =
+                D2D1::RectF(picked[i].left - margin, picked[i].top - margin,
+                            picked[i].right + margin, picked[i].bottom + margin);
+            brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f));
+            target_->DrawRectangle(
+                D2D1::RectF(box.left - lineWidth, box.top - lineWidth,
+                            box.right + lineWidth, box.bottom + lineWidth),
+                brush_.Get(), lineWidth);
+            brush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f));
+            target_->DrawRectangle(box, brush_.Get(), lineWidth);
+        }
+        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
 
     if (cursor != nullptr && brush_ && cursor->radius > 0.0f) {

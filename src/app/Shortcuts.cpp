@@ -28,6 +28,12 @@ constexpr CommandInfo kCommands[] = {
     // matched by position, and a name landing against the wrong entry would
     // load someone's saved key onto a different command.
     {L"ToolLasso", L"ツール: 投げ縄", {'L', false, false, false}},
+    {L"ToolObjectSelect",
+     L"ツール: オブジェクト選択",
+     {'W', true, false, false}},
+    {L"ToolObjectLasso",
+     L"ツール: オブジェクト投げ縄",
+     {'L', true, false, false}},
     // Shift+I rather than I, which the palette already has. Both are about
     // choosing a colour, so they are kept on the same key.
     {L"Eyedropper", L"ツール: スポイト", {'I', false, true, false}},

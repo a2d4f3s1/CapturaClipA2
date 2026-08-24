@@ -103,6 +103,10 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolText), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolSelect), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolLasso), kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolObjectSelect),
+     kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolObjectLasso),
+     kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Eyedropper), kGroupTool},
 
     {RowKind::Key, static_cast<int>(ccl::app::Command::ColorPicker), kGroupDraw},
