@@ -59,6 +59,11 @@ public:
 
     // Drops the cached pixels for an effect whose strength has changed.
     void InvalidateEffect(unsigned int id) noexcept;
+    // The path a stroke traces, or the shape a patch of paint fills, is worked
+    // out in the picture's own coordinates and kept against the id. Moving the
+    // annotation moves those coordinates, so what was worked out is no longer
+    // where the thing is.
+    void InvalidateShape(unsigned int id) noexcept;
 
     // Drops the laid-out glyphs of a piece of text whose size or font has
     // changed. Only needed for a change made in place: re-editing produces a

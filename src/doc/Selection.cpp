@@ -125,4 +125,20 @@ bool IsSingleRect(const SelectionShapes& shapes) noexcept {
     return shapes.size() == 1 && !shapes.front().lasso;
 }
 
+void TranslateShapes(SelectionShapes& shapes, float dx, float dy) noexcept {
+    for (SelectionShape& shape : shapes) {
+        if (shape.lasso) {
+            for (SelectionPoint& point : shape.points) {
+                point.x += dx;
+                point.y += dy;
+            }
+            continue;
+        }
+        shape.left += dx;
+        shape.right += dx;
+        shape.top += dy;
+        shape.bottom += dy;
+    }
+}
+
 }  // namespace ccl::doc

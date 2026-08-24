@@ -438,6 +438,16 @@ private:
     // asked for, and settles the result.
     void ApplyObjectBand(ccl::doc::SelectionOp op) noexcept;
     void ClearPicked() noexcept;
+    // The topmost piece under a point, searched from the front as the eye
+    // reads it. `size_t(-1)` when the point is over nothing.
+    size_t ObjectAt(D2D1_POINT_2F image) noexcept;
+    // Takes hold of what is picked, so that a drag moves it. The originals are
+    // kept whole rather than as a starting offset: a piece is moved from where
+    // it was when the button went down, not by however far the last message
+    // happened to be from the one before it.
+    void BeginPickedDrag(POINT client) noexcept;
+    void ContinuePickedDrag(POINT client) noexcept;
+    void EndPickedDrag() noexcept;
     // Drops anything picked that no longer exists, which is what undo and the
     // eraser can leave behind.
     void PrunePicked() noexcept;
@@ -646,6 +656,13 @@ private:
     // Reaching for a piece in the middle of drawing is a detour, so there has
     // to be a way back that is not "remember what you were using".
     ccl::tool::Tool toolBeforeObjects_ = ccl::tool::Tool::Pen;
+
+    // Moving what is picked. The copies are of the pieces as they were when
+    // the button went down.
+    bool movingPicked_ = false;
+    bool pickedDragMoved_ = false;
+    POINT pickedDragStart_{};
+    std::vector<ccl::doc::Annotation> pickedOriginals_;
 
     LONGLONG releasedAt_ = 0;
     bool reportedFirstFrame_ = false;

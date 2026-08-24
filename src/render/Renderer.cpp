@@ -92,6 +92,10 @@ void Renderer::InvalidateEffect(unsigned int id) noexcept {
     effectCache_.erase(id);
 }
 
+void Renderer::InvalidateShape(unsigned int id) noexcept {
+    geometryCache_.erase(id);
+}
+
 void Renderer::InvalidateText(unsigned int id) noexcept {
     layoutCache_.erase(id);
     shapeCache_.erase(id);

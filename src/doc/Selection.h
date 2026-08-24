@@ -67,4 +67,9 @@ bool SelectionNearEdge(const SelectionShapes& shapes, float x, float y,
 // operations that can only produce a rectangle are offered for.
 bool IsSingleRect(const SelectionShapes& shapes) noexcept;
 
+// Slides every piece by the same amount. Used to move what was drawn with a
+// shape of its own -- a patch of paint keeps the shape it was given, and
+// moving it means moving that shape.
+void TranslateShapes(SelectionShapes& shapes, float dx, float dy) noexcept;
+
 }  // namespace ccl::doc

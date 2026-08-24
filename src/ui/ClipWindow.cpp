@@ -591,6 +591,34 @@ bool PointInRect(const D2D1_RECT_F& box, float x, float y) noexcept {
     return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 }
 
+// Slides one piece of annotation. Every kind carries its position differently
+// -- a stroke in its points, paint in the shape it was given, text in one
+// corner -- so each is moved in its own terms rather than through a transform
+// laid over the drawing.
+void TranslateAnnotation(ccl::doc::Annotation& annotation, float dx,
+                         float dy) noexcept {
+    switch (annotation.kind) {
+        case ccl::doc::AnnotationKind::Stroke:
+            for (ccl::doc::StrokePoint& point : annotation.stroke.points) {
+                point.x += dx;
+                point.y += dy;
+            }
+            return;
+        case ccl::doc::AnnotationKind::Text:
+            annotation.text.x += dx;
+            annotation.text.y += dy;
+            return;
+        case ccl::doc::AnnotationKind::Area:
+            ccl::doc::TranslateShapes(annotation.area.shape, dx, dy);
+            return;
+        case ccl::doc::AnnotationKind::Effect:
+            // Never moved: what it shows was cut out of the picture where it
+            // was placed, and would arrive somewhere else showing the wrong
+            // thing.
+            return;
+    }
+}
+
 }  // namespace
 
 LRESULT CALLBACK ClipWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
@@ -978,7 +1006,15 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // Recorded all the same. Losing the pointer part way through is not
             // something that was asked for, so getting back what was there has
             // to be possible.
-            if (selecting_ && IsObjectTool(tool_.tool)) {
+            if (movingPicked_) {
+                // Kept where it has got to rather than put back. The step was
+                // recorded when the drag became one, so undo returns it.
+                movingPicked_ = false;
+                pickedDragMoved_ = false;
+                pickedOriginals_.clear();
+                UpdateTitle();
+                Draw();
+            } else if (selecting_ && IsObjectTool(tool_.tool)) {
                 // Nothing to record: a band that picks out pieces settles no
                 // area, and what was picked before the press is untouched
                 // until the button comes up.
@@ -1331,6 +1367,103 @@ bool ClipWindow::AnnotationTouched(
         }
     }
     return false;
+}
+
+size_t ClipWindow::ObjectAt(D2D1_POINT_2F image) noexcept {
+    if (document_ == nullptr) {
+        return static_cast<size_t>(-1);
+    }
+    // A band with no size at all, which is what a press is.
+    ccl::doc::SelectionShapes point;
+    ccl::doc::SelectionShape dot;
+    dot.left = image.x;
+    dot.top = image.y;
+    dot.right = image.x;
+    dot.bottom = image.y;
+    point.push_back(dot);
+
+    const ccl::doc::AnnotationList& annotations = document_->Annotations();
+    // Front to back, so the piece drawn last -- the one on top -- is the one
+    // taken hold of.
+    for (size_t i = annotations.size(); i > 0; --i) {
+        if (AnnotationTouched(point, annotations[i - 1])) {
+            return i - 1;
+        }
+    }
+    return static_cast<size_t>(-1);
+}
+
+void ClipWindow::BeginPickedDrag(POINT client) noexcept {
+    if (document_ == nullptr || pickedIds_.empty()) {
+        return;
+    }
+    pickedOriginals_.clear();
+    for (const ccl::doc::Annotation& annotation : document_->Annotations()) {
+        if (std::find(pickedIds_.begin(), pickedIds_.end(), annotation.id) !=
+            pickedIds_.end()) {
+            pickedOriginals_.push_back(annotation);
+        }
+    }
+    if (pickedOriginals_.empty()) {
+        return;
+    }
+    movingPicked_ = true;
+    pickedDragMoved_ = false;
+    pickedDragStart_ = client;
+    ::SetCapture(hwnd_);
+}
+
+void ClipWindow::ContinuePickedDrag(POINT client) noexcept {
+    if (!movingPicked_ || document_ == nullptr) {
+        return;
+    }
+    const int dx = client.x - pickedDragStart_.x;
+    const int dy = client.y - pickedDragStart_.y;
+
+    // A press that has not gone far enough is still a press, not a move: it
+    // is what picks a piece out, and nudging the mouse while clicking should
+    // not leave the picture changed.
+    if (!pickedDragMoved_ && std::abs(dx) <= kClickThreshold &&
+        std::abs(dy) <= kClickThreshold) {
+        return;
+    }
+    if (!pickedDragMoved_) {
+        pickedDragMoved_ = true;
+        // One step for the whole drag, taken at the moment it becomes one.
+        history_.Record(document_->Annotations(), ToolForHistory());
+    }
+
+    const float zoom = view_.Zoom();
+    const float imageDx = static_cast<float>(dx) / zoom;
+    const float imageDy = static_cast<float>(dy) / zoom;
+
+    ccl::doc::AnnotationList& annotations = document_->MutableAnnotations();
+    for (ccl::doc::Annotation& annotation : annotations) {
+        for (const ccl::doc::Annotation& original : pickedOriginals_) {
+            if (original.id != annotation.id) {
+                continue;
+            }
+            // Rebuilt from the copy each time rather than nudged along, so
+            // that rounding cannot accumulate over a long drag.
+            annotation = original;
+            TranslateAnnotation(annotation, imageDx, imageDy);
+            renderer_.InvalidateShape(annotation.id);
+            break;
+        }
+    }
+    Draw();
+}
+
+void ClipWindow::EndPickedDrag() noexcept {
+    if (!movingPicked_) {
+        return;
+    }
+    movingPicked_ = false;
+    pickedDragMoved_ = false;
+    pickedOriginals_.clear();
+    ::ReleaseCapture();
+    UpdateTitle();
+    Draw();
 }
 
 void ClipWindow::ApplyObjectBand(ccl::doc::SelectionOp op) noexcept {
@@ -4038,6 +4171,33 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             }
 
             const D2D1_POINT_2F start = ToImage(client);
+
+            // Pressing on something takes hold of it. Having to pick a piece
+            // out first and then press it again to move it would be two
+            // actions for what reads as one -- and pressing on a piece can
+            // mean nothing else here.
+            //
+            // Only without a modifier: Shift and Alt are how the picking is
+            // adjusted, and a band drawn from on top of a piece is a perfectly
+            // ordinary way to reach for its neighbours.
+            if (op == ccl::doc::SelectionOp::Replace) {
+                const size_t under = ObjectAt(start);
+                if (under != static_cast<size_t>(-1) && document_ != nullptr) {
+                    const unsigned int id =
+                        document_->Annotations()[under].id;
+                    if (std::find(pickedIds_.begin(), pickedIds_.end(), id) ==
+                        pickedIds_.end()) {
+                        // Not picked yet: pressing it picks it, and nothing
+                        // else, which is what pressing a thing means everywhere
+                        // else in the program.
+                        pickedIds_.assign(1, id);
+                        UpdateTitle();
+                    }
+                    BeginPickedDrag(client);
+                    Draw();
+                    return;
+                }
+            }
             pending_ = ccl::doc::SelectionShape{};
             pending_.op = op;
             if (tool_.tool == ccl::tool::Tool::ObjectLasso) {
@@ -4135,6 +4295,11 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
         return;
     }
 
+    if (movingPicked_) {
+        ContinuePickedDrag(client);
+        return;
+    }
+
     if (movingTextIndex_ != static_cast<size_t>(-1)) {
         const int dx = client.x - textDragStart_.x;
         const int dy = client.y - textDragStart_.y;
@@ -4205,6 +4370,11 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
 }
 
 void ClipWindow::OnLeftUp() noexcept {
+    if (movingPicked_) {
+        EndPickedDrag();
+        return;
+    }
+
     if (selecting_ && IsObjectTool(tool_.tool)) {
         // Settled before the capture is let go of, as the area tools do: the
         // release sends WM_CAPTURECHANGED straight back here, and that path
