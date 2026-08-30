@@ -1,4 +1,7 @@
+#include <winresrc.h>
+
 #include "res/Resources.h"
+#include "Version.h"
 
 // The icon the shell shows for the executable, and the one the window carries
 // into the taskbar and Alt+Tab. It has to be a resource: the shell reads it
@@ -7,3 +10,42 @@
 // Lowest identifier wins when the shell picks an application icon, so this is
 // the only one.
 IDI_APPICON ICON "res/app.ico"
+
+// What the file's properties show. Without this the executable names no
+// version at all, and a copy handed to someone cannot be told apart from any
+// other build -- which is exactly what happened to the build of 2026-08-30.
+//
+// The numbers come from the generated Version.h, whose source is the `VERSION`
+// field in CMakeLists.txt.
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION CCA2_VERSION_MAJOR, CCA2_VERSION_MINOR, CCA2_VERSION_PATCH, 0
+PRODUCTVERSION CCA2_VERSION_MAJOR, CCA2_VERSION_MINOR, CCA2_VERSION_PATCH, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "a2d4f3s1"
+            VALUE "FileDescription", "Pin a region of the screen on top of everything else"
+            VALUE "FileVersion", CCA2_VERSION_STRING
+            VALUE "InternalName", "CapturaClipA2"
+            VALUE "LegalCopyright", "Copyright (c) 2026 a2d4f3s1"
+            VALUE "OriginalFilename", "CapturaClipA2.exe"
+            VALUE "ProductName", "CapturaClipA2"
+            VALUE "ProductVersion", CCA2_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

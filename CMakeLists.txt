@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(CapturaClipA2
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Pin a region of the screen on top of everything else"
     LANGUAGES CXX)
 
@@ -79,6 +79,10 @@ set(APP_HEADERS
     src/view/ViewState.h
 )
 
+# The version the shell shows in the file's properties comes from `project()`
+# above, so there is one number to change at release time.
+configure_file(src/res/Version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h" @ONLY)
+
 add_executable(CapturaClipA2 WIN32
     ${APP_SOURCES}
     ${APP_HEADERS}
@@ -86,7 +90,10 @@ add_executable(CapturaClipA2 WIN32
     src/app.rc
 )
 
-target_include_directories(CapturaClipA2 PRIVATE src)
+target_include_directories(CapturaClipA2 PRIVATE
+    src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
 
 target_compile_definitions(CapturaClipA2 PRIVATE
     UNICODE

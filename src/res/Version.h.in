@@ -1,0 +1,12 @@
+#pragma once
+
+// Generated into the build tree by CMake. Edit this template, never the copy.
+//
+// The version has one home: the `VERSION` field of `project()` in
+// CMakeLists.txt. Written in two places it drifts, and nothing catches the
+// drift -- up to 2026-08-30 the executable carried no version at all, so the
+// number in CMakeLists was read by no one and could say anything.
+#define CCA2_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define CCA2_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define CCA2_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define CCA2_VERSION_STRING "@PROJECT_VERSION@"
