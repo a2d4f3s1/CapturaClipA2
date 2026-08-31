@@ -2195,16 +2195,49 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         // being marked; drawing it under is not open to us either, since
         // settled annotations are baked into a sheet that is not remade when
         // the picked set changes.
+        // The same round caps and joins the ink is drawn with. Without them the
+        // band ends in a flat slab standing out past the tip of the line.
         const auto band = [&](ID2D1Geometry* path, float width) {
             if (path == nullptr) {
                 return;
             }
             brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f));
-            target_->DrawGeometry(path, brush_.Get(), width);
+            target_->DrawGeometry(path, brush_.Get(), width,
+                                  strokeStyle_.Get());
             brush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f));
             target_->DrawGeometry(path, brush_.Get(),
                                   (std::max)(width - 2.0f * lineWidth,
-                                             lineWidth));
+                                             lineWidth),
+                                  strokeStyle_.Get());
+        };
+        // A stroke that tapers is drawn segment by segment, each at its own
+        // width, so its band has to be too: one drawn at the widest the line
+        // ever gets leaves a slab lying along the thin end. The width here is
+        // the one the hit test uses -- the wider of the segment's two ends --
+        // so the edge of the band is exactly as far as a press reaches.
+        //
+        // Every dark segment before any light one: taken in turn, each dark
+        // segment would paint over the light one before it.
+        const auto taperedBand = [&](const ccl::doc::Stroke& stroke) {
+            for (int pass = 0; pass < 2; ++pass) {
+                brush_->SetColor(pass == 0
+                                     ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f)
+                                     : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f));
+                for (size_t i = 1; i < stroke.points.size(); ++i) {
+                    const auto& from = stroke.points[i - 1];
+                    const auto& to = stroke.points[i];
+                    const float widest = (std::max)(from.width, to.width);
+                    const float width =
+                        pass == 0
+                            ? widest + 2.0f * slack
+                            : (std::max)(widest + 2.0f * slack -
+                                             2.0f * lineWidth,
+                                         lineWidth);
+                    target_->DrawLine(D2D1::Point2F(from.x, from.y),
+                                      D2D1::Point2F(to.x, to.y), brush_.Get(),
+                                      width, strokeStyle_.Get());
+                }
+            }
         };
 
         for (const auto& annotation : document_->Annotations()) {
@@ -2214,11 +2247,19 @@ void Renderer::Draw(const ccl::view::ViewState& view,
             switch (annotation.kind) {
                 case ccl::doc::AnnotationKind::Stroke: {
                     float widest = 0.0f;
+                    float narrowest = FLT_MAX;
                     for (const auto& point : annotation.stroke.points) {
                         widest = (std::max)(widest, point.width);
+                        narrowest = (std::min)(narrowest, point.width);
                     }
-                    band(StrokeGeometry(annotation.stroke, annotation.id),
-                         widest + 2.0f * slack);
+                    if (widest > narrowest) {
+                        taperedBand(annotation.stroke);
+                    } else {
+                        // One width all along, so one pass over the path does
+                        // it -- much the cheaper of the two.
+                        band(StrokeGeometry(annotation.stroke, annotation.id),
+                             widest + 2.0f * slack);
+                    }
                     DrawStroke(annotation.stroke, annotation.id);
                     break;
                 }
