@@ -6890,21 +6890,9 @@ void ClipWindow::Draw() noexcept {
         removing = removingGeometry_.Get();
     }
 
-    std::vector<D2D1_RECT_F> picked;
-    if (IsObjectTool(tool_.tool) && document_ != nullptr &&
-        !pickedIds_.empty()) {
-        for (const ccl::doc::Annotation& annotation :
-             document_->Annotations()) {
-            if (std::find(pickedIds_.begin(), pickedIds_.end(), annotation.id) ==
-                pickedIds_.end()) {
-                continue;
-            }
-            D2D1_RECT_F box{};
-            if (AnnotationBounds(annotation, box)) {
-                picked.push_back(box);
-            }
-        }
-    }
+    // Only the ids go across. The renderer already keeps each piece's shape
+    // against its id, and marks it along that shape rather than round its box.
+    const bool marking = IsObjectTool(tool_.tool) && !pickedIds_.empty();
 
     if (tool_.tool == ccl::tool::Tool::Text &&
         editor_ == nullptr &&
@@ -6919,7 +6907,8 @@ void ClipWindow::Draw() noexcept {
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr,
                    hasHighlight ? &highlight : nullptr, selection, removing,
-                   picked.empty() ? nullptr : picked.data(), picked.size());
+                   marking ? pickedIds_.data() : nullptr,
+                   marking ? pickedIds_.size() : 0, kGrabSlack);
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.

@@ -2027,8 +2027,8 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active, const BrushCursor* cursor,
                     const D2D1_RECT_F* highlight, ID2D1Geometry* selection,
-                    ID2D1Geometry* removing, const D2D1_RECT_F* picked,
-                    size_t pickedCount) noexcept {
+                    ID2D1Geometry* removing, const unsigned int* pickedIds,
+                    size_t pickedCount, float grabSlack) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -2168,29 +2168,106 @@ void Renderer::Draw(const ccl::view::ViewState& view,
             brush_.Get(), lineWidth);
     }
 
-    if (picked != nullptr && pickedCount > 0 && brush_) {
-        // Two lines, dark outside and light inside, so a frame reads whatever
-        // it happens to be sitting on -- the same reasoning as the brush ring.
-        // The hover outline is a single blue line, which keeps the two
-        // apart: one says what a press would take hold of, this says what is
-        // already held.
+    if (pickedIds != nullptr && pickedCount > 0 && brush_ &&
+        document_ != nullptr) {
+        // Dark outside and light inside, so the mark reads whatever it happens
+        // to be sitting on -- the same reasoning as the brush ring. The hover
+        // outline is a single blue line, which keeps the two apart: one says
+        // what a press would take hold of, this says what is already held.
+        //
+        // A band along the piece rather than a box round it. A box round a
+        // diagonal line covers a square the size of the line's reach in both
+        // directions, and says a press anywhere inside would take hold, which
+        // has not been true since the reach became the ink plus a little.
         const float lineWidth = 1.0f / zoom;
-        const float margin = 3.0f * lineWidth;
+        const float slack = grabSlack / zoom;
 
-        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        for (size_t i = 0; i < pickedCount; ++i) {
-            const D2D1_RECT_F box =
-                D2D1::RectF(picked[i].left - margin, picked[i].top - margin,
-                            picked[i].right + margin, picked[i].bottom + margin);
+        const auto holds = [pickedIds, pickedCount](unsigned int id) {
+            for (size_t i = 0; i < pickedCount; ++i) {
+                if (pickedIds[i] == id) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        // Both bands at once, then the piece itself back over the top. The
+        // band is wider than the ink, so drawing it over would bury what is
+        // being marked; drawing it under is not open to us either, since
+        // settled annotations are baked into a sheet that is not remade when
+        // the picked set changes.
+        const auto band = [&](ID2D1Geometry* path, float width) {
+            if (path == nullptr) {
+                return;
+            }
             brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f));
-            target_->DrawRectangle(
-                D2D1::RectF(box.left - lineWidth, box.top - lineWidth,
-                            box.right + lineWidth, box.bottom + lineWidth),
-                brush_.Get(), lineWidth);
+            target_->DrawGeometry(path, brush_.Get(), width);
             brush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f));
-            target_->DrawRectangle(box, brush_.Get(), lineWidth);
+            target_->DrawGeometry(path, brush_.Get(),
+                                  (std::max)(width - 2.0f * lineWidth,
+                                             lineWidth));
+        };
+
+        for (const auto& annotation : document_->Annotations()) {
+            if (!holds(annotation.id)) {
+                continue;
+            }
+            switch (annotation.kind) {
+                case ccl::doc::AnnotationKind::Stroke: {
+                    float widest = 0.0f;
+                    for (const auto& point : annotation.stroke.points) {
+                        widest = (std::max)(widest, point.width);
+                    }
+                    band(StrokeGeometry(annotation.stroke, annotation.id),
+                         widest + 2.0f * slack);
+                    DrawStroke(annotation.stroke, annotation.id);
+                    break;
+                }
+                case ccl::doc::AnnotationKind::Area: {
+                    band(AreaGeometry(annotation.area, annotation.id),
+                         annotation.area.width + 2.0f * slack);
+                    DrawArea(annotation.area, annotation.id);
+                    break;
+                }
+                case ccl::doc::AnnotationKind::Text: {
+                    // Text keeps a box: the reach round a piece of text is its
+                    // own box already, so a box tells the truth here. A turned
+                    // one, though -- an upright box round a turned one stands
+                    // well outside the reach at the corners.
+                    D2D1_RECT_F box{};
+                    if (!MeasureText(annotation.text, box)) {
+                        break;
+                    }
+                    box.left -= slack;
+                    box.top -= slack;
+                    box.right += slack;
+                    box.bottom += slack;
+                    const D2D1_MATRIX_3X2_F was = transform;
+                    if (annotation.text.angle != 0.0f) {
+                        target_->SetTransform(
+                            D2D1::Matrix3x2F::Rotation(
+                                annotation.text.angle,
+                                D2D1::Point2F(annotation.text.x,
+                                              annotation.text.y)) *
+                            was);
+                    }
+                    brush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f));
+                    target_->DrawRectangle(
+                        D2D1::RectF(box.left - lineWidth, box.top - lineWidth,
+                                    box.right + lineWidth,
+                                    box.bottom + lineWidth),
+                        brush_.Get(), lineWidth);
+                    brush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f));
+                    target_->DrawRectangle(box, brush_.Get(), lineWidth);
+                    if (annotation.text.angle != 0.0f) {
+                        target_->SetTransform(was);
+                    }
+                    break;
+                }
+                case ccl::doc::AnnotationKind::Effect:
+                    // Never picked, so never marked.
+                    break;
+            }
         }
-        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
 
     if (cursor != nullptr && brush_ && cursor->radius > 0.0f) {

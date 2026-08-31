@@ -117,12 +117,21 @@ public:
               const D2D1_RECT_F* highlight = nullptr,
               ID2D1Geometry* selection = nullptr,
               ID2D1Geometry* removing = nullptr,
-              // The pieces picked out to be moved, turned or reordered, each
-              // framed where it sits. A list rather than one box, because
-              // several can be picked at once -- which is the whole point of
-              // picking rather than pointing.
-              const D2D1_RECT_F* picked = nullptr,
-              size_t pickedCount = 0) noexcept;
+              // The pieces picked out to be moved, turned or reordered, named
+              // by id. A list rather than one, because several can be picked
+              // at once -- which is the whole point of picking rather than
+              // pointing.
+              //
+              // Ids rather than boxes: the mark has to follow the piece's own
+              // shape, and the shapes are already kept here against these very
+              // ids. A box round a diagonal line says a press anywhere in a
+              // large square would take hold of it, which is not true.
+              const unsigned int* pickedIds = nullptr,
+              size_t pickedCount = 0,
+              // How far past a piece a press still takes hold of it, in screen
+              // pixels. The mark is drawn at exactly this distance, so that
+              // what is drawn is what can be held.
+              float grabSlack = 0.0f) noexcept;
 
     // Draws the picture and its annotations into a new buffer at full size,
     // producing the image as it is actually seen. Everything that leaves the
