@@ -432,8 +432,10 @@ private:
     // True when the point falls on the text, allowing for how far it is turned.
     // The point is turned back rather than the box being turned forward: a
     // turned box is no longer a box, and the comparison would need a polygon.
-    bool TextHit(const ccl::doc::TextAnnotation& text,
-                 D2D1_POINT_2F at) noexcept;
+    // `slack` widens the box all round, in picture units, for the sake of a
+    // press that has to be aimed by hand.
+    bool TextHit(const ccl::doc::TextAnnotation& text, D2D1_POINT_2F at,
+                 float slack = 0.0f) noexcept;
     // The text's box as it actually sits -- corners, middle and edge midpoints,
     // turned. Used to ask whether a band drawn on the picture reaches it.
     bool TextOutlinePoints(const ccl::doc::TextAnnotation& text,
@@ -441,14 +443,21 @@ private:
     // True when the band just dragged out reaches any part of the annotation.
     // Taken at the annotation's own points rather than at its box, so that a
     // lasso drawn between two strokes does not pick up both.
+    // `slack` reaches that far past the annotation, in picture units. The band
+    // passes zero -- what it encloses is what the eye enclosed -- and only a
+    // press asks for room to be off by a little.
     bool AnnotationTouched(const ccl::doc::SelectionShapes& band,
-                           const ccl::doc::Annotation& annotation) noexcept;
+                           const ccl::doc::Annotation& annotation,
+                           float slack) noexcept;
     // Folds the band into what is already picked, the way the modifier keys
     // asked for, and settles the result.
     void ApplyObjectBand(ccl::doc::SelectionOp op) noexcept;
     void ClearPicked() noexcept;
     // The topmost piece under a point, searched from the front as the eye
-    // reads it. `size_t(-1)` when the point is over nothing.
+    // reads it. `size_t(-1)` when the point is over nothing. Reaches a little
+    // way past the ink -- a line three pixels wide is not a target anyone can
+    // hit -- and the cursor asks this same question, so that a four-way arrow
+    // and a press that takes hold can never disagree.
     size_t ObjectAt(D2D1_POINT_2F image) noexcept;
     // Takes hold of what is picked, so that a drag moves it. The originals are
     // kept whole rather than as a starting offset: a piece is moved from where

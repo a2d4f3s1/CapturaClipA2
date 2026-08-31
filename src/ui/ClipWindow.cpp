@@ -115,6 +115,11 @@ constexpr size_t kMaxLassoPoints = 4096;
 
 // How far apart a lasso's points start out, in client pixels.
 constexpr float kLassoSpacing = 2.0f;
+// How far past a piece a press still takes hold of it, in screen pixels. A pen
+// line three pixels wide is not something a hand can land on exactly, and the
+// frame drawn round a picked piece is no help -- it is the ink that is being
+// reached for, not the box.
+constexpr float kGrabSlack = 3.0f;
 
 // Menu entries per column before starting a new one, so a long font list stays
 // on screen instead of running off the bottom.
@@ -1270,11 +1275,17 @@ bool ClipWindow::AnnotationBounds(const ccl::doc::Annotation& annotation,
 }
 
 bool ClipWindow::TextHit(const ccl::doc::TextAnnotation& text,
-                         D2D1_POINT_2F at) noexcept {
+                         D2D1_POINT_2F at, float slack) noexcept {
     D2D1_RECT_F box{};
     if (!renderer_.MeasureText(text, box)) {
         return false;
     }
+    // Widened after the point has been turned back, never before: growing a
+    // box and then turning it would put the extra room on the slant.
+    box.left -= slack;
+    box.top -= slack;
+    box.right += slack;
+    box.bottom += slack;
     if (text.angle != 0.0f) {
         const D2D1_MATRIX_3X2_F back = D2D1::Matrix3x2F::Rotation(
             -text.angle, D2D1::Point2F(text.x, text.y));
@@ -1310,7 +1321,7 @@ bool ClipWindow::TextOutlinePoints(const ccl::doc::TextAnnotation& text,
 
 bool ClipWindow::AnnotationTouched(
     const ccl::doc::SelectionShapes& band,
-    const ccl::doc::Annotation& annotation) noexcept {
+    const ccl::doc::Annotation& annotation, float slack) noexcept {
     // Obscuring effects are left out. What they show was cut out of the
     // picture when they were placed and does not follow them, so moving one
     // would carry the wrong pixels about.
@@ -1384,7 +1395,7 @@ bool ClipWindow::AnnotationTouched(
     for (const D2D1_POINT_2F& point : bandPoints) {
         switch (annotation.kind) {
             case ccl::doc::AnnotationKind::Stroke:
-                if (StrokeHit(annotation.stroke, point, 0.0f)) {
+                if (StrokeHit(annotation.stroke, point, slack)) {
                     return true;
                 }
                 break;
@@ -1392,16 +1403,23 @@ bool ClipWindow::AnnotationTouched(
                 if (annotation.area.width > 0.0f) {
                     if (ccl::doc::SelectionNearEdge(
                             annotation.area.shape, point.x, point.y,
-                            annotation.area.width * 0.5f)) {
+                            slack + annotation.area.width * 0.5f)) {
                         return true;
                     }
                 } else if (ccl::doc::SelectionContains(annotation.area.shape,
                                                        point.x, point.y)) {
                     return true;
+                } else if (slack > 0.0f &&
+                           ccl::doc::SelectionNearEdge(annotation.area.shape,
+                                                       point.x, point.y,
+                                                       slack)) {
+                    // Just outside a filled shape counts too, so that its edge
+                    // is no harder to take hold of than its middle.
+                    return true;
                 }
                 break;
             case ccl::doc::AnnotationKind::Text:
-                if (TextHit(annotation.text, point)) {
+                if (TextHit(annotation.text, point, slack)) {
                     return true;
                 }
                 break;
@@ -1416,6 +1434,10 @@ size_t ClipWindow::ObjectAt(D2D1_POINT_2F image) noexcept {
     if (document_ == nullptr) {
         return static_cast<size_t>(-1);
     }
+    // Held in screen pixels rather than picture ones, so that reaching for a
+    // line feels the same however far the picture is zoomed in or out.
+    const float zoom = view_.Zoom();
+    const float slack = zoom > 0.0f ? kGrabSlack / zoom : kGrabSlack;
     // A band with no size at all, which is what a press is.
     ccl::doc::SelectionShapes point;
     ccl::doc::SelectionShape dot;
@@ -1429,7 +1451,7 @@ size_t ClipWindow::ObjectAt(D2D1_POINT_2F image) noexcept {
     // Front to back, so the piece drawn last -- the one on top -- is the one
     // taken hold of.
     for (size_t i = annotations.size(); i > 0; --i) {
-        if (AnnotationTouched(point, annotations[i - 1])) {
+        if (AnnotationTouched(point, annotations[i - 1], slack)) {
             return i - 1;
         }
     }
@@ -1733,7 +1755,8 @@ void ClipWindow::ApplyObjectBand(ccl::doc::SelectionOp op) noexcept {
 
     std::vector<unsigned int> hits;
     for (const ccl::doc::Annotation& annotation : document_->Annotations()) {
-        if (AnnotationTouched(band, annotation)) {
+        // No slack: a band takes in what the eye drew round, exactly.
+        if (AnnotationTouched(band, annotation, 0.0f)) {
             hits.push_back(annotation.id);
         }
     }
@@ -2249,26 +2272,22 @@ void ClipWindow::UpdateCursor() noexcept {
 
     if (IsObjectTool(tool_.tool)) {
         // A crosshair to draw the band with, as the area tools use. Over a
-        // piece that is already picked it becomes the four-way arrow, which is
-        // what the text tool shows where a press would move something.
-        bool overPicked = false;
-        if (document_ != nullptr && !pickedIds_.empty()) {
-            const D2D1_POINT_2F at = ToImage(lastCursor_);
-            for (const ccl::doc::Annotation& annotation :
-                 document_->Annotations()) {
-                if (std::find(pickedIds_.begin(), pickedIds_.end(),
-                              annotation.id) == pickedIds_.end()) {
-                    continue;
-                }
-                D2D1_RECT_F box{};
-                if (AnnotationBounds(annotation, box) &&
-                    PointInRect(box, at.x, at.y)) {
-                    overPicked = true;
-                    break;
-                }
-            }
+        // piece it becomes the four-way arrow, which is what the text tool
+        // shows where a press would move something.
+        //
+        // Asked of `ObjectAt`, the very question the press asks. Anything else
+        // drifts: the arrow would appear where nothing can be held.
+        //
+        // The live position rather than `lastCursor_`. WM_SETCURSOR arrives
+        // before the WM_MOUSEMOVE that records it, so the stored one is a move
+        // behind -- measured 5 times out of 5 on 2026-08-30, and the arrow
+        // failed to appear on arriving at a piece in one jump.
+        POINT at = lastCursor_;
+        if (::GetCursorPos(&at)) {
+            ::ScreenToClient(hwnd_, &at);
         }
-        ::SetCursor(::LoadCursorW(nullptr, overPicked ? IDC_SIZEALL : IDC_CROSS));
+        const bool overPiece = ObjectAt(ToImage(at)) != static_cast<size_t>(-1);
+        ::SetCursor(::LoadCursorW(nullptr, overPiece ? IDC_SIZEALL : IDC_CROSS));
         return;
     }
 
