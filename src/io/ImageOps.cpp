@@ -146,32 +146,75 @@ DibBuffer FlipVertical(const DibBuffer& source) noexcept {
     return result;
 }
 
+ConcatLayout PlanConcat(int sourceWidth, int sourceHeight, int additionWidth,
+                        int additionHeight,
+                        const ConcatPlacement& placement) noexcept {
+    // Where the added picture would sit if the one already open had its corner
+    // at the origin. The side decides which way it goes and the gap how far;
+    // the nudge is free to take it anywhere from there, including back over
+    // the top of what it was placed beside.
+    int x = 0;
+    int y = 0;
+    switch (placement.side) {
+        case ConcatSide::Right: x = sourceWidth + placement.margin; break;
+        case ConcatSide::Left: x = -(additionWidth + placement.margin); break;
+        case ConcatSide::Bottom: y = sourceHeight + placement.margin; break;
+        case ConcatSide::Top: y = -(additionHeight + placement.margin); break;
+    }
+    x += placement.offsetX;
+    y += placement.offsetY;
+
+    // The box that covers both. Taken rather than assumed, since the added
+    // picture may now reach above or to the left of where the other starts.
+    const int left = std::min(0, x);
+    const int top = std::min(0, y);
+    const int right = std::max(sourceWidth, x + additionWidth);
+    const int bottom = std::max(sourceHeight, y + additionHeight);
+
+    ConcatLayout layout;
+    layout.width = right - left;
+    layout.height = bottom - top;
+    // Shifted so that nothing sits at a negative coordinate: the result has to
+    // start somewhere, and that somewhere is whichever picture reaches furthest
+    // back.
+    layout.sourceX = -left;
+    layout.sourceY = -top;
+    layout.additionX = x - left;
+    layout.additionY = y - top;
+    return layout;
+}
+
 DibBuffer Concatenate(const DibBuffer& source, const DibBuffer& addition,
-                      ConcatSide side, const ccl::doc::Color& fill) noexcept {
+                      const ConcatPlacement& placement,
+                      const ccl::doc::Color& fill) noexcept {
     DibBuffer result;
     if (!source.IsValid() || !addition.IsValid()) {
         return result;
     }
 
-    const bool sideways = side == ConcatSide::Right;
-    const int width = sideways ? source.Width() + addition.Width()
-                               : std::max(source.Width(), addition.Width());
-    const int height = sideways ? std::max(source.Height(), addition.Height())
-                                : source.Height() + addition.Height();
-
-    if (!result.Create(width, height)) {
+    const ConcatLayout layout =
+        PlanConcat(source.Width(), source.Height(), addition.Width(),
+                   addition.Height(), placement);
+    if (layout.width <= 0 || layout.height <= 0 ||
+        !result.Create(layout.width, layout.height)) {
         return result;
     }
 
-    // Only the leftover strip is ever seen, but filling everything is simpler
-    // than working out which part that is, and costs one pass.
+    // Only the space neither picture reaches is ever seen, but filling
+    // everything is simpler than working out which part that is, and costs one
+    // pass.
     Fill(result, Pack(fill));
 
-    // Aligned to the top-left corner: the added picture continues from where
-    // the original ends rather than floating in the middle of it.
-    Blit(result, source, 0, 0);
-    Blit(result, addition, sideways ? source.Width() : 0,
-         sideways ? 0 : source.Height());
+    // The one that is meant to be underneath goes down first. Nothing is
+    // blended: where they overlap, the second one covers the first outright,
+    // which is what "on top" is being asked for.
+    if (placement.additionOnTop) {
+        Blit(result, source, layout.sourceX, layout.sourceY);
+        Blit(result, addition, layout.additionX, layout.additionY);
+    } else {
+        Blit(result, addition, layout.additionX, layout.additionY);
+        Blit(result, source, layout.sourceX, layout.sourceY);
+    }
     return result;
 }
 

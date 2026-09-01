@@ -23,6 +23,7 @@
 #include "render/D2DContext.h"
 #include "res/Resources.h"
 #include "ui/ColorPopup.h"
+#include "ui/ConcatDialog.h"
 #include "ui/DecorPanel.h"
 #include "ui/RotateDialog.h"
 #include "ui/SettingsDialog.h"
@@ -255,8 +256,7 @@ enum MenuId : UINT {
     kMenuRotateFree,
     kMenuFlipHorizontal,
     kMenuFlipVertical,
-    kMenuConcatRight,
-    kMenuConcatBottom,
+    kMenuConcat,
     kMenuCaptureSelf,
     kMenuRecapture,
     kMenuSettings,
@@ -6212,10 +6212,8 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(image, MF_SEPARATOR, 0, nullptr);
     const UINT pasteState =
         ccl::io::ClipboardHasImage() ? plain : (plain | MF_GRAYED);
-    ::AppendMenuW(image, pasteState, kMenuConcatRight,
-                  L"クリップボードの画像を右に連結");
-    ::AppendMenuW(image, pasteState, kMenuConcatBottom,
-                  L"クリップボードの画像を下に連結");
+    ::AppendMenuW(image, pasteState, kMenuConcat,
+                  L"クリップボードの画像を連結する...");
     ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(image), L"画像");
 
     const HMENU zoom = ::CreatePopupMenu();
@@ -6359,11 +6357,8 @@ void ClipWindow::OnCommand(int command) noexcept {
         case kMenuFlipVertical:
             ApplyTransform(ccl::io::FlipVertical(FlattenForTransform()));
             return;
-        case kMenuConcatRight:
-            ConcatenateClipboard(true);
-            return;
-        case kMenuConcatBottom:
-            ConcatenateClipboard(false);
+        case kMenuConcat:
+            ConcatenateClipboard();
             return;
         case kMenuCaptureSelf:
             CaptureSelf();
@@ -6962,25 +6957,115 @@ void ClipWindow::Recapture() noexcept {
     ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
 }
 
-void ClipWindow::ConcatenateClipboard(bool toRight) noexcept {
+void ClipWindow::ConcatenateClipboard() noexcept {
+    if (document_ == nullptr) {
+        return;
+    }
     ccl::capture::DibBuffer addition = ccl::io::PasteFromClipboard(hwnd_);
     if (!addition.IsValid()) {
         return;
     }
 
+    // Flattened once, before anything is shown. The annotations do not change
+    // while the placement is being chosen, so remaking this for every nudge
+    // would be the same work over and over.
     const ccl::capture::DibBuffer flat = FlattenForTransform();
     if (!flat.IsValid()) {
         return;
     }
 
-    // Black padding for the shorter side. Screenshots of dark interfaces are
-    // the common case, and black is what the original filled with.
+    // Black for the space neither picture reaches, matching what a free turn
+    // fills its corners with.
     constexpr ccl::doc::Color fill{0.0f, 0.0f, 0.0f, 1.0f};
 
-    ApplyTransform(ccl::io::Concatenate(
-        flat, addition,
-        toRight ? ccl::io::ConcatSide::Right : ccl::io::ConcatSide::Bottom,
-        fill));
+    // What the document holds now, kept aside so the preview can work on the
+    // real thing. Showing the join on the picture itself is the only way to
+    // judge it -- the two end up side by side, so anything small enough to sit
+    // in the dialog would be too small to see.
+    ccl::capture::DibBuffer originalImage = std::move(document_->MutableImage());
+    ccl::doc::AnnotationList originalAnnotations = document_->Annotations();
+
+    const auto restore = [&]() {
+        document_->MutableImage() = originalImage.Clone();
+        document_->MutableAnnotations() = originalAnnotations;
+        renderer_.InvalidateResults();
+        renderer_.SetDocument(document_);
+        ResizeToImage();
+        ClampScroll();
+        Draw();
+    };
+
+    // Where the picture already open sits inside the joined one. Nudging the
+    // added picture up or to the left grows the result that way, which moves
+    // the other one along inside it -- so the window is moved back by as much,
+    // and what was already there stays put on the desktop. Without this the
+    // picture being judged against slides away with every press of a key.
+    int heldX = 0;
+    int heldY = 0;
+    const auto keepOriginalStill = [&](const ccl::io::ConcatLayout& layout) {
+        const int dx = layout.sourceX - heldX;
+        const int dy = layout.sourceY - heldY;
+        heldX = layout.sourceX;
+        heldY = layout.sourceY;
+        if (dx == 0 && dy == 0) {
+            return;
+        }
+        RECT bounds{};
+        if (!::GetWindowRect(hwnd_, &bounds)) {
+            return;
+        }
+        const float zoom = view_.Zoom();
+        ::SetWindowPos(hwnd_, nullptr,
+                       bounds.left - std::lround(dx * zoom),
+                       bounds.top - std::lround(dy * zoom), 0, 0,
+                       SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+
+    // Every change rebuilds the joined picture and puts it in place. No step is
+    // recorded for any of it: the walk through possible placements is not
+    // twenty edits, it is one, and it is recorded when it settles.
+    const auto preview = [&](const ccl::io::ConcatPlacement& placement) {
+        ccl::capture::DibBuffer joined =
+            ccl::io::Concatenate(flat, addition, placement, fill);
+        if (!joined.IsValid()) {
+            return;
+        }
+        document_->MutableImage() = std::move(joined);
+        document_->MutableAnnotations().clear();
+        renderer_.InvalidateResults();
+        renderer_.SetDocument(document_);
+        ResizeToImage();
+        keepOriginalStill(ccl::io::PlanConcat(flat.Width(), flat.Height(),
+                                              addition.Width(),
+                                              addition.Height(), placement));
+        ClampScroll();
+        Draw();
+    };
+
+    ccl::io::ConcatPlacement start;
+    start.margin = settings_ != nullptr
+                       ? static_cast<int>(settings_->concatMargin)
+                       : 0;
+
+    const auto chosen = ccl::ui::ShowConcatDialog(hwnd_, start, preview);
+
+    // Back to how things were either way, so that settling goes through the
+    // ordinary path: it is what records the step, and it has to record the
+    // state the picture was in before any of this.
+    restore();
+    heldX = 0;
+    heldY = 0;
+    if (!chosen.has_value()) {
+        return;
+    }
+    ApplyTransform(ccl::io::Concatenate(flat, addition, *chosen, fill));
+    // Settling moves the picture inside the result the same way a preview did,
+    // so the window is brought back the same way. Otherwise pressing OK would
+    // shift the whole thing at the last moment, after it had been held still
+    // for the entire time the placement was being chosen.
+    keepOriginalStill(ccl::io::PlanConcat(flat.Width(), flat.Height(),
+                                          addition.Width(), addition.Height(),
+                                          *chosen));
 }
 
 void ClipWindow::OpenFile() noexcept {

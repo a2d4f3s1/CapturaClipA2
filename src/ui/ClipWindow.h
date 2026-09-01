@@ -174,7 +174,7 @@ private:
     // selection, as if it had just been launched.
     void Recapture() noexcept;
     // Joins the image on the clipboard onto the right or the bottom.
-    void ConcatenateClipboard(bool toRight) noexcept;
+    void ConcatenateClipboard() noexcept;
 
     // Why the picture is about to go away, which decides how much the program
     // is allowed to do about a save that fails.
