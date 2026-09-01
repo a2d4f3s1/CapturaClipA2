@@ -452,6 +452,11 @@ private:
                            float slack) noexcept;
     // Folds the band into what is already picked, the way the modifier keys
     // asked for, and settles the result.
+    // How far past a piece a press still takes hold of it, in screen pixels.
+    // From the settings, so that widening the reach widens the mark drawn
+    // round what is picked with it -- the two are drawn and tested from this
+    // one number, which is what keeps them from disagreeing.
+    float GrabSlack() const noexcept;
     // Everything a press at this point would reach, listed from the piece on
     // top downwards. `ObjectAt` is the first of these; this is what repeated
     // presses in the same place walk through.

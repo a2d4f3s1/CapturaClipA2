@@ -243,6 +243,9 @@ void Settings::Load() noexcept {
         ReadString(L"Appearance", L"RotateAnchor",
                    RotateAnchorName(rotateAnchor), path_),
         rotateAnchor);
+    grabSlack = ReadFloat(L"Appearance", L"GrabSlack", grabSlack, path_);
+    concatMargin =
+        ReadFloat(L"Appearance", L"ConcatMargin", concatMargin, path_);
     hideDurationMs = ::GetPrivateProfileIntW(L"Appearance", L"HideDurationMs",
                                              static_cast<INT>(hideDurationMs),
                                              path_.c_str());
@@ -334,6 +337,18 @@ void Settings::Clamp() noexcept {
     // A capture that waits minutes before grabbing the screen is a hang, not a
     // setting.
     if (preparationMs > 10000) preparationMs = 10000;
+
+    // Nothing at all makes a thin line impossible to take hold of; too much
+    // and pressing near one piece reaches several. Whole pixels: the mark is
+    // drawn at this distance, and half a pixel of it would not show.
+    grabSlack = std::roundf(grabSlack);
+    if (grabSlack < 0.0f) grabSlack = 0.0f;
+    if (grabSlack > 40.0f) grabSlack = 40.0f;
+    // A gap of nothing is the two pictures touching, which is what joining
+    // them has always done and is still worth being able to ask for.
+    concatMargin = std::roundf(concatMargin);
+    if (concatMargin < 0.0f) concatMargin = 0.0f;
+    if (concatMargin > 2000.0f) concatMargin = 2000.0f;
 
     // Hiding is only useful if the window comes back. Too short and it is gone
     // before it has been looked past; too long and it reads as having crashed.
@@ -452,6 +467,14 @@ void Settings::Save() const noexcept {
                L"; Without a title bar there is nothing to drag, so the middle\n"
                L"; button moves the window instead.\n"
                L"WindowFrame=%s\n"
+               L"; How far past a piece a press still takes hold of it, in\n"
+               L"; screen pixels. The mark drawn round what is picked is this\n"
+               L"; wide too, so what is shown is what can be held. 0-40.\n"
+               L"GrabSlack=%g\n"
+               L"; Gap left between the two pictures when one is joined onto\n"
+               L"; another, in picture pixels. Only the starting value; the\n"
+               L"; join itself is set up in its own window.\n"
+               L"ConcatMargin=%g\n"
                L"; What stays still while the zoom changes.\n"
                L";   TopLeft  the corner of the view; the window does not move\n"
                L";   Cursor   the pixel under the pointer, so you can aim at a\n"
@@ -525,7 +548,8 @@ void Settings::Save() const noexcept {
                ColorText(quickColors[6]).c_str(),
                ColorText(quickColors[7]).c_str(), titleFormat.c_str(),
                smoothScaling ? 1 : 0, zoomStepPercent, paletteScalePercent,
-               FrameName(windowFrame), AnchorName(zoomAnchor),
+               FrameName(windowFrame), grabSlack, concatMargin,
+               AnchorName(zoomAnchor),
                RotateAnchorName(rotateAnchor), hideDurationMs,
                FormatName(defaultFormat),
                jpegQuality, autoSaveFolder.c_str(), autoSaveHistoryDays,

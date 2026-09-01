@@ -137,6 +137,16 @@ public:
     // Size of the colour palette popup, as a percentage of its normal size.
     int paletteScalePercent = 100;
     WindowFrame windowFrame = WindowFrame::NoTitleBar;
+    // How far past a piece a press still takes hold of it, in screen pixels.
+    // Screen rather than picture pixels so that reaching for a line feels the
+    // same however far the picture is zoomed. The mark drawn round what is
+    // picked is exactly this wide, so what is shown is what can be held --
+    // widening the reach widens the mark with it.
+    float grabSlack = 3.0f;
+    // The gap left between the two pictures when one is joined onto another,
+    // in picture pixels. Only the starting value: the join itself is set up in
+    // its own window, where it can be changed for that one join.
+    float concatMargin = 0.0f;
     ZoomAnchor zoomAnchor = ZoomAnchor::TopLeft;
     // The middle by default: a turn works about the middle of the picture, so
     // keeping that still is what matches what was just watched happening.

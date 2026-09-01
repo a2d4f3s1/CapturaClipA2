@@ -217,6 +217,8 @@ enum ControlId : UINT {
     kIdZoomStep,
     kIdZoomAnchor,
     kIdRotateAnchor,
+    kIdGrabSlack,
+    kIdConcatMargin,
     kIdPaletteScale,
 
     kIdPenWidth,
@@ -549,6 +551,21 @@ void BuildGeneral(Dialog& dialog) noexcept {
     AddNote(dialog,
             L"「自由に回転」で画像が大きくなったときに効きます。\n"
             L"90 度・180 度の回転には関係ありません。",
+            true);
+
+    AddRow(dialog, L"掴める範囲 (px)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdGrabSlack, kNarrowField);
+    AddNote(dialog,
+            L"置いたものを選ぶとき、線からどれだけ離れていても掴めるかです。\n"
+            L"選んだものに付く帯もこの幅で描かれるので、見えている所が掴めます。",
+            true);
+
+    AddRow(dialog, L"連結の隙間 (px)", L"EDIT",
+           ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdConcatMargin,
+           kNarrowField);
+    AddNote(dialog,
+            L"クリップボードの画像を連結するときの、最初の隙間です。\n"
+            L"連結の窓でその都度変えられます。",
             true);
 
     AddRow(dialog, L"パレットの大きさ (%)", L"EDIT",
@@ -1197,6 +1214,8 @@ void Populate(Dialog& dialog) noexcept {
                        static_cast<int>(values.zoomAnchor));
     ComboBox_SetCurSel(dialog.Field(kIdRotateAnchor),
                        static_cast<int>(values.rotateAnchor));
+    SetNumber(dialog.Field(kIdGrabSlack), values.grabSlack);
+    SetNumber(dialog.Field(kIdConcatMargin), values.concatMargin);
     SetNumber(dialog.Field(kIdPaletteScale), values.paletteScalePercent);
 
     SetNumber(dialog.Field(kIdPenWidth), values.penWidth);
@@ -1281,6 +1300,9 @@ void Collect(Dialog& dialog) noexcept {
         case 1: values.rotateAnchor = ccl::app::RotateAnchor::Center; break;
         default: values.rotateAnchor = ccl::app::RotateAnchor::TopLeft; break;
     }
+    values.grabSlack = ReadFloat(dialog.Field(kIdGrabSlack), values.grabSlack);
+    values.concatMargin =
+        ReadFloat(dialog.Field(kIdConcatMargin), values.concatMargin);
     values.paletteScalePercent =
         ReadInt(dialog.Field(kIdPaletteScale), values.paletteScalePercent);
 

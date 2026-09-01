@@ -119,7 +119,10 @@ constexpr float kLassoSpacing = 2.0f;
 // line three pixels wide is not something a hand can land on exactly, and the
 // frame drawn round a picked piece is no help -- it is the ink that is being
 // reached for, not the box.
-constexpr float kGrabSlack = 3.0f;
+// Fallback for the reach past a piece that a press still takes hold of. The
+// figure that counts is the one in the settings; this stands in only for the
+// moment before they have been read.
+constexpr float kGrabSlackFallback = 3.0f;
 
 // Menu entries per column before starting a new one, so a long font list stays
 // on screen instead of running off the bottom.
@@ -1464,7 +1467,10 @@ void ClipWindow::ObjectsAt(D2D1_POINT_2F image,
         return;
     }
     const float zoom = view_.Zoom();
-    const float slack = zoom > 0.0f ? kGrabSlack / zoom : kGrabSlack;
+    const float reach = GrabSlack();
+    // Held in screen pixels rather than picture ones, so that reaching for a
+    // line feels the same however far the picture is zoomed in or out.
+    const float slack = zoom > 0.0f ? reach / zoom : reach;
     ccl::doc::SelectionShapes point;
     ccl::doc::SelectionShape dot;
     dot.left = image.x;
@@ -1483,14 +1489,19 @@ void ClipWindow::ObjectsAt(D2D1_POINT_2F image,
     }
 }
 
+float ClipWindow::GrabSlack() const noexcept {
+    return settings_ != nullptr ? settings_->grabSlack : kGrabSlackFallback;
+}
+
 size_t ClipWindow::ObjectAt(D2D1_POINT_2F image) noexcept {
     if (document_ == nullptr) {
         return static_cast<size_t>(-1);
     }
+    const float zoom = view_.Zoom();
+    const float reach = GrabSlack();
     // Held in screen pixels rather than picture ones, so that reaching for a
     // line feels the same however far the picture is zoomed in or out.
-    const float zoom = view_.Zoom();
-    const float slack = zoom > 0.0f ? kGrabSlack / zoom : kGrabSlack;
+    const float slack = zoom > 0.0f ? reach / zoom : reach;
     // A band with no size at all, which is what a press is.
     ccl::doc::SelectionShapes point;
     ccl::doc::SelectionShape dot;
@@ -7129,7 +7140,7 @@ void ClipWindow::Draw() noexcept {
                    hasHighlight ? &highlight : nullptr, selection, removing,
                    objectBanding ? &objectBand : nullptr,
                    marking ? pickedIds_.data() : nullptr,
-                   marking ? pickedIds_.size() : 0, kGrabSlack);
+                   marking ? pickedIds_.size() : 0, GrabSlack());
 
     // Frames before the window is actually on screen are not representative,
     // so they are kept out of the statistics.
