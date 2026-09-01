@@ -117,6 +117,13 @@ public:
               const D2D1_RECT_F* highlight = nullptr,
               ID2D1Geometry* selection = nullptr,
               ID2D1Geometry* removing = nullptr,
+              // What `selection` is drawn in. The two kinds of selecting share
+              // this path but must not look alike: one marks out an area of the
+              // picture, the other the pieces drawn on it, and which is about
+              // to happen has to be visible before the button goes down. The
+              // colour of the removal above is not passed, since taking things
+              // back out means the same thing either way.
+              const D2D1_COLOR_F* selectionColor = nullptr,
               // The pieces picked out to be moved, turned or reordered, named
               // by id. A list rather than one, because several can be picked
               // at once -- which is the whole point of picking rather than

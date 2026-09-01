@@ -105,10 +105,14 @@ constexpr AssignRow kAssignRows[] = {
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolPen), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolEraser), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolText), kGroupTool},
+    // Each way of selecting sits next to the one it is paired with -- the box
+    // with the box, the freehand with the freehand -- rather than the four
+    // being split into two blocks. The keys are meant to be read as pairs,
+    // since one is the other with Ctrl held.
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolSelect), kGroupTool},
-    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolLasso), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolObjectSelect),
      kGroupTool},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToolLasso), kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::ToolObjectLasso),
      kGroupTool},
     {RowKind::Key, static_cast<int>(ccl::app::Command::Eyedropper), kGroupTool},

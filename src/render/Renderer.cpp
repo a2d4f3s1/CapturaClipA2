@@ -2027,8 +2027,9 @@ void Renderer::DrawText(const ccl::doc::TextAnnotation& text,
 void Renderer::Draw(const ccl::view::ViewState& view,
                     const ccl::doc::Stroke* active, const BrushCursor* cursor,
                     const D2D1_RECT_F* highlight, ID2D1Geometry* selection,
-                    ID2D1Geometry* removing, const unsigned int* pickedIds,
-                    size_t pickedCount, float grabSlack) noexcept {
+                    ID2D1Geometry* removing, const D2D1_COLOR_F* selectionColor,
+                    const unsigned int* pickedIds, size_t pickedCount,
+                    float grabSlack) noexcept {
     const bool measure = !measuredFirstDraw_;
     ccl::timing::Stopwatch watch;
 
@@ -2145,7 +2146,11 @@ void Renderer::Draw(const ccl::view::ViewState& view,
         target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         if (selection != nullptr) {
-            brush_->SetColor(D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
+            // The area tools' blue unless the caller names another, which is
+            // what tells the two kinds of selecting apart.
+            brush_->SetColor(selectionColor != nullptr
+                                 ? *selectionColor
+                                 : D2D1::ColorF(0.35f, 0.65f, 1.0f, 0.9f));
             target_->DrawGeometry(selection, brush_.Get(), lineWidth);
         }
         if (removing != nullptr) {

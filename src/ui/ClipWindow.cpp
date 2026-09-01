@@ -2265,29 +2265,52 @@ void ClipWindow::UpdateCursor() noexcept {
         return;
     }
 
-    if (IsSelectionTool(tool_.tool)) {
-        ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
-        return;
-    }
+    // The four selecting tools each get a pointer of their own. Sharing the
+    // crosshair between them meant the only way to find out which one was in
+    // hand was to try it, which is the opposite of what a tool of its own is
+    // for. Alt turns all four red, matching the outline of a subtraction.
+    if (IsSelectionTool(tool_.tool) || IsObjectTool(tool_.tool)) {
+        const bool object = IsObjectTool(tool_.tool);
 
-    if (IsObjectTool(tool_.tool)) {
-        // A crosshair to draw the band with, as the area tools use. Over a
-        // piece it becomes the four-way arrow, which is what the text tool
-        // shows where a press would move something.
-        //
-        // Asked of `ObjectAt`, the very question the press asks. Anything else
-        // drifts: the arrow would appear where nothing can be held.
-        //
-        // The live position rather than `lastCursor_`. WM_SETCURSOR arrives
-        // before the WM_MOUSEMOVE that records it, so the stored one is a move
-        // behind -- measured 5 times out of 5 on 2026-08-30, and the arrow
-        // failed to appear on arriving at a piece in one jump.
-        POINT at = lastCursor_;
-        if (::GetCursorPos(&at)) {
-            ::ScreenToClient(hwnd_, &at);
+        if (object) {
+            // Over a piece it becomes the four-way arrow, which is what the
+            // text tool shows where a press would move something.
+            //
+            // Asked of `ObjectAt`, the very question the press asks. Anything
+            // else drifts: the arrow would appear where nothing can be held.
+            //
+            // The live position rather than `lastCursor_`. WM_SETCURSOR
+            // arrives before the WM_MOUSEMOVE that records it, so the stored
+            // one is a move behind -- measured 5 times out of 5 on 2026-08-30,
+            // and the arrow failed to appear on arriving at a piece in one
+            // jump.
+            POINT at = lastCursor_;
+            if (::GetCursorPos(&at)) {
+                ::ScreenToClient(hwnd_, &at);
+            }
+            if (ObjectAt(ToImage(at)) != static_cast<size_t>(-1)) {
+                ::SetCursor(::LoadCursorW(nullptr, IDC_SIZEALL));
+                return;
+            }
         }
-        const bool overPiece = ObjectAt(ToImage(at)) != static_cast<size_t>(-1);
-        ::SetCursor(::LoadCursorW(nullptr, overPiece ? IDC_SIZEALL : IDC_CROSS));
+
+        const bool lasso = tool_.tool == ccl::tool::Tool::Lasso ||
+                           tool_.tool == ccl::tool::Tool::ObjectLasso;
+        const auto which =
+            object ? (lasso ? ccl::ui::SelectCursor::ObjectLasso
+                            : ccl::ui::SelectCursor::ObjectRect)
+                   : (lasso ? ccl::ui::SelectCursor::Lasso
+                            : ccl::ui::SelectCursor::Rect);
+
+        toolCursors_.Build();
+        // Drawing them can fail, and a window with no pointer at all is worse
+        // than one with the crosshair it used to have.
+        if (HCURSOR drawn = toolCursors_.Get(which, IsKeyDown(VK_MENU));
+            drawn != nullptr) {
+            ::SetCursor(drawn);
+        } else {
+            ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
+        }
         return;
     }
 
@@ -6904,9 +6927,15 @@ void ClipWindow::Draw() noexcept {
         }
     }
 
+    // Green while the object tools are in hand, so the band being dragged says
+    // which of the two kinds of selecting it is before it settles into either.
+    const D2D1_COLOR_F objectBand = D2D1::ColorF(0.30f, 0.85f, 0.40f, 0.9f);
+    const bool objectBanding = IsObjectTool(tool_.tool);
+
     renderer_.Draw(view_, drawing_ ? &activeStroke_ : nullptr,
                    showCursor ? &cursor : nullptr,
                    hasHighlight ? &highlight : nullptr, selection, removing,
+                   objectBanding ? &objectBand : nullptr,
                    marking ? pickedIds_.data() : nullptr,
                    marking ? pickedIds_.size() : 0, kGrabSlack);
 

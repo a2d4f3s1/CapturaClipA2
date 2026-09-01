@@ -12,6 +12,7 @@
 #include "render/SelectionGeometry.h"
 #include "tool/ToolState.h"
 #include "ui/ColorPreview.h"
+#include "ui/ToolCursors.h"
 #include "util/Timing.h"
 #include "view/ViewState.h"
 
@@ -690,6 +691,11 @@ private:
     // Reaching for a piece in the middle of drawing is a detour, so there has
     // to be a way back that is not "remember what you were using".
     ccl::tool::Tool toolBeforeObjects_ = ccl::tool::Tool::Pen;
+
+    // The pointers the four selecting tools show. Drawn on first use rather
+    // than at startup: the time before the first selection can be made is the
+    // one cost this program will not pay.
+    ccl::ui::ToolCursors toolCursors_;
 
     // Moving what is picked. The copies are of the pieces as they were when
     // the button went down.

@@ -41,6 +41,7 @@ set(APP_SOURCES
     src/ui/DecorPanel.cpp
     src/ui/RotateDialog.cpp
     src/ui/SettingsDialog.cpp
+    src/ui/ToolCursors.cpp
     src/util/Dpi.cpp
     src/util/NameFormat.cpp
 )
@@ -71,6 +72,7 @@ set(APP_HEADERS
     src/ui/RotateDialog.h
     src/res/Resources.h
     src/ui/SettingsDialog.h
+    src/ui/ToolCursors.h
     src/tool/Tool.h
     src/tool/ToolState.h
     src/util/Dpi.h
