@@ -863,6 +863,13 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 fixedPoints_ = activeStroke_.points.size();
                 return 0;
             }
+            // What the selecting tools show depends on which modifier is held,
+            // so the pointer is redrawn as one goes down rather than waiting
+            // for the next move. Only on the way down, not on every repeat.
+            if ((wParam == VK_SHIFT || wParam == VK_MENU) &&
+                (lParam & 0x40000000) == 0) {
+                UpdateCursor();
+            }
             OnKeyDown(wParam);
             return 0;
 
@@ -871,7 +878,26 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 spaceHeld_ = false;
                 UpdateCursor();
             }
+            if (wParam == VK_SHIFT || wParam == VK_MENU) {
+                UpdateCursor();
+            }
             return 0;
+
+        // Alt on its own arrives here rather than as an ordinary key. Taken
+        // only far enough to keep the pointer honest about what a press would
+        // do; everything else about it is read from the keyboard state when it
+        // matters.
+        case WM_SYSKEYDOWN:
+            if (wParam == VK_MENU && (lParam & 0x40000000) == 0) {
+                UpdateCursor();
+            }
+            break;
+
+        case WM_SYSKEYUP:
+            if (wParam == VK_MENU) {
+                UpdateCursor();
+            }
+            break;
 
         case WM_MBUTTONDOWN:
             BeginDragCommand(kButtonMiddle);
@@ -1028,6 +1054,7 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Nothing to record: a band that picks out pieces settles no
                 // area, and what was picked before the press is untouched
                 // until the button comes up.
+                bandClickId_ = 0;
                 selecting_ = false;
                 pending_ = ccl::doc::SelectionShape{};
                 RefreshSelection();
@@ -1742,6 +1769,30 @@ void ClipWindow::ReorderPicked(int toward, bool allTheWay) noexcept {
     Draw();
 }
 
+void ClipWindow::PickOne(unsigned int id, ccl::doc::SelectionOp op) noexcept {
+    const auto at = std::find(pickedIds_.begin(), pickedIds_.end(), id);
+    const bool held = at != pickedIds_.end();
+
+    switch (op) {
+        case ccl::doc::SelectionOp::Add:
+            if (!held) {
+                pickedIds_.push_back(id);
+            }
+            return;
+        case ccl::doc::SelectionOp::Subtract:
+            if (held) {
+                pickedIds_.erase(at);
+            }
+            return;
+        default:
+            // Reached only if the caller widens what is offered here: a press
+            // with no modifier takes hold of the piece where it lands and does
+            // not come through this.
+            pickedIds_.assign(1, id);
+            return;
+    }
+}
+
 void ClipWindow::ApplyObjectBand(ccl::doc::SelectionOp op) noexcept {
     if (document_ == nullptr) {
         return;
@@ -2271,8 +2322,14 @@ void ClipWindow::UpdateCursor() noexcept {
     // for. Alt turns all four red, matching the outline of a subtraction.
     if (IsSelectionTool(tool_.tool) || IsObjectTool(tool_.tool)) {
         const bool object = IsObjectTool(tool_.tool);
+        const bool adding = IsKeyDown(VK_SHIFT);
+        const bool removing = IsKeyDown(VK_MENU);
 
-        if (object) {
+        // With a modifier held, a press on a piece adds it or takes it out
+        // rather than taking hold of it, so the four-way arrow would be
+        // promising a move that is not on offer. What the pointer shows and
+        // what the press does are decided together, here.
+        if (object && !adding && !removing) {
             // Over a piece it becomes the four-way arrow, which is what the
             // text tool shows where a press would move something.
             //
@@ -2305,8 +2362,7 @@ void ClipWindow::UpdateCursor() noexcept {
         toolCursors_.Build();
         // Drawing them can fail, and a window with no pointer at all is worse
         // than one with the crosshair it used to have.
-        if (HCURSOR drawn = toolCursors_.Get(which, IsKeyDown(VK_MENU));
-            drawn != nullptr) {
+        if (HCURSOR drawn = toolCursors_.Get(which, removing); drawn != nullptr) {
             ::SetCursor(drawn);
         } else {
             ::SetCursor(::LoadCursorW(nullptr, IDC_CROSS));
@@ -4489,6 +4545,19 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
                     return;
                 }
             }
+            // With a modifier the press may still turn out to be a click on
+            // one piece rather than the start of a band. Which it is cannot be
+            // told yet, so the piece under it is remembered and the band is
+            // begun as usual; the release decides between them.
+            bandClickId_ = 0;
+            bandClickStart_ = client;
+            if (op != ccl::doc::SelectionOp::Replace && document_ != nullptr) {
+                const size_t under = ObjectAt(start);
+                if (under != static_cast<size_t>(-1)) {
+                    bandClickId_ = document_->Annotations()[under].id;
+                }
+            }
+
             pending_ = ccl::doc::SelectionShape{};
             pending_.op = op;
             if (tool_.tool == ccl::tool::Tool::ObjectLasso) {
@@ -4574,6 +4643,14 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
     }
 
     if (selecting_) {
+        // Once the pointer has actually travelled, the press was the start of
+        // a band after all, and the piece it landed on stops being the answer.
+        if (bandClickId_ != 0 &&
+            (std::abs(client.x - bandClickStart_.x) > kClickThreshold ||
+             std::abs(client.y - bandClickStart_.y) > kClickThreshold)) {
+            bandClickId_ = 0;
+        }
+
         if (pending_.lasso) {
             ExtendLasso(client);
         } else {
@@ -4671,7 +4748,15 @@ void ClipWindow::OnLeftUp() noexcept {
         // release sends WM_CAPTURECHANGED straight back here, and that path
         // drops a drag still marked as running.
         const ccl::doc::SelectionOp op = pending_.op;
-        ApplyObjectBand(op);
+        if (bandClickId_ != 0) {
+            // Pressed on a piece with a modifier and let go without moving:
+            // that one piece is what was meant, not the band of no size the
+            // drag would otherwise settle.
+            PickOne(bandClickId_, op);
+        } else {
+            ApplyObjectBand(op);
+        }
+        bandClickId_ = 0;
         selecting_ = false;
         pending_ = ccl::doc::SelectionShape{};
         ::ReleaseCapture();

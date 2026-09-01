@@ -453,6 +453,9 @@ private:
     // Folds the band into what is already picked, the way the modifier keys
     // asked for, and settles the result.
     void ApplyObjectBand(ccl::doc::SelectionOp op) noexcept;
+    // Adds or takes out one piece, for a modified press that turned out to be
+    // a click rather than a band.
+    void PickOne(unsigned int id, ccl::doc::SelectionOp op) noexcept;
     void ClearPicked() noexcept;
     // The topmost piece under a point, searched from the front as the eye
     // reads it. `size_t(-1)` when the point is over nothing. Reaches a little
@@ -696,6 +699,14 @@ private:
     // than at startup: the time before the first selection can be made is the
     // one cost this program will not pay.
     ccl::ui::ToolCursors toolCursors_;
+
+    // A press with Shift or Alt that landed on a piece. What it means cannot
+    // be known until the button comes up: moved, it is a band drawn from on
+    // top of something, which is an ordinary way to reach its neighbours; not
+    // moved, it is that one piece being added or taken out. Zero for a press
+    // that landed on nothing, since ids are never zero.
+    unsigned int bandClickId_ = 0;
+    POINT bandClickStart_{};
 
     // Moving what is picked. The copies are of the pieces as they were when
     // the button went down.
