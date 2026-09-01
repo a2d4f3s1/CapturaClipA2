@@ -926,10 +926,45 @@ void BuildAssignments(Dialog& dialog) noexcept {
             L"割り当てにない修飾キーを押している間は、何も起きません。",
             false);
     AddNote(dialog,
-            L"灰色の行は、押している間や描いている最中で意味が変わるキーです。\n"
-            L"何に使われているかを見るために載せてあり、割り当ては変えられません。",
+            L"灰色の行は、押している間や描いている最中で意味が変わるキーか、\n"
+            L"他の行に付いてくる行です。どちらもここでは変えられません。",
+            false);
+    AddNote(dialog,
+            L"範囲の選択とオブジェクトの選択は、キーだけが対で決まります。\n"
+            L"範囲側を変えると、オブジェクト側はそれに Ctrl を足した形になります。",
             false);
     EndPage(dialog);
+}
+
+// The two ways of selecting are tools in their own right -- what they pick,
+// the pointer they show, the colour they band in, all differ. It is only their
+// keys that are decided together: one is the other with Ctrl added, so setting
+// either one on its own is what "not separate" rules out, and the second of
+// the pair is listed to be read rather than chosen.
+ccl::app::Command Follower(ccl::app::Command command) noexcept {
+    switch (command) {
+        case ccl::app::Command::ToolSelect:
+            return ccl::app::Command::ToolObjectSelect;
+        case ccl::app::Command::ToolLasso:
+            return ccl::app::Command::ToolObjectLasso;
+        default:
+            return ccl::app::Command::Count;
+    }
+}
+
+bool IsFollower(ccl::app::Command command) noexcept {
+    return command == ccl::app::Command::ToolObjectSelect ||
+           command == ccl::app::Command::ToolObjectLasso;
+}
+
+// Rows the buttons work on. The fixed ones cannot be moved at all; the ones
+// that follow another are moved by moving what they follow.
+bool RowChangeable(const AssignRow& row) noexcept {
+    if (row.kind == RowKind::Fixed) {
+        return false;
+    }
+    return row.kind != RowKind::Key ||
+           !IsFollower(static_cast<ccl::app::Command>(row.command));
 }
 
 // What a row currently reads as in the second column.
@@ -1080,16 +1115,25 @@ void ChangeAssignment(Dialog& dialog, bool clear) noexcept {
 
     // These are listed so they can be looked up, not chosen. The buttons are
     // greyed for them as well; this is the second line of that.
-    if (row.kind == RowKind::Fixed) {
+    if (!RowChangeable(row)) {
         return;
     }
 
     if (clear) {
         switch (row.kind) {
-            case RowKind::Key:
-                dialog.working.shortcuts.Clear(
-                    static_cast<ccl::app::Command>(row.command));
+            case RowKind::Key: {
+                const auto command =
+                    static_cast<ccl::app::Command>(row.command);
+                dialog.working.shortcuts.Clear(command);
+                // Emptying one half empties the other: they are one setting,
+                // and a key left behind that nobody chose is the sort of thing
+                // only found by reaching for it and getting nothing.
+                if (const ccl::app::Command follower = Follower(command);
+                    follower != ccl::app::Command::Count) {
+                    dialog.working.shortcuts.Clear(follower);
+                }
                 break;
+            }
             case RowKind::Drag:
                 dialog.working.mouse.SetDrag(
                     static_cast<ccl::app::MouseCommand>(row.command),
@@ -1115,8 +1159,24 @@ void ChangeAssignment(Dialog& dialog, bool clear) noexcept {
         return;
     }
 
-    dialog.working.shortcuts.Set(static_cast<ccl::app::Command>(row.command),
-                                 *binding);
+    const auto command = static_cast<ccl::app::Command>(row.command);
+    dialog.working.shortcuts.Set(command, *binding);
+
+    if (const ccl::app::Command follower = Follower(command);
+        follower != ccl::app::Command::Count) {
+        if (!binding->ctrl) {
+            ccl::app::Binding derived = *binding;
+            derived.ctrl = true;
+            // Set even when that lands on a key already in use. Taking it
+            // quietly off whatever had it is the one thing this program does
+            // not do: the row goes red and OK stops, which is how every other
+            // clash here is settled.
+            dialog.working.shortcuts.Set(follower, derived);
+        }
+        // With Ctrl already in the chosen key there is nothing left to add it
+        // to, so the other half is left where it is rather than being handed
+        // something the rule does not actually produce.
+    }
     FillAssignList(dialog);
 }
 
@@ -1444,7 +1504,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         // Greyed, as a control that cannot be used is: these
                         // rows are here to be read, not chosen.
-                        if (kAssignRows[row].kind == RowKind::Fixed) {
+                        if (!RowChangeable(kAssignRows[row])) {
                             draw->clrText = ::GetSysColor(COLOR_GRAYTEXT);
                         }
                     }
@@ -1460,7 +1520,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     dialog->Field(kIdAssignList), -1, LVNI_SELECTED);
                 const bool changeable =
                     selected >= 0 && selected < kAssignRowCount &&
-                    kAssignRows[selected].kind != RowKind::Fixed;
+                    RowChangeable(kAssignRows[selected]);
                 ::EnableWindow(dialog->Field(kIdAssignChange), changeable);
                 ::EnableWindow(dialog->Field(kIdAssignClear), changeable);
                 return 0;
