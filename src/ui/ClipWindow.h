@@ -697,11 +697,6 @@ private:
     // is reordered by the very commands this exists to serve, and ids are
     // handed out once and never reused.
     std::vector<unsigned int> pickedIds_;
-    // The tool to go back to when the object keys are pressed a second time.
-    // Reaching for a piece in the middle of drawing is a detour, so there has
-    // to be a way back that is not "remember what you were using".
-    ccl::tool::Tool toolBeforeObjects_ = ccl::tool::Tool::Pen;
-
     // The pointers the four selecting tools show. Drawn on first use rather
     // than at startup: the time before the first selection can be made is the
     // one cost this program will not pay.

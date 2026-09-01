@@ -5109,18 +5109,18 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
         case ccl::app::Command::ToolLasso:
             SelectTool(ccl::tool::Tool::Lasso);
             return true;
-        // Pressed a second time, these hand the tool back rather than doing
-        // nothing. Reaching for a piece in the middle of drawing is a detour,
-        // and a detour needs a way back that is not "remember what you had".
+        // These arrive at the tool and stay there, like every other tool key.
+        // They used to hand the tool back when pressed a second time, so that
+        // reaching for a piece in the middle of drawing had a way home; but
+        // the two ways of selecting look alike enough from the keyboard that
+        // the second press was as often meant as "get me in there" -- and it
+        // took the user out instead. Leaving is what the other tool keys are
+        // for, and they were never ambiguous.
         case ccl::app::Command::ToolObjectSelect:
-            SelectTool(tool_.tool == ccl::tool::Tool::ObjectSelect
-                           ? toolBeforeObjects_
-                           : ccl::tool::Tool::ObjectSelect);
+            SelectTool(ccl::tool::Tool::ObjectSelect);
             return true;
         case ccl::app::Command::ToolObjectLasso:
-            SelectTool(tool_.tool == ccl::tool::Tool::ObjectLasso
-                           ? toolBeforeObjects_
-                           : ccl::tool::Tool::ObjectLasso);
+            SelectTool(ccl::tool::Tool::ObjectLasso);
             return true;
         // Quiet unless something is picked, which is what ReorderPicked checks.
         // Taken here rather than only in the picking tools: what is picked is
@@ -5722,13 +5722,6 @@ void ClipWindow::SelectTool(ccl::tool::Tool tool) noexcept {
     if (!IsObjectTool(tool) && !eyedropperAside) {
         ClearPicked();
     }
-    // Where to return to when the same key is pressed again. Taken on the way
-    // in only, so that going from one kind of picking to the other does not
-    // make the way back point at picking.
-    if (IsObjectTool(tool) && !IsObjectTool(tool_.tool) && !eyedropperAside) {
-        toolBeforeObjects_ = tool_.tool;
-    }
-
     if (tool != ccl::tool::Tool::Text) {
         // Leaving text entry keeps what was typed and returns the keyboard to
         // direct input, so the shortcuts work again.
