@@ -28,6 +28,17 @@ struct HistoryStep {
     // selected is itself a state worth stepping back to.
     bool selectionChanged = false;
     SelectionShapes selection;
+    // Set when this step changed which pieces were picked out. Kept apart from
+    // the area above because the two are different things: one is a region of
+    // the picture, the other a handful of the marks on it, and a step changes
+    // one or the other. Same flag-rather-than-empty-list reasoning: having
+    // nothing picked is a state worth stepping back to.
+    //
+    // Picking is a step in its own right. Working a selection up piece by
+    // piece is work like any other, and reaching one piece too far should cost
+    // one step back, not the last thing drawn.
+    bool pickedChanged = false;
+    std::vector<unsigned int> picked;
     // The tool the edit was made with. Every step carries one, unlike the
     // picture: stepping back to a mark without going back to the tool that
     // made it leaves what changed invisible -- the outline of a selected area
@@ -56,16 +67,23 @@ public:
     void RecordSelection(const AnnotationList& annotations,
                          const SelectionShapes& selection,
                          ccl::tool::Tool tool);
+    // For a change to which pieces are picked out, which also draws nothing.
+    void RecordPicked(const AnnotationList& annotations,
+                      const std::vector<unsigned int>& picked,
+                      ccl::tool::Tool tool);
 
     bool CanUndo() const noexcept { return !undo_.empty(); }
     bool CanRedo() const noexcept { return !redo_.empty(); }
 
     // `image` is exchanged with the stored one when the step carries a picture,
-    // and left alone otherwise. So is `selection`. `tool` is always exchanged.
+    // and left alone otherwise. So are `selection` and `picked`. `tool` is
+    // always exchanged.
     bool Undo(AnnotationList& current, ccl::capture::DibBuffer& image,
-              SelectionShapes& selection, ccl::tool::Tool& tool);
+              SelectionShapes& selection, std::vector<unsigned int>& picked,
+              ccl::tool::Tool& tool);
     bool Redo(AnnotationList& current, ccl::capture::DibBuffer& image,
-              SelectionShapes& selection, ccl::tool::Tool& tool);
+              SelectionShapes& selection, std::vector<unsigned int>& picked,
+              ccl::tool::Tool& tool);
 
     // True when the step that would be undone or redone also swaps the picture,
     // so the caller knows to resize and rebuild what depends on it.

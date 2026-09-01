@@ -1457,6 +1457,32 @@ bool ClipWindow::AnnotationTouched(
     return false;
 }
 
+void ClipWindow::ObjectsAt(D2D1_POINT_2F image,
+                           std::vector<size_t>& out) noexcept {
+    out.clear();
+    if (document_ == nullptr) {
+        return;
+    }
+    const float zoom = view_.Zoom();
+    const float slack = zoom > 0.0f ? kGrabSlack / zoom : kGrabSlack;
+    ccl::doc::SelectionShapes point;
+    ccl::doc::SelectionShape dot;
+    dot.left = image.x;
+    dot.top = image.y;
+    dot.right = image.x;
+    dot.bottom = image.y;
+    point.push_back(dot);
+
+    const ccl::doc::AnnotationList& annotations = document_->Annotations();
+    // Front to back, so the list reads from the piece on top downwards, which
+    // is the order repeated presses walk through it.
+    for (size_t i = annotations.size(); i > 0; --i) {
+        if (AnnotationTouched(point, annotations[i - 1], slack)) {
+            out.push_back(i - 1);
+        }
+    }
+}
+
 size_t ClipWindow::ObjectAt(D2D1_POINT_2F image) noexcept {
     if (document_ == nullptr) {
         return static_cast<size_t>(-1);
@@ -1767,6 +1793,18 @@ void ClipWindow::ReorderPicked(int toward, bool allTheWay) noexcept {
     // Nothing worked out for a piece has to be thrown away: what is kept is
     // kept against the id, and the ids have only changed places.
     Draw();
+}
+
+void ClipWindow::RecordPickedChange(
+    const std::vector<unsigned int>& before) noexcept {
+    // Only when it actually came out different. A press that reached what was
+    // already picked, or a band that caught nothing new, has changed nothing,
+    // and a step that puts back what is already there is a step the user has
+    // to press through twice to get anywhere.
+    if (document_ == nullptr || pickedIds_ == before) {
+        return;
+    }
+    history_.RecordPicked(document_->Annotations(), before, ToolForHistory());
 }
 
 void ClipWindow::PickOne(unsigned int id, ccl::doc::SelectionOp op) noexcept {
@@ -4519,6 +4557,63 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
 
             const D2D1_POINT_2F start = ToImage(client);
 
+            // Everything a press here would reach, from the top down. Pressing
+            // the same place again works its way down this, so a piece
+            // underneath can be got at without moving the one on top out of
+            // the way first.
+            std::vector<size_t> stacked;
+            ObjectsAt(start, stacked);
+
+            const auto holds = [](const std::vector<unsigned int>& list,
+                                  unsigned int id) {
+                return std::find(list.begin(), list.end(), id) != list.end();
+            };
+
+            // Same place, close enough in time to read as one gesture rather
+            // than two separate presses, and asking for the same thing: then
+            // this press carries the walk on. Anything else starts a new one.
+            // The interval is the one set for double clicks, since that is the
+            // same judgement being made.
+            const ULONGLONG when = ::GetTickCount64();
+            const bool samePlace =
+                std::abs(client.x - cycleAt_.x) <= kClickThreshold &&
+                std::abs(client.y - cycleAt_.y) <= kClickThreshold;
+            const bool soon = when - cycleWhen_ <= ::GetDoubleClickTime();
+
+            if (samePlace && soon && op == cycleOp_ && !cycleTargets_.empty()) {
+                ++cycleDepth_;
+            } else {
+                cycleDepth_ = 0;
+                cycleOp_ = op;
+                cycleBase_ = pickedIds_;
+                cycleTargets_.clear();
+                if (document_ != nullptr) {
+                    for (size_t index : stacked) {
+                        const unsigned int id =
+                            document_->Annotations()[index].id;
+                        // Shift walks the pieces it could add, Alt those it
+                        // could take out. Neither touches what the other one
+                        // is for, so what was picked before the walk began
+                        // stays exactly as it was.
+                        const bool candidate =
+                            op == ccl::doc::SelectionOp::Replace ||
+                            (op == ccl::doc::SelectionOp::Add
+                                 ? !holds(cycleBase_, id)
+                                 : holds(cycleBase_, id));
+                        if (candidate) {
+                            cycleTargets_.push_back(id);
+                        }
+                    }
+                }
+            }
+            cycleAt_ = client;
+            cycleWhen_ = when;
+
+            const unsigned int target =
+                cycleTargets_.empty()
+                    ? 0u
+                    : cycleTargets_[cycleDepth_ % cycleTargets_.size()];
+
             // Pressing on something takes hold of it. Having to pick a piece
             // out first and then press it again to move it would be two
             // actions for what reads as one -- and pressing on a piece can
@@ -4527,35 +4622,32 @@ void ClipWindow::OnLeftDown(POINT client) noexcept {
             // Only without a modifier: Shift and Alt are how the picking is
             // adjusted, and a band drawn from on top of a piece is a perfectly
             // ordinary way to reach for its neighbours.
-            if (op == ccl::doc::SelectionOp::Replace) {
-                const size_t under = ObjectAt(start);
-                if (under != static_cast<size_t>(-1) && document_ != nullptr) {
-                    const unsigned int id =
-                        document_->Annotations()[under].id;
-                    if (std::find(pickedIds_.begin(), pickedIds_.end(), id) ==
-                        pickedIds_.end()) {
-                        // Not picked yet: pressing it picks it, and nothing
-                        // else, which is what pressing a thing means everywhere
-                        // else in the program.
-                        pickedIds_.assign(1, id);
-                        UpdateTitle();
-                    }
-                    BeginPickedDrag(client);
-                    Draw();
-                    return;
+            if (op == ccl::doc::SelectionOp::Replace && target != 0) {
+                // Not picked yet: pressing it picks it, and nothing else,
+                // which is what pressing a thing means everywhere else in the
+                // program. Having worked down to it settles on it either way
+                // -- otherwise reaching a piece already in the set would
+                // change nothing and the walk would have nothing to show for
+                // itself.
+                if (cycleDepth_ != 0 || !holds(pickedIds_, target)) {
+                    const std::vector<unsigned int> before = pickedIds_;
+                    pickedIds_.assign(1, target);
+                    RecordPickedChange(before);
+                    UpdateTitle();
                 }
+                BeginPickedDrag(client);
+                Draw();
+                return;
             }
+
             // With a modifier the press may still turn out to be a click on
             // one piece rather than the start of a band. Which it is cannot be
-            // told yet, so the piece under it is remembered and the band is
-            // begun as usual; the release decides between them.
+            // told yet, so the piece it would act on is remembered and the band
+            // is begun as usual; the release decides between them.
             bandClickId_ = 0;
             bandClickStart_ = client;
-            if (op != ccl::doc::SelectionOp::Replace && document_ != nullptr) {
-                const size_t under = ObjectAt(start);
-                if (under != static_cast<size_t>(-1)) {
-                    bandClickId_ = document_->Annotations()[under].id;
-                }
+            if (op != ccl::doc::SelectionOp::Replace) {
+                bandClickId_ = target;
             }
 
             pending_ = ccl::doc::SelectionShape{};
@@ -4748,14 +4840,34 @@ void ClipWindow::OnLeftUp() noexcept {
         // release sends WM_CAPTURECHANGED straight back here, and that path
         // drops a drag still marked as running.
         const ccl::doc::SelectionOp op = pending_.op;
+        // Taken before either path touches it: what is picked is a step of its
+        // own, so stepping back once returns the previous set rather than
+        // reaching past it to the last thing drawn.
+        //
+        // For a walk this is the set as the last step of it left things, not
+        // as the walk began. Each press of a walk is its own step: reaching
+        // one piece too far should cost one press back, which is the whole
+        // point of walking down in the first place.
+        const std::vector<unsigned int> beforePick = pickedIds_;
         if (bandClickId_ != 0) {
             // Pressed on a piece with a modifier and let go without moving:
             // that one piece is what was meant, not the band of no size the
             // drag would otherwise settle.
+            //
+            // Back to how the walk found things before acting. On its first
+            // step that changes nothing; on later ones it is what takes back
+            // the step before, so one piece is added or taken out at a time
+            // rather than the stack being gathered up press by press.
+            pickedIds_ = cycleBase_;
             PickOne(bandClickId_, op);
         } else {
             ApplyObjectBand(op);
+            // A band settles somewhere of its own, so there is no walk left to
+            // carry on from.
+            cycleWhen_ = 0;
+            cycleTargets_.clear();
         }
+        RecordPickedChange(beforePick);
         bandClickId_ = 0;
         selecting_ = false;
         pending_ = ccl::doc::SelectionShape{};
@@ -6513,7 +6625,8 @@ void ClipWindow::Undo() noexcept {
     const bool reshaped = history_.NextUndoChangesImage();
     ccl::tool::Tool tool = ToolForHistory();
     if (!history_.Undo(document_->MutableAnnotations(),
-                       document_->MutableImage(), selection_, tool)) {
+                       document_->MutableImage(), selection_, pickedIds_,
+                       tool)) {
         return;
     }
     RestoreTool(tool);
@@ -6556,7 +6669,8 @@ void ClipWindow::Redo() noexcept {
     const bool reshaped = history_.NextRedoChangesImage();
     ccl::tool::Tool tool = ToolForHistory();
     if (!history_.Redo(document_->MutableAnnotations(),
-                       document_->MutableImage(), selection_, tool)) {
+                       document_->MutableImage(), selection_, pickedIds_,
+                       tool)) {
         return;
     }
     RestoreTool(tool);

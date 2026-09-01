@@ -11,7 +11,7 @@ namespace {
 // to stay where it is.
 void Exchange(HistoryStep& step, AnnotationList& annotations,
               ccl::capture::DibBuffer& image, SelectionShapes& selection,
-              ccl::tool::Tool& tool) {
+              std::vector<unsigned int>& picked, ccl::tool::Tool& tool) {
     std::swap(step.annotations, annotations);
     std::swap(step.tool, tool);
     if (step.image.IsValid()) {
@@ -24,6 +24,9 @@ void Exchange(HistoryStep& step, AnnotationList& annotations,
     // selection still does after it has been stepped over.
     if (step.selectionChanged) {
         std::swap(step.selection, selection);
+    }
+    if (step.pickedChanged) {
+        std::swap(step.picked, picked);
     }
 }
 
@@ -53,25 +56,27 @@ void History::RecordWithImage(const AnnotationList& annotations,
 }
 
 bool History::Undo(AnnotationList& current, ccl::capture::DibBuffer& image,
-                   SelectionShapes& selection, ccl::tool::Tool& tool) {
+                   SelectionShapes& selection,
+                   std::vector<unsigned int>& picked, ccl::tool::Tool& tool) {
     if (undo_.empty()) {
         return false;
     }
     HistoryStep step = std::move(undo_.back());
     undo_.pop_back();
-    Exchange(step, current, image, selection, tool);
+    Exchange(step, current, image, selection, picked, tool);
     redo_.push_back(std::move(step));
     return true;
 }
 
 bool History::Redo(AnnotationList& current, ccl::capture::DibBuffer& image,
-                   SelectionShapes& selection, ccl::tool::Tool& tool) {
+                   SelectionShapes& selection,
+                   std::vector<unsigned int>& picked, ccl::tool::Tool& tool) {
     if (redo_.empty()) {
         return false;
     }
     HistoryStep step = std::move(redo_.back());
     redo_.pop_back();
-    Exchange(step, current, image, selection, tool);
+    Exchange(step, current, image, selection, picked, tool);
     undo_.push_back(std::move(step));
     return true;
 }
@@ -83,6 +88,18 @@ void History::RecordSelection(const AnnotationList& annotations,
     step.annotations = annotations;
     step.selectionChanged = true;
     step.selection = selection;
+    step.tool = tool;
+    undo_.push_back(std::move(step));
+    redo_.clear();
+}
+
+void History::RecordPicked(const AnnotationList& annotations,
+                           const std::vector<unsigned int>& picked,
+                           ccl::tool::Tool tool) {
+    HistoryStep step;
+    step.annotations = annotations;
+    step.pickedChanged = true;
+    step.picked = picked;
     step.tool = tool;
     undo_.push_back(std::move(step));
     redo_.clear();

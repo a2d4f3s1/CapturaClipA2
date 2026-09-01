@@ -452,7 +452,14 @@ private:
                            float slack) noexcept;
     // Folds the band into what is already picked, the way the modifier keys
     // asked for, and settles the result.
+    // Everything a press at this point would reach, listed from the piece on
+    // top downwards. `ObjectAt` is the first of these; this is what repeated
+    // presses in the same place walk through.
+    void ObjectsAt(D2D1_POINT_2F image, std::vector<size_t>& out) noexcept;
     void ApplyObjectBand(ccl::doc::SelectionOp op) noexcept;
+    // Puts a step on the history when the picked set came out different from
+    // what is passed in. Called after the change, with the set as it was.
+    void RecordPickedChange(const std::vector<unsigned int>& before) noexcept;
     // Adds or takes out one piece, for a modified press that turned out to be
     // a click rather than a band.
     void PickOne(unsigned int id, ccl::doc::SelectionOp op) noexcept;
@@ -707,6 +714,26 @@ private:
     // that landed on nothing, since ids are never zero.
     unsigned int bandClickId_ = 0;
     POINT bandClickStart_{};
+
+    // Walking down through pieces stacked in one place. Where the last press
+    // landed and when, and how far down the stack it had got to by then.
+    // Pressing the same place again works down through whatever is stacked
+    // there. One piece is acted on at a time and which one moves down the
+    // stack, rather than each press adding to the last: pressing twice over
+    // three pieces means the second one, not the first two.
+    //
+    // Held from the press that began the run: the set as it was, and the ids
+    // the run walks through. Every press puts the set back to how it started
+    // before acting, which is what takes back the step before it. What is
+    // walked through depends on the modifier -- Shift passes over what was
+    // already picked, Alt over what was not -- and is settled once, at the
+    // start, so the ground does not move while the walk is going on.
+    POINT cycleAt_{};
+    ULONGLONG cycleWhen_ = 0;
+    size_t cycleDepth_ = 0;
+    ccl::doc::SelectionOp cycleOp_ = ccl::doc::SelectionOp::Replace;
+    std::vector<unsigned int> cycleBase_;
+    std::vector<unsigned int> cycleTargets_;
 
     // Moving what is picked. The copies are of the pieces as they were when
     // the button went down.
