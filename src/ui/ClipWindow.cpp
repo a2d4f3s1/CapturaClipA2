@@ -126,10 +126,6 @@ constexpr float kLassoSpacing = 2.0f;
 // moment before they have been read.
 constexpr float kGrabSlackFallback = 3.0f;
 
-// Menu entries per column before starting a new one, so a long font list stays
-// on screen instead of running off the bottom.
-constexpr int kMenuColumnLength = 30;
-
 // Installed font families, in the user's locale, sorted for browsing.
 //
 // The en-us name is carried alongside so the picker can match on either: most
@@ -298,13 +294,20 @@ enum MenuId : UINT {
     kMenuTextDecor,
     kMenuFontPick,
 
-    // Range bases, kept together at the end. Putting one in the middle renumbers
-    // everything after it into that range, which is how the colour entry ended
-    // up being treated as a font choice.
-    kMenuToolBase = 200,    // + Tool
-    kMenuWidthBase = 400,   // + index into kWidthPresets
-    kMenuZoomBase = 500,    // + zoom in hundreds of percent
-    kMenuFontBase = 1000,   // + index into the installed font list
+    // Range bases, kept together at the end. Putting one in the middle
+    // renumbers everything after it into that range, and an entry then arrives
+    // as a member of it -- which is how a colour entry once came through as a
+    // font choice.
+    //
+    // The ranges have to stay clear of each other at their far ends too, not
+    // just at their starts. The font range began at 1000 while zoom runs to
+    // 500 + 500, so the 500% entry and the first font shared an id and the
+    // branch that ran first swallowed it. OnCommand tests these from the
+    // highest base down, so the last one here has no ceiling: a new base
+    // belongs below the zoom range, or the order has to change with it.
+    kMenuToolBase = 200,   // + Tool
+    kMenuWidthBase = 400,  // + index into kWidthPresets
+    kMenuZoomBase = 500,   // + zoom in hundreds of percent
 };
 
 ccl::doc::Color FromColorRef(COLORREF value) noexcept {
@@ -5966,29 +5969,6 @@ void ClipWindow::OpenFontPicker() noexcept {
     Draw();
 }
 
-HMENU ClipWindow::BuildFontMenu() noexcept {
-    const HMENU menu = ::CreatePopupMenu();
-    if (menu == nullptr || context_ == nullptr) {
-        return menu;
-    }
-
-    const std::wstring current = FontInForce();
-    const auto& fonts = InstalledFonts(context_->Text());
-    for (size_t i = 0; i < fonts.size(); ++i) {
-        UINT flags = MF_STRING;
-        if (fonts[i].shown == current) {
-            flags |= MF_CHECKED;
-        }
-        // Wrapped into columns; the list is long enough to run off screen.
-        if (i > 0 && i % kMenuColumnLength == 0) {
-            flags |= MF_MENUBARBREAK;
-        }
-        ::AppendMenuW(menu, flags, kMenuFontBase + static_cast<UINT>(i),
-                      fonts[i].shown.c_str());
-    }
-    return menu;
-}
-
 void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     const HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr) {
@@ -6372,15 +6352,6 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
 
 void ClipWindow::OnCommand(int command) noexcept {
     const auto id = static_cast<UINT>(command);
-
-    if (id >= kMenuFontBase && context_ != nullptr) {
-        const auto& fonts = InstalledFonts(context_->Text());
-        const size_t index = id - kMenuFontBase;
-        if (index < fonts.size()) {
-            ApplyFontChoice(fonts[index].shown);
-        }
-        return;
-    }
 
     if (id >= kMenuZoomBase) {
         const ZoomAnchor anchor = KeyZoomAnchor();

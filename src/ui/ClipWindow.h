@@ -333,7 +333,6 @@ private:
     // several hundred of them as menu columns fill the screen and a menu item
     // cannot hold anything to type into.
     void OpenFontPicker() noexcept;
-    HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
     // default, which do not exist in the drawn result.
     // Pins the line pitch to what the picture will use for text of this size.
