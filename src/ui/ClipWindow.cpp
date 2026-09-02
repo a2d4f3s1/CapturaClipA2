@@ -6001,8 +6001,9 @@ void ClipWindow::ShowTextStyleMenu(POINT screen) noexcept {
     // Reached by right-clicking inside the editor, because while typing the
     // shortcut keys are ordinary characters.
     ::AppendMenuW(menu, plain, kMenuColorPicker, L"色...");
-    ::AppendMenuW(menu, MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(BuildFontMenu()), L"フォント");
+    // The same window the other menu opens, so that which font can be reached
+    // does not depend on where the menu was opened from.
+    ::AppendMenuW(menu, plain, kMenuFontPick, L"フォント...");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, tool_.textBold ? checked : plain, kMenuBold,
                   L"太字\tCtrl+B");
