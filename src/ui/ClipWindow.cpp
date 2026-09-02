@@ -25,6 +25,7 @@
 #include "ui/ColorPopup.h"
 #include "ui/ConcatDialog.h"
 #include "ui/DecorPanel.h"
+#include "ui/FontPicker.h"
 #include "ui/RotateDialog.h"
 #include "ui/SettingsDialog.h"
 #include "util/Dpi.h"
@@ -130,9 +131,13 @@ constexpr float kGrabSlackFallback = 3.0f;
 constexpr int kMenuColumnLength = 30;
 
 // Installed font families, in the user's locale, sorted for browsing.
-const std::vector<std::wstring>& InstalledFonts(IDWriteFactory* writer) {
-    static std::vector<std::wstring> fonts = [writer] {
-        std::vector<std::wstring> names;
+//
+// The en-us name is carried alongside so the picker can match on either: most
+// of the families whose name is written in Japanese answer to an English one
+// too, and matching both is what lets them be typed without the IME.
+const std::vector<ccl::ui::FontEntry>& InstalledFonts(IDWriteFactory* writer) {
+    static std::vector<ccl::ui::FontEntry> fonts = [writer] {
+        std::vector<ccl::ui::FontEntry> names;
         if (writer == nullptr) {
             return names;
         }
@@ -161,6 +166,22 @@ const std::vector<std::wstring>& InstalledFonts(IDWriteFactory* writer) {
                 continue;
             }
 
+            const auto nameAt = [&familyNames](UINT32 index,
+                                               std::wstring& out) {
+                UINT32 length = 0;
+                if (FAILED(familyNames->GetStringLength(index, &length)) ||
+                    length == 0) {
+                    return false;
+                }
+                out.assign(length + 1, L'\0');
+                if (FAILED(familyNames->GetString(index, out.data(),
+                                                  length + 1))) {
+                    return false;
+                }
+                out.resize(length);
+                return true;
+            };
+
             // Prefer the name in the user's language, falling back to the
             // first one the font offers.
             UINT32 index = 0;
@@ -170,21 +191,30 @@ const std::vector<std::wstring>& InstalledFonts(IDWriteFactory* writer) {
                 index = 0;
             }
 
-            UINT32 length = 0;
-            if (FAILED(familyNames->GetStringLength(index, &length)) ||
-                length == 0) {
+            ccl::ui::FontEntry entry;
+            if (!nameAt(index, entry.shown)) {
                 continue;
             }
 
-            std::wstring name(length + 1, L'\0');
-            if (SUCCEEDED(familyNames->GetString(index, name.data(),
-                                                 length + 1))) {
-                name.resize(length);
-                names.push_back(std::move(name));
+            // Absent for a handful of families, which are then reachable by
+            // their own name alone.
+            UINT32 englishIndex = 0;
+            BOOL hasEnglish = FALSE;
+            if (SUCCEEDED(familyNames->FindLocaleName(L"en-us", &englishIndex,
+                                                      &hasEnglish)) &&
+                hasEnglish && englishIndex != index) {
+                if (!nameAt(englishIndex, entry.english)) {
+                    entry.english.clear();
+                }
             }
+
+            names.push_back(std::move(entry));
         }
 
-        std::sort(names.begin(), names.end());
+        std::sort(names.begin(), names.end(),
+                  [](const ccl::ui::FontEntry& a, const ccl::ui::FontEntry& b) {
+                      return a.shown < b.shown;
+                  });
         return names;
     }();
     return fonts;
@@ -266,6 +296,7 @@ enum MenuId : UINT {
     kMenuExit,
     kMenuTextSize,
     kMenuTextDecor,
+    kMenuFontPick,
 
     // Range bases, kept together at the end. Putting one in the middle renumbers
     // everything after it into that range, which is how the colour entry ended
@@ -4818,7 +4849,7 @@ void ClipWindow::OnMouseMove(POINT client) noexcept {
     // With the text tool, outline whatever is under the pointer so it is
     // obvious what clicking would open.
     if (tool_.tool == ccl::tool::Tool::Text && editor_ == nullptr &&
-        !decorOpen_) {
+        !decorOpen_ && !fontPickerOpen_) {
         const size_t hovered = FindTextAt(ToImage(client));
         if (hovered != hoveredTextIndex_) {
             hoveredTextIndex_ = hovered;
@@ -5866,33 +5897,86 @@ void ClipWindow::SetColorPreviewActive(bool active) noexcept {
     }
 }
 
+std::wstring ClipWindow::FontInForce() const noexcept {
+    // The piece being pointed at, or the selection in the box, or what the next
+    // piece will be given -- the same order the change itself follows, so what
+    // is shown as current is what a change would replace.
+    const size_t pointed = HoveredTextTarget();
+    if (pointed != static_cast<size_t>(-1)) {
+        return document_->Annotations()[pointed].text.fontFamily;
+    }
+    if (editor_ != nullptr) {
+        CHARFORMAT2W format{};
+        format.cbSize = sizeof(format);
+        format.dwMask = CFM_FACE;
+        ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
+                       reinterpret_cast<LPARAM>(&format));
+        // What comes back in dwMask is what the selection agrees on. Across two
+        // faces the flag is cleared while szFaceName still holds one of them,
+        // so reading the name without testing the flag reports a face that only
+        // part of the selection is in. Nothing is in force there.
+        if ((format.dwMask & CFM_FACE) == 0) {
+            return {};
+        }
+        return format.szFaceName;
+    }
+    return CurrentTextFont();
+}
+
+void ClipWindow::ApplyFontChoice(const std::wstring& family) noexcept {
+    // The piece being pointed at takes it; failing that, the box being typed
+    // into; failing that, whatever is typed next.
+    if (!RefontHoveredText(family)) {
+        SetTextFont(family);
+    }
+}
+
+void ClipWindow::OpenFontPicker() noexcept {
+    if (context_ == nullptr || hwnd_ == nullptr) {
+        return;
+    }
+    EndNumberEntry(true);
+
+    POINT screen = lastCursor_;
+    ::ClientToScreen(hwnd_, &screen);
+
+    // Held still while the window is up, for the same reason the decoration
+    // panel holds it: walking the pointer past the window would otherwise move
+    // what the choice lands on.
+    fontPickerOpen_ = true;
+    // The window takes focus off the editor, which must not be mistaken for
+    // clicking away and end the edit.
+    ++suppressCommitDepth_;
+
+    ccl::ui::FontPicker picker;
+    const std::optional<std::wstring> chosen = picker.Show(
+        hwnd_, screen, InstalledFonts(context_->Text()), FontInForce(),
+        settings_ != nullptr ? settings_->paletteScalePercent : 100);
+
+    --suppressCommitDepth_;
+    fontPickerOpen_ = false;
+
+    if (chosen.has_value()) {
+        ApplyFontChoice(*chosen);
+    }
+    if (editor_ != nullptr) {
+        ::SetFocus(editor_);
+    }
+    UpdateTitle();
+    Draw();
+}
+
 HMENU ClipWindow::BuildFontMenu() noexcept {
     const HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr || context_ == nullptr) {
         return menu;
     }
 
-    // Which font is in force, so it can be ticked: the piece being pointed at,
-    // or the selection in the box, or what the next piece will be given.
-    std::wstring current;
-    const size_t pointed = HoveredTextTarget();
-    if (pointed != static_cast<size_t>(-1)) {
-        current = document_->Annotations()[pointed].text.fontFamily;
-    } else if (editor_ != nullptr) {
-        CHARFORMAT2W format{};
-        format.cbSize = sizeof(format);
-        format.dwMask = CFM_FACE;
-        ::SendMessageW(editor_, EM_GETCHARFORMAT, SCF_SELECTION,
-                       reinterpret_cast<LPARAM>(&format));
-        current = format.szFaceName;
-    } else {
-        current = CurrentTextFont();
-    }
-
+    const std::wstring current = FontInForce();
     const auto& fonts = InstalledFonts(context_->Text());
     for (size_t i = 0; i < fonts.size(); ++i) {
         UINT flags = MF_STRING;
-        if (fonts[i] == current) {
+        if (fonts[i].shown == current) {
             flags |= MF_CHECKED;
         }
         // Wrapped into columns; the list is long enough to run off screen.
@@ -5900,7 +5984,7 @@ HMENU ClipWindow::BuildFontMenu() noexcept {
             flags |= MF_MENUBARBREAK;
         }
         ::AppendMenuW(menu, flags, kMenuFontBase + static_cast<UINT>(i),
-                      fonts[i].c_str());
+                      fonts[i].shown.c_str());
     }
     return menu;
 }
@@ -6089,8 +6173,9 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     // that what can be changed about text does not depend on where the menu was
     // opened from. The colour sits at the top level of this menu already, with
     // a key of its own, and is not repeated here.
-    ::AppendMenuW(textStyle, MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(BuildFontMenu()), L"フォント");
+    // A window rather than a submenu: several hundred families laid out as menu
+    // columns fill the screen, and a menu item cannot hold a box to type into.
+    ::AppendMenuW(textStyle, MF_STRING, kMenuFontPick, L"フォント...");
     // Outright, rather than by stepping with the bracket keys. Greyed while the
     // box is open: what is being typed is sized by the box, and the piece this
     // would act on is the one being pointed at.
@@ -6291,11 +6376,7 @@ void ClipWindow::OnCommand(int command) noexcept {
         const auto& fonts = InstalledFonts(context_->Text());
         const size_t index = id - kMenuFontBase;
         if (index < fonts.size()) {
-            // The piece being pointed at takes it; failing that, the box being
-            // typed into; failing that, whatever is typed next.
-            if (!RefontHoveredText(fonts[index])) {
-                SetTextFont(fonts[index]);
-            }
+            ApplyFontChoice(fonts[index].shown);
         }
         return;
     }
@@ -6477,6 +6558,9 @@ void ClipWindow::OnCommand(int command) noexcept {
             return;
         case kMenuTextDecor:
             OpenDecorPanel();
+            return;
+        case kMenuFontPick:
+            OpenFontPicker();
             return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);

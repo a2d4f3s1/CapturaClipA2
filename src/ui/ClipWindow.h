@@ -322,6 +322,17 @@ private:
     // The same for the font, which is a name rather than a switch.
     bool RefontHoveredText(const std::wstring& family) noexcept;
     void SetTextFont(const std::wstring& family) noexcept;
+    // Which family a change would be replacing -- what is pointed at, else the
+    // selection in the box, else what the next piece will be given. Empty when
+    // nothing is in force, which is what a selection spanning two faces means.
+    std::wstring FontInForce() const noexcept;
+    // One place that decides what a chosen family lands on, so the menu and the
+    // picker cannot drift apart about it.
+    void ApplyFontChoice(const std::wstring& family) noexcept;
+    // The installed families as a window with a box to type into, because
+    // several hundred of them as menu columns fill the screen and a menu item
+    // cannot hold anything to type into.
+    void OpenFontPicker() noexcept;
     HMENU BuildFontMenu() noexcept;
     // Clears the indentation and paragraph spacing rich edit applies by
     // default, which do not exist in the drawn result.
@@ -682,6 +693,9 @@ private:
     // is: without this, walking the pointer past the panel would move the
     // outline onto another piece while the panel went on changing the first.
     bool decorOpen_ = false;
+    // True while the font picker is up, for the same reason as above: the piece
+    // the choice will land on is settled when the window opens.
+    bool fontPickerOpen_ = false;
     // The text whose size is being stepped, so that a run of presses records
     // one undo step rather than one per press. Zero while nothing is.
     unsigned int resizingTextId_ = 0;

@@ -40,6 +40,7 @@ set(APP_SOURCES
     src/ui/ColorPreview.cpp
     src/ui/ConcatDialog.cpp
     src/ui/DecorPanel.cpp
+    src/ui/FontPicker.cpp
     src/ui/RotateDialog.cpp
     src/ui/SettingsDialog.cpp
     src/ui/ToolCursors.cpp
@@ -71,6 +72,7 @@ set(APP_HEADERS
     src/ui/ColorPreview.h
     src/ui/ConcatDialog.h
     src/ui/DecorPanel.h
+    src/ui/FontPicker.h
     src/ui/RotateDialog.h
     src/res/Resources.h
     src/ui/SettingsDialog.h
