@@ -150,6 +150,11 @@ int RunWithFile(const std::wstring& path, ccl::app::Settings& settings,
 
 int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR,
                       _In_ int) {
+    // Ahead of everything, including the timing: without it the folder the exe
+    // was started from comes before System32 for any library loaded later, and
+    // this program is meant to be unzipped and run wherever it landed.
+    ::SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
     const LONGLONG launchStart = ccl::timing::Now();
     if (HasFlag(::GetCommandLineW(), L"--timing")) {
         ccl::timing::g_enabled = true;

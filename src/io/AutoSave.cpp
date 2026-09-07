@@ -67,8 +67,11 @@ std::wstring AutoSaveImage(ccl::render::D2DContext& context,
         return std::wstring{};
     }
 
-    const std::wstring folder =
-        ccl::util::ExpandPlaceholders(settings.autoSaveFolder, title);
+    // The title belongs to whichever window was captured, so it is not ours to
+    // trust as part of a path: it can hold separators and "..". Only the title
+    // is cleaned -- the format around it is the user's own and needs its "C:\".
+    const std::wstring folder = ccl::util::ExpandPlaceholders(
+        settings.autoSaveFolder, ccl::util::SanitizePathComponent(title));
     if (folder.empty()) {
         return std::wstring{};
     }

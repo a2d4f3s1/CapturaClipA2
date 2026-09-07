@@ -2,9 +2,86 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace ccl::io {
+namespace {
+
+// Wide enough for any screen anyone is pasting from, narrow enough that the
+// arithmetic below cannot run away.
+constexpr long long kMaxDimension = 65535;
+
+// Everything in the clipboard's copy of a bitmap was chosen by whichever
+// program put it there, so none of it can be taken on faith. This works out
+// how many bytes the header claims to need and turns down anything that does
+// not fit inside what was actually handed over -- otherwise the pixel pointer
+// computed from biSize and biClrUsed lands outside the block, and GDI reads
+// whatever happens to be there.
+bool DibFitsInBuffer(const BITMAPINFOHEADER* header,
+                     SIZE_T available) noexcept {
+    if (available < sizeof(BITMAPINFOHEADER)) {
+        return false;
+    }
+    if (header->biSize < sizeof(BITMAPINFOHEADER) ||
+        header->biSize > available) {
+        return false;
+    }
+    if (header->biPlanes != 1) {
+        return false;
+    }
+    switch (header->biBitCount) {
+        case 1:
+        case 4:
+        case 8:
+        case 16:
+        case 24:
+        case 32:
+            break;
+        default:
+            return false;
+    }
+    // RLE and the JPEG/PNG pass-through formats hand the decoding to GDI with
+    // bytes this side has not checked. Only the plain layouts are taken.
+    if (header->biCompression != BI_RGB &&
+        header->biCompression != BI_BITFIELDS) {
+        return false;
+    }
+
+    // Negating the smallest LONG is undefined, so it goes before the sign is
+    // taken off anywhere.
+    if (header->biHeight == (std::numeric_limits<LONG>::min)()) {
+        return false;
+    }
+    const long long width = header->biWidth;
+    const long long height = header->biHeight < 0
+                                 ? -static_cast<long long>(header->biHeight)
+                                 : header->biHeight;
+    if (width <= 0 || height <= 0 || width > kMaxDimension ||
+        height > kMaxDimension) {
+        return false;
+    }
+
+    // What sits between the header and the pixels: the colour table, or the
+    // three masks BI_BITFIELDS puts there instead.
+    long long between = 0;
+    if (header->biClrUsed != 0) {
+        between = static_cast<long long>(header->biClrUsed) * sizeof(RGBQUAD);
+    } else if (header->biBitCount <= 8) {
+        between = (1ll << header->biBitCount) * sizeof(RGBQUAD);
+    }
+    if (header->biCompression == BI_BITFIELDS &&
+        header->biSize == sizeof(BITMAPINFOHEADER)) {
+        between += 3 * sizeof(DWORD);
+    }
+
+    const long long stride = ((width * header->biBitCount + 31) / 32) * 4;
+    const long long needed =
+        static_cast<long long>(header->biSize) + between + stride * height;
+    return needed <= static_cast<long long>(available);
+}
+
+}  // namespace
 
 bool ClipboardHasImage() noexcept {
     return ::IsClipboardFormatAvailable(CF_DIB) ||
@@ -22,6 +99,14 @@ ccl::capture::DibBuffer PasteFromClipboard(HWND owner) noexcept {
         handle != nullptr
             ? static_cast<const BITMAPINFOHEADER*>(::GlobalLock(handle))
             : nullptr;
+
+    // Checked before a single field is used for arithmetic: the size of the
+    // block is the only thing here this side actually knows.
+    if (header != nullptr && !DibFitsInBuffer(header, ::GlobalSize(handle))) {
+        ::GlobalUnlock(handle);
+        ::CloseClipboard();
+        return result;
+    }
 
     if (header != nullptr) {
         const int width = header->biWidth;

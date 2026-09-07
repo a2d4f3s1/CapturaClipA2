@@ -6,6 +6,9 @@
 
 #include "app/Settings.h"
 #include "capture/DibBuffer.h"
+// By value in SetAside, so the whole definition is needed rather than the
+// forward declaration that the document pointer alone would want.
+#include "doc/Document.h"
 #include "doc/History.h"
 #include "doc/Selection.h"
 #include "render/Renderer.h"
@@ -151,6 +154,9 @@ private:
                       const std::wstring& title) noexcept;
     void Undo() noexcept;
     void Redo() noexcept;
+    // Puts the picture a replacement set aside back, history and all. Reached
+    // from Undo once the marks on the current picture are exhausted.
+    void RestoreSetAside() noexcept;
 
     // Commits anything still in the editor and returns the picture with every
     // annotation drawn into it, ready to be reshaped.
@@ -540,6 +546,24 @@ private:
     ccl::view::ViewState view_;
     ccl::tool::ToolState tool_;
     ccl::doc::History history_;
+
+    // The picture a replacement pushed aside, kept whole: the image, the marks
+    // on it, and the history that belongs to those marks. Opening a file or
+    // pasting lands on the only copy of what is on screen, and pressing either
+    // by mistake used to be the end of it -- the history went out with the
+    // picture, so there was nothing left to undo.
+    //
+    // One deep. The next replacement lets the previous one go.
+    struct SetAside {
+        ccl::doc::Document document;
+        ccl::doc::History history;
+        std::wstring title;
+        float zoom = 1.0f;
+        POINT scroll{};
+        bool saved = false;
+        bool valid = false;
+    };
+    SetAside setAside_;
 
     std::wstring sourceTitle_;
     bool saved_ = false;

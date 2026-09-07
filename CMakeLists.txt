@@ -114,6 +114,20 @@ target_compile_options(CapturaClipA2 PRIVATE
     /permissive-
     /utf-8
     /Zc:__cplusplus
+    # Hardening. None of these fix a fault on their own; they raise what it
+    # costs to turn one into something worse. /Qspectre is deliberately absent
+    # -- it needs the Spectre-mitigated libraries, which are a separate install.
+    /guard:cf
+    /sdl
+)
+
+target_link_options(CapturaClipA2 PRIVATE
+    /guard:cf
+    /CETCOMPAT
+    # Statically imported libraries are resolved before any code of ours runs,
+    # so SetDefaultDllDirectories cannot reach them. 0x800 is
+    # LOAD_LIBRARY_SEARCH_SYSTEM32, which is where every one of them lives.
+    /DEPENDENTLOADFLAG:0x800
 )
 
 target_link_libraries(CapturaClipA2 PRIVATE

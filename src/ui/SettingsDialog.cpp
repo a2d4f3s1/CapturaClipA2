@@ -707,7 +707,9 @@ void BuildSaving(Dialog& dialog) noexcept {
     AddNote(dialog, L"空にすると自動保存しません");
     AddRow(dialog, L"残す日数 (0 で消さない)", L"EDIT",
            ES_AUTOHSCROLL | ES_NUMBER | WS_BORDER, kIdHistoryDays, kNarrowField);
-    AddNote(dialog, L"過ぎたファイルはゴミ箱へ送ります");
+    AddNote(dialog,
+            L"過ぎたファイルはゴミ箱へ送ります。このソフトが作ったものでなくても、"
+            L"このフォルダにある png・jpg・bmp が対象です");
     EndPage(dialog);
 }
 

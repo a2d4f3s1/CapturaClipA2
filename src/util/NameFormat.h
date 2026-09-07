@@ -23,4 +23,14 @@ std::wstring ExpandPlaceholders(const std::wstring& format,
 std::wstring ExpandPlaceholders(const std::wstring& format,
                                 const std::wstring& title) noexcept;
 
+// Reduces a string to something usable as one name inside a path: anything
+// Windows forbids in a name becomes an underscore, and leading or trailing
+// spaces and dots are dropped.
+//
+// Meant for the title, which is whatever the captured window calls itself and
+// so can hold separators and "..". The format around it is written by the
+// user and needs to keep its "C:\", which is why this is applied to the title
+// before expansion rather than to the result.
+std::wstring SanitizePathComponent(const std::wstring& text) noexcept;
+
 }  // namespace ccl::util

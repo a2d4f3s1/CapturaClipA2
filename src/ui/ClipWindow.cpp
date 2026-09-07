@@ -74,7 +74,12 @@ constexpr ULONGLONG kZoomGestureGapMs = 400;
 // The rich edit control lives in its own library, which has to be loaded
 // before the class can be used.
 bool EnsureRichEditLoaded() noexcept {
-    static const HMODULE library = ::LoadLibraryW(L"Msftedit.dll");
+    // System32 and nowhere else. This is not one of the KnownDLLs, so the
+    // ordinary search would let a file of the same name sitting beside the exe
+    // win -- and the exe is meant to be unzipped and run wherever it landed,
+    // which is usually the folder downloads arrive in.
+    static const HMODULE library = ::LoadLibraryExW(
+        L"Msftedit.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return library != nullptr;
 }
 
@@ -5531,6 +5536,10 @@ void ClipWindow::UpdateTitle() noexcept {
 
     const int zoom = static_cast<int>(std::lround(view_.Zoom() * 100.0f));
 
+    // Truncating rather than overflowing: the format comes from the ini (up to
+    // 511 characters) and %t from whatever the captured window calls itself,
+    // so the two together reach past this on their own. swprintf_s would take
+    // the invalid parameter handler and end the process over a caption.
     wchar_t title[440];
     switch (tool_.tool) {
         case ccl::tool::Tool::Pen:
@@ -5538,7 +5547,7 @@ void ClipWindow::UpdateTitle() noexcept {
             // it is clear which one the size keys just changed.
             if (drawing_ && straightLine_ && activeStroke_.points.size() >= 2) {
                 const size_t last = activeStroke_.points.size() - 1;
-                ::swprintf_s(title, L"%s  %d%%  Line %.0f → %.0fpx", name.c_str(),
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  Line %.0f → %.0fpx", name.c_str(),
                              zoom, activeStroke_.points[last - 1].width,
                              activeStroke_.points[last].width);
                 break;
@@ -5546,26 +5555,26 @@ void ClipWindow::UpdateTitle() noexcept {
             // While a head can still be turned, that is what the arrow keys
             // are for, so it is what gets reported.
             if (HasAdjustableArrow()) {
-                ::swprintf_s(title,
+                ::_snwprintf_s(title, _TRUNCATE,
                              L"%s  %d%%  %s %.0fpx  (Ctrl+↑ ↓ で矢印の向き)",
                              name.c_str(), zoom,
                              tool_.highlighter ? L"Marker" : L"Pen",
                              tool_.Width());
                 break;
             }
-            ::swprintf_s(title, L"%s  %d%%  %s %.0fpx%s", name.c_str(), zoom,
+            ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s %.0fpx%s", name.c_str(), zoom,
                          tool_.highlighter ? L"Marker" : L"Pen", tool_.Width(),
                          tool_.antialias ? L"" : L" (aliased)");
             break;
         case ccl::tool::Tool::Eraser:
-            ::swprintf_s(title, L"%s  %d%%  Eraser %.0fpx", name.c_str(), zoom,
+            ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  Eraser %.0fpx", name.c_str(), zoom,
                          tool_.Width());
             break;
         case ccl::tool::Tool::Eyedropper:
-            ::swprintf_s(title, L"%s  %d%%  Eyedropper", name.c_str(), zoom);
+            ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  Eyedropper", name.c_str(), zoom);
             break;
         case ccl::tool::Tool::Text:
-            ::swprintf_s(title, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
+            ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  Text %.0fpx", name.c_str(), zoom,
                          CurrentTextSize());
             break;
         case ccl::tool::Tool::ObjectSelect:
@@ -5574,10 +5583,10 @@ void ClipWindow::UpdateTitle() noexcept {
                 tool_.tool == ccl::tool::Tool::ObjectLasso ? L"ObjectLasso"
                                                            : L"Objects";
             if (pickedIds_.empty()) {
-                ::swprintf_s(title, L"%s  %d%%  %s", name.c_str(), zoom,
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s", name.c_str(), zoom,
                              pickName);
             } else {
-                ::swprintf_s(title, L"%s  %d%%  %s %d", name.c_str(), zoom,
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s %d", name.c_str(), zoom,
                              pickName, static_cast<int>(pickedIds_.size()));
             }
             break;
@@ -5601,31 +5610,31 @@ void ClipWindow::UpdateTitle() noexcept {
                         ? L"モザイク"
                         : L"ぼかし";
                 if (annotation.effect.strength <= 0.0f) {
-                    ::swprintf_s(title, L"%s  %d%%  %s なし  ([ ] で調整)",
+                    ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s なし  ([ ] で調整)",
                                  name.c_str(), zoom, effectName);
                 } else {
-                    ::swprintf_s(title, L"%s  %d%%  %s %.0f  ([ ] で調整)",
+                    ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s %.0f  ([ ] で調整)",
                                  name.c_str(), zoom, effectName,
                                  annotation.effect.strength);
                 }
             } else if (SelectionIsSingleRect()) {
                 const D2D1_RECT_F area = SelectionBounds();
-                ::swprintf_s(title, L"%s  %d%%  %s %.0f x %.0f", name.c_str(),
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s %.0f x %.0f", name.c_str(),
                              zoom, selectName, area.right - area.left,
                              area.bottom - area.top);
             } else if (HasSelection()) {
                 // Several pieces have no one width and height to report, so
                 // how much is covered is what gets said instead.
-                ::swprintf_s(title, L"%s  %d%%  %s %.0fpx", name.c_str(), zoom,
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s %.0fpx", name.c_str(), zoom,
                              selectName, selectionGeometry_.Area());
             } else {
-                ::swprintf_s(title, L"%s  %d%%  %s", name.c_str(), zoom,
+                ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%  %s", name.c_str(), zoom,
                              selectName);
             }
             break;
         }
         default:
-            ::swprintf_s(title, L"%s  %d%%", name.c_str(), zoom);
+            ::_snwprintf_s(title, _TRUNCATE, L"%s  %d%%", name.c_str(), zoom);
             break;
     }
     ::SetWindowTextW(hwnd_, title);
@@ -6649,10 +6658,19 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
         return;
     }
 
-    *document_ = ccl::doc::Document(std::move(image));
+    // Set aside rather than dropped. The history cannot simply carry over --
+    // it would restore edits onto a different picture -- but throwing it away
+    // with the picture left a mistaken paste with nothing to undo, and the
+    // window is the only place that picture existed.
+    setAside_.document = std::move(*document_);
+    setAside_.history = std::move(history_);
+    setAside_.title = sourceTitle_;
+    setAside_.zoom = view_.Zoom();
+    setAside_.scroll = view_.Scroll();
+    setAside_.saved = saved_;
+    setAside_.valid = true;
 
-    // Everything tied to the old picture goes with it: its annotations are
-    // gone, so its history would restore edits onto a different image.
+    *document_ = ccl::doc::Document(std::move(image));
     history_ = ccl::doc::History{};
     adjustingEffectIndex_ = static_cast<size_t>(-1);
     ClearSelection();
@@ -6673,6 +6691,13 @@ void ClipWindow::ReplaceImage(ccl::capture::DibBuffer image,
 
 void ClipWindow::Undo() noexcept {
     if (document_ == nullptr) {
+        return;
+    }
+    // With nothing left among the marks, the step before them is the picture a
+    // replacement set aside. Reached only once the marks are exhausted, so
+    // nothing drawn on the current picture is stepped over to get there.
+    if (!history_.CanUndo() && setAside_.valid) {
+        RestoreSetAside();
         return;
     }
     // Asked before the step is consumed: afterwards there is no way to tell
@@ -6713,6 +6738,51 @@ void ClipWindow::Undo() noexcept {
     // Always, not only when the picture changed: what the title reports may
     // have been stepped over too -- the area selected, or the effect the size
     // keys were pointed at.
+    UpdateTitle();
+    Draw();
+}
+
+void ClipWindow::RestoreSetAside() noexcept {
+    if (!setAside_.valid || document_ == nullptr) {
+        return;
+    }
+
+    // Text still being typed belongs to the picture on its way out, the same
+    // as it does when a replacement happens.
+    if (EditingText()) {
+        CommitText();
+    }
+
+    const float zoom = setAside_.zoom;
+    const POINT scroll = setAside_.scroll;
+
+    *document_ = std::move(setAside_.document);
+    history_ = std::move(setAside_.history);
+    sourceTitle_ = setAside_.title;
+    saved_ = setAside_.saved;
+    // Used up: one deep, and nothing is set aside on the way back.
+    setAside_ = SetAside{};
+
+    adjustingEffectIndex_ = static_cast<size_t>(-1);
+    hoveredTextIndex_ = static_cast<size_t>(-1);
+    resizingTextId_ = 0;
+    // Ids belong to the picture they were made on, so none of what was picked
+    // out of the replacement means anything here.
+    pickedIds_.clear();
+    ClearSelection();
+    zoomAnchorValid_ = false;
+
+    // Drawn results are remembered against ids, and the ids coming back are a
+    // different picture's. Nothing kept for the replacement applies to them.
+    renderer_.SetDocument(document_);
+    renderer_.InvalidateResults();
+
+    // Zoom before the window is sized: ResizeToImage measures the picture at
+    // the zoom in hand, so putting it back afterwards leaves the window fitted
+    // to the wrong one.
+    view_.SetZoom(zoom);
+    ResizeToImage();
+    view_.SetScroll(scroll, ContentSize(), ViewportSize());
     UpdateTitle();
     Draw();
 }
