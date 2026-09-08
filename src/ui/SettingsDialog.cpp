@@ -13,6 +13,9 @@
 #include <string>
 #include <vector>
 
+// The one font list, shared with the picker window.
+#include "ui/FontPicker.h"
+
 #include "app/Settings.h"
 #include "util/Dpi.h"
 
@@ -292,6 +295,10 @@ struct Dialog {
     HFONT font = nullptr;
     UINT dpi = ccl::dpi::kDefaultDpi;
 
+    // Fills the font list. The same one the drawing uses, so that what
+    // can be chosen is what can be drawn with.
+    IDWriteFactory* writer = nullptr;
+
     HWND window = nullptr;
     HWND tabs = nullptr;
 
@@ -384,30 +391,6 @@ HFONT CreateMessageFont(UINT dpi) noexcept {
         return static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
     }
     return ::CreateFontIndirectW(&metrics.lfMessageFont);
-}
-
-int CALLBACK CollectFont(const LOGFONTW* logical, const TEXTMETRICW*, DWORD,
-                         LPARAM parameter) {
-    auto* names = reinterpret_cast<std::set<std::wstring>*>(parameter);
-    // Names starting with @ are the vertical-writing variants, which are not
-    // what anyone is looking for in a font list.
-    if (logical->lfFaceName[0] != L'@') {
-        names->insert(logical->lfFaceName);
-    }
-    return 1;
-}
-
-std::vector<std::wstring> InstalledFonts() noexcept {
-    std::set<std::wstring> names;
-
-    const HDC screen = ::GetDC(nullptr);
-    LOGFONTW query{};
-    query.lfCharSet = DEFAULT_CHARSET;
-    ::EnumFontFamiliesExW(screen, &query, CollectFont,
-                          reinterpret_cast<LPARAM>(&names), 0);
-    ::ReleaseDC(nullptr, screen);
-
-    return std::vector<std::wstring>(names.begin(), names.end());
 }
 
 int Scaled(const Dialog& dialog, int value) noexcept {
@@ -640,8 +623,8 @@ void BuildText(Dialog& dialog) noexcept {
         AddRow(dialog, L"フォント", L"COMBOBOX",
                CBS_DROPDOWNLIST | CBS_SORT | WS_VSCROLL, kIdFontFamily,
                kFieldWidth, 12);
-    for (const std::wstring& name : InstalledFonts()) {
-        ComboBox_AddString(font, name.c_str());
+    for (const FontEntry& entry : InstalledFonts(dialog.writer)) {
+        ComboBox_AddString(font, entry.shown.c_str());
     }
 
     AddRow(dialog, L"大きさ (px)", L"EDIT", ES_AUTOHSCROLL | WS_BORDER,
@@ -1242,7 +1225,18 @@ void Populate(Dialog& dialog) noexcept {
     const HWND font = dialog.Field(kIdFontFamily);
     if (ComboBox_SelectString(font, -1, values.textFontFamily.c_str()) ==
         CB_ERR) {
-        ComboBox_SetCurSel(font, 0);
+        // Not among the families: put it in the list rather than quietly
+        // moving to whatever sorts first. A name saved before the list came
+        // from DirectWrite can be one GDI knew and this side does not, and
+        // silently swapping someone's font for another when they open the
+        // settings and press OK is worse than showing them a name that is
+        // no longer found. Shown, so it can be seen and changed.
+        if (!values.textFontFamily.empty()) {
+            ComboBox_AddString(font, values.textFontFamily.c_str());
+            ComboBox_SelectString(font, -1, values.textFontFamily.c_str());
+        } else {
+            ComboBox_SetCurSel(font, 0);
+        }
     }
     SetNumber(dialog.Field(kIdFontSize), values.textFontSize);
     Button_SetCheck(dialog.Field(kIdTextOutline),
@@ -1669,7 +1663,8 @@ void AddTab(HWND tabs, int index, const wchar_t* label) noexcept {
 
 }  // namespace
 
-bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings) noexcept {
+bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings,
+                        IDWriteFactory* writer) noexcept {
     const auto instance =
         reinterpret_cast<HINSTANCE>(::GetWindowLongPtrW(owner, GWLP_HINSTANCE));
     if (!RegisterWindowClass(instance)) {
@@ -1684,6 +1679,7 @@ bool ShowSettingsDialog(HWND owner, ccl::app::Settings& settings) noexcept {
 
     Dialog dialog;
     dialog.working = settings;
+    dialog.writer = writer;
     dialog.dpi = ccl::dpi::ForWindow(owner);
     dialog.font = CreateMessageFont(dialog.dpi);
     dialog.width = ccl::dpi::Scale(kDialogWidth, dialog.dpi);

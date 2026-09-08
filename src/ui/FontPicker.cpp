@@ -1,13 +1,104 @@
 #include "ui/FontPicker.h"
 
 #include <commctrl.h>
+#include <dwrite.h>
 #include <windowsx.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 
 #include "util/Dpi.h"
 
 namespace ccl::ui {
+
+// The en-us name is carried alongside so the picker can match on either: most
+// of the families whose name is written in Japanese answer to an English one
+// too, and matching both is what lets them be typed without the IME.
+const std::vector<FontEntry>& InstalledFonts(IDWriteFactory* writer) {
+    static std::vector<FontEntry> fonts = [writer] {
+        std::vector<FontEntry> names;
+        if (writer == nullptr) {
+            return names;
+        }
+
+        Microsoft::WRL::ComPtr<IDWriteFontCollection> collection;
+        if (FAILED(writer->GetSystemFontCollection(&collection))) {
+            return names;
+        }
+
+        wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
+        if (::GetUserDefaultLocaleName(locale, ARRAYSIZE(locale)) == 0) {
+            ::wcscpy_s(locale, L"en-us");
+        }
+
+        const UINT32 count = collection->GetFontFamilyCount();
+        names.reserve(count);
+
+        for (UINT32 i = 0; i < count; ++i) {
+            Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+            if (FAILED(collection->GetFontFamily(i, &family))) {
+                continue;
+            }
+
+            Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> familyNames;
+            if (FAILED(family->GetFamilyNames(&familyNames))) {
+                continue;
+            }
+
+            const auto nameAt = [&familyNames](UINT32 index,
+                                               std::wstring& out) {
+                UINT32 length = 0;
+                if (FAILED(familyNames->GetStringLength(index, &length)) ||
+                    length == 0) {
+                    return false;
+                }
+                out.assign(length + 1, L'\0');
+                if (FAILED(familyNames->GetString(index, out.data(),
+                                                  length + 1))) {
+                    return false;
+                }
+                out.resize(length);
+                return true;
+            };
+
+            // Prefer the name in the user's language, falling back to the
+            // first one the font offers.
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            if (FAILED(familyNames->FindLocaleName(locale, &index, &exists)) ||
+                !exists) {
+                index = 0;
+            }
+
+            FontEntry entry;
+            if (!nameAt(index, entry.shown)) {
+                continue;
+            }
+
+            // Absent for a handful of families, which are then reachable by
+            // their own name alone.
+            UINT32 englishIndex = 0;
+            BOOL hasEnglish = FALSE;
+            if (SUCCEEDED(familyNames->FindLocaleName(L"en-us", &englishIndex,
+                                                      &hasEnglish)) &&
+                hasEnglish && englishIndex != index) {
+                if (!nameAt(englishIndex, entry.english)) {
+                    entry.english.clear();
+                }
+            }
+
+            names.push_back(std::move(entry));
+        }
+
+        std::sort(names.begin(), names.end(),
+                  [](const FontEntry& a, const FontEntry& b) {
+                      return a.shown < b.shown;
+                  });
+        return names;
+    }();
+    return fonts;
+}
+
 namespace {
 
 constexpr wchar_t kClass[] = L"CapturaClipA2FontPicker";

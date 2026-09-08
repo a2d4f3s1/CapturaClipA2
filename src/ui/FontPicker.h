@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct IDWriteFactory;
+
 namespace ccl::ui {
 
 // One installed family, under both of the names it answers to.
@@ -17,6 +19,20 @@ struct FontEntry {
     std::wstring shown;    // what the list shows, in the user's language
     std::wstring english;  // en-us name, empty when the family offers none
 };
+
+// Every family DirectWrite can lay text out with, sorted by the shown name.
+//
+// The one list, used by both the picker window and the settings dialog. They
+// each had their own before -- the dialog asked GDI, which answers with faces
+// rather than families and cuts names at 31 characters, so it offered 372
+// names DirectWrite has no family for and left out 44 families that it does
+// (源ノ角ゴシック JP and 小塚ゴシック Pro among them). Drawing goes through
+// DirectWrite, so DirectWrite decides what can be chosen.
+//
+// Built once and kept: the families do not change while the program runs, and
+// the first call is what pays for it. Not called on the way to the first
+// capture -- the list is only wanted once someone asks for a font.
+const std::vector<FontEntry>& InstalledFonts(IDWriteFactory* writer);
 
 // The installed fonts as a small window: a box to type into over a list.
 //

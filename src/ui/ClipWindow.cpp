@@ -133,94 +133,6 @@ constexpr float kGrabSlackFallback = 3.0f;
 
 // Installed font families, in the user's locale, sorted for browsing.
 //
-// The en-us name is carried alongside so the picker can match on either: most
-// of the families whose name is written in Japanese answer to an English one
-// too, and matching both is what lets them be typed without the IME.
-const std::vector<ccl::ui::FontEntry>& InstalledFonts(IDWriteFactory* writer) {
-    static std::vector<ccl::ui::FontEntry> fonts = [writer] {
-        std::vector<ccl::ui::FontEntry> names;
-        if (writer == nullptr) {
-            return names;
-        }
-
-        Microsoft::WRL::ComPtr<IDWriteFontCollection> collection;
-        if (FAILED(writer->GetSystemFontCollection(&collection))) {
-            return names;
-        }
-
-        wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
-        if (::GetUserDefaultLocaleName(locale, ARRAYSIZE(locale)) == 0) {
-            ::wcscpy_s(locale, L"en-us");
-        }
-
-        const UINT32 count = collection->GetFontFamilyCount();
-        names.reserve(count);
-
-        for (UINT32 i = 0; i < count; ++i) {
-            Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
-            if (FAILED(collection->GetFontFamily(i, &family))) {
-                continue;
-            }
-
-            Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> familyNames;
-            if (FAILED(family->GetFamilyNames(&familyNames))) {
-                continue;
-            }
-
-            const auto nameAt = [&familyNames](UINT32 index,
-                                               std::wstring& out) {
-                UINT32 length = 0;
-                if (FAILED(familyNames->GetStringLength(index, &length)) ||
-                    length == 0) {
-                    return false;
-                }
-                out.assign(length + 1, L'\0');
-                if (FAILED(familyNames->GetString(index, out.data(),
-                                                  length + 1))) {
-                    return false;
-                }
-                out.resize(length);
-                return true;
-            };
-
-            // Prefer the name in the user's language, falling back to the
-            // first one the font offers.
-            UINT32 index = 0;
-            BOOL exists = FALSE;
-            if (FAILED(familyNames->FindLocaleName(locale, &index, &exists)) ||
-                !exists) {
-                index = 0;
-            }
-
-            ccl::ui::FontEntry entry;
-            if (!nameAt(index, entry.shown)) {
-                continue;
-            }
-
-            // Absent for a handful of families, which are then reachable by
-            // their own name alone.
-            UINT32 englishIndex = 0;
-            BOOL hasEnglish = FALSE;
-            if (SUCCEEDED(familyNames->FindLocaleName(L"en-us", &englishIndex,
-                                                      &hasEnglish)) &&
-                hasEnglish && englishIndex != index) {
-                if (!nameAt(englishIndex, entry.english)) {
-                    entry.english.clear();
-                }
-            }
-
-            names.push_back(std::move(entry));
-        }
-
-        std::sort(names.begin(), names.end(),
-                  [](const ccl::ui::FontEntry& a, const ccl::ui::FontEntry& b) {
-                      return a.shown < b.shown;
-                  });
-        return names;
-    }();
-    return fonts;
-}
-
 bool IsKeyDown(int key) noexcept {
     return (::GetKeyState(key) & 0x8000) != 0;
 }
@@ -5962,7 +5874,8 @@ void ClipWindow::OpenFontPicker() noexcept {
 
     ccl::ui::FontPicker picker;
     const std::optional<std::wstring> chosen = picker.Show(
-        hwnd_, screen, InstalledFonts(context_->Text()), FontInForce(),
+        hwnd_, screen, ccl::ui::InstalledFonts(context_->Text()),
+        FontInForce(),
         settings_ != nullptr ? settings_->paletteScalePercent : 100);
 
     --suppressCommitDepth_;
@@ -6973,7 +6886,8 @@ void ClipWindow::OpenSettings() noexcept {
     // The window takes focus while it is up, which the editor would otherwise
     // read as clicking away.
     ++suppressCommitDepth_;
-    const bool changed = ccl::ui::ShowSettingsDialog(hwnd_, *settings_);
+    const bool changed = ccl::ui::ShowSettingsDialog(
+        hwnd_, *settings_, context_ != nullptr ? context_->Text() : nullptr);
     --suppressCommitDepth_;
 
     if (!changed) {
