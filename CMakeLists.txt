@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(CapturaClipA2
-    VERSION 0.4.0
+    VERSION 0.4.1
     DESCRIPTION "Pin a region of the screen on top of everything else"
     LANGUAGES CXX)
 
