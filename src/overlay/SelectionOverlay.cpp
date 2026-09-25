@@ -12,8 +12,11 @@ namespace {
 
 constexpr wchar_t kOverlayClass[] = L"CapturaClipA2.SelectionOverlay";
 
-// Width of the rubber band outline, in pixels.
-constexpr int kFrameWidth = 1;
+// Total width of the rubber band outline, in pixels: a black ring on the
+// outside with a white one inside it. A single white line disappears against a
+// white background and a single black one against a black background, whereas
+// no pixel can be close to both, so one of the two always shows.
+constexpr int kFrameWidth = 2;
 
 // Movement below this counts as a click rather than a drag. Zero would mean a
 // slight tremor turns a window pick into an empty selection.
@@ -23,9 +26,13 @@ bool Intersect(const RECT& a, const RECT& b, RECT& out) noexcept {
     return ::IntersectRect(&out, &a, &b) != FALSE;
 }
 
-// The four edge rectangles that make up an outline drawn just outside `inner`.
-void OutlineEdges(const RECT& inner, RECT (&edges)[4]) noexcept {
-    const LONG w = kFrameWidth;
+// The four edge rectangles that make up a `width` pixel outline drawn just
+// outside `inner`. The edges of a narrower outline are a subset of a wider
+// one's, so painting the wide ring and then the narrow one on top leaves
+// concentric rings, and erasing the widest covers every pixel any of them
+// touched.
+void OutlineEdges(const RECT& inner, int width, RECT (&edges)[4]) noexcept {
+    const LONG w = width;
     edges[0] = {inner.left - w, inner.top - w, inner.right + w, inner.top};
     edges[1] = {inner.left - w, inner.bottom, inner.right + w, inner.bottom + w};
     edges[2] = {inner.left - w, inner.top, inner.left, inner.bottom};
@@ -52,6 +59,7 @@ private:
 
     void EraseOutline(const RECT& selection) noexcept;
     void DrawOutline(const RECT& selection) noexcept;
+    void FillRing(const RECT& selection, int width, HBRUSH brush) noexcept;
     void RedrawSelection() noexcept;
 
     RECT NormalizedSelection() const noexcept;
@@ -72,7 +80,8 @@ private:
     HDC windowDc_ = nullptr;
     HDC snapshotDc_ = nullptr;
     HGDIOBJ previousSnapshot_ = nullptr;
-    HBRUSH outlineBrush_ = nullptr;
+    HBRUSH outerBrush_ = nullptr;
+    HBRUSH innerBrush_ = nullptr;
 
     bool dragging_ = false;
     bool hasSelection_ = false;
@@ -94,8 +103,11 @@ private:
 };
 
 Overlay::~Overlay() {
-    if (outlineBrush_ != nullptr) {
-        ::DeleteObject(outlineBrush_);
+    if (outerBrush_ != nullptr) {
+        ::DeleteObject(outerBrush_);
+    }
+    if (innerBrush_ != nullptr) {
+        ::DeleteObject(innerBrush_);
     }
     if (snapshotDc_ != nullptr) {
         ::SelectObject(snapshotDc_, previousSnapshot_);
@@ -297,8 +309,9 @@ void Overlay::Finish(bool accepted) noexcept {
 void Overlay::EraseOutline(const RECT& selection) noexcept {
     const RECT screen = ScreenRect();
 
+    // The full width, which is what the widest ring drawn covered.
     RECT edges[4]{};
-    OutlineEdges(selection, edges);
+    OutlineEdges(selection, kFrameWidth, edges);
 
     for (const RECT& edge : edges) {
         RECT area{};
@@ -310,18 +323,26 @@ void Overlay::EraseOutline(const RECT& selection) noexcept {
     }
 }
 
-void Overlay::DrawOutline(const RECT& selection) noexcept {
+void Overlay::FillRing(const RECT& selection, int width, HBRUSH brush) noexcept {
     const RECT screen = ScreenRect();
 
     RECT edges[4]{};
-    OutlineEdges(selection, edges);
+    OutlineEdges(selection, width, edges);
 
     for (const RECT& edge : edges) {
         RECT area{};
         if (Intersect(edge, screen, area)) {
-            ::FillRect(windowDc_, &area, outlineBrush_);
+            ::FillRect(windowDc_, &area, brush);
         }
     }
+}
+
+void Overlay::DrawOutline(const RECT& selection) noexcept {
+    // Widest first, then the narrower ring over the inside of it: what is left
+    // is a black ring with a white one within, and the white one still touches
+    // the selection, so the edge of the picked area reads exactly as before.
+    FillRing(selection, kFrameWidth, outerBrush_);
+    FillRing(selection, kFrameWidth - 1, innerBrush_);
 }
 
 void Overlay::RedrawSelection() noexcept {
@@ -385,8 +406,9 @@ bool Overlay::CreateSurfaces() noexcept {
     }
     previousSnapshot_ = ::SelectObject(snapshotDc_, snapshot_.Handle());
 
-    outlineBrush_ = ::CreateSolidBrush(RGB(255, 255, 255));
-    return outlineBrush_ != nullptr;
+    outerBrush_ = ::CreateSolidBrush(RGB(0, 0, 0));
+    innerBrush_ = ::CreateSolidBrush(RGB(255, 255, 255));
+    return outerBrush_ != nullptr && innerBrush_ != nullptr;
 }
 
 SelectionResult Overlay::Run() noexcept {
