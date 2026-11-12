@@ -1278,11 +1278,13 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
     // there is nothing here that grows with the size of the capture.
     auto savedTarget = target_;
     auto savedBrush = brush_;
+    auto savedLayer = highlightLayer_;
     auto savedCache = std::move(effectCache_);
     effectCache_.clear();
 
     target_ = offscreen;
     brush_.Reset();
+    highlightLayer_.Reset();
     elsewhere_ = true;
 
     bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
@@ -1319,6 +1321,7 @@ bool Renderer::OverlayAnnotations(ccl::capture::DibBuffer& region, int left,
 
     target_ = savedTarget;
     brush_ = savedBrush;
+    highlightLayer_ = savedLayer;
     effectCache_ = std::move(savedCache);
     elsewhere_ = false;
 
@@ -2486,18 +2489,20 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
     }
 
     // The drawing helpers all work through the members, so the off-screen
-    // target takes their place for the duration. Bitmaps and brushes belong to
-    // the target that made them and cannot be shared, so the window's are set
-    // aside rather than reused.
+    // target takes their place for the duration. Bitmaps, brushes and layers
+    // belong to the target that made them and cannot be shared, so the
+    // window's are set aside rather than reused.
     auto savedTarget = target_;
     auto savedBrush = brush_;
     auto savedImage = image_;
+    auto savedLayer = highlightLayer_;
     auto savedCache = std::move(effectCache_);
     effectCache_.clear();
 
     target_ = offscreen;
     brush_.Reset();
     image_.Reset();
+    highlightLayer_.Reset();
     elsewhere_ = true;
 
     bool ok = SUCCEEDED(target_->CreateSolidColorBrush(
@@ -2548,6 +2553,7 @@ ccl::capture::DibBuffer Renderer::RenderOffscreen(
     target_ = savedTarget;
     brush_ = savedBrush;
     image_ = savedImage;
+    highlightLayer_ = savedLayer;
     effectCache_ = std::move(savedCache);
     elsewhere_ = false;
 

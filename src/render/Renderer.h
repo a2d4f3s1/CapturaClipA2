@@ -412,6 +412,9 @@ private:
     // One layer, reused by every highlighter stroke. Each PushLayer wants an
     // intermediate surface, and asking for a new one per stroke per frame is
     // the one cost here that grows with the size of the capture.
+    //
+    // Belongs to the target that made it, like the brush: drawing into another
+    // target has to set it aside, or the whole of that draw fails.
     Microsoft::WRL::ComPtr<ID2D1Layer> highlightLayer_;
 
     // Non-zero only while a rotation is being previewed.
