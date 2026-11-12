@@ -137,6 +137,14 @@ bool IsKeyDown(int key) noexcept {
     return (::GetKeyState(key) & 0x8000) != 0;
 }
 
+// Says that the picture with its annotations could not be made, and so what
+// was asked for has not been done. Saving, copying and reshaping all start from
+// that picture. Handing over the bare capture in its place -- as was once done
+// -- put files on disk with the annotations missing and nobody the wiser.
+void WarnFlattenFailed(HWND owner, const wchar_t* message) noexcept {
+    ::MessageBoxW(owner, message, L"CapturaClipA2", MB_ICONWARNING | MB_OK);
+}
+
 // Swings `to` round to the nearest multiple of `degrees` about `from`, keeping
 // how far away it is.
 //
@@ -6515,9 +6523,15 @@ void ClipWindow::SaveAs() noexcept {
     }
 
     const ccl::capture::DibBuffer flat = renderer_.Flatten();
-    if (ccl::io::SaveImage(*context_,
-                           flat.IsValid() ? flat : document_->Image(), path,
-                           format, settings_->jpegQuality)) {
+    // Without the annotations this is not the picture on screen, and writing
+    // the bare capture under the name just chosen would pass it off as one.
+    if (!flat.IsValid()) {
+        WarnFlattenFailed(
+            hwnd_, L"注釈を含めた画像を作れなかったため、保存しませんでした。");
+        return;
+    }
+    if (ccl::io::SaveImage(*context_, flat, path, format,
+                           settings_->jpegQuality)) {
         saved_ = true;
     } else {
         ::MessageBoxW(hwnd_, L"Failed to save the image.", L"CapturaClipA2",
@@ -6742,7 +6756,16 @@ ccl::capture::DibBuffer ClipWindow::FlattenForTransform() noexcept {
     if (EditingText()) {
         CommitText();
     }
-    return renderer_.Flatten();
+    ccl::capture::DibBuffer flat = renderer_.Flatten();
+    // Every caller gives up on an empty result, so this is the one place the
+    // reason can be given. Only a failure to flatten is reported: a reshaping
+    // that comes to nothing on its own -- a crop to an area too thin to keep a
+    // pixel -- is not news, and is left to do nothing as it always has.
+    if (!flat.IsValid() && document_ != nullptr && document_->IsValid()) {
+        WarnFlattenFailed(
+            hwnd_, L"注釈を含めた画像を作れなかったため、変形しませんでした。");
+    }
+    return flat;
 }
 
 void ClipWindow::ApplyTransform(ccl::capture::DibBuffer transformed) noexcept {
@@ -6826,7 +6849,17 @@ void ClipWindow::RotateFreely() noexcept {
 
     const POINT middleBefore = middleOnScreen();
 
-    ApplyTransform(renderer_.RenderRotated(*degrees, fill, 1.0f));
+    ccl::capture::DibBuffer turned =
+        renderer_.RenderRotated(*degrees, fill, 1.0f);
+    if (!turned.IsValid()) {
+        // The preview was taken off above but nothing has been drawn since, so
+        // the window would go on showing a turn that is not going to happen.
+        Draw();
+        WarnFlattenFailed(
+            hwnd_, L"注釈を含めた画像を作れなかったため、変形しませんでした。");
+        return;
+    }
+    ApplyTransform(std::move(turned));
 
     if (settings_ == nullptr ||
         settings_->rotateAnchor != ccl::app::RotateAnchor::Center) {
@@ -6953,6 +6986,8 @@ void ClipWindow::CaptureSelf() noexcept {
     ccl::capture::DibBuffer view = renderer_.CaptureView(
         static_cast<UINT>(viewport.cx), static_cast<UINT>(viewport.cy), view_);
     if (!view.IsValid()) {
+        WarnFlattenFailed(
+            hwnd_, L"注釈を含めた画像を作れなかったため、変形しませんでした。");
         return;
     }
 
@@ -7159,7 +7194,13 @@ void ClipWindow::CopyImage() noexcept {
         CommitText();
     }
     const ccl::capture::DibBuffer flat = renderer_.Flatten();
-    ccl::io::CopyToClipboard(hwnd_, flat.IsValid() ? flat : document_->Image());
+    // As for saving: the bare capture is not what was on screen.
+    if (!flat.IsValid()) {
+        WarnFlattenFailed(
+            hwnd_, L"注釈を含めた画像を作れなかったため、コピーしませんでした。");
+        return;
+    }
+    ccl::io::CopyToClipboard(hwnd_, flat);
 }
 
 bool ClipWindow::AutoSaveBeforeClosing(Departure departure) noexcept {
@@ -7186,6 +7227,18 @@ bool ClipWindow::AutoSaveBeforeClosing(Departure departure) noexcept {
     }
 
     const ccl::capture::DibBuffer flat = renderer_.Flatten();
+    // Without the annotations what would be written is not the picture on
+    // screen, so this is refused the way a failed write is: the window stays,
+    // and the picture with it. Except when the session is ending -- nothing can
+    // be stopped or asked then, and the bare capture beats nothing at all.
+    if (!flat.IsValid() && departure != Departure::SessionEnd) {
+        WarnFlattenFailed(
+            hwnd_,
+            L"注釈を含めた画像を作れなかったため、自動保存できませんでした。\n"
+            L"画像を失わないよう、ウィンドウは閉じず、画像も置き換えません。\n"
+            L"保存せずに閉じるには、Shift を押しながら閉じてください。");
+        return false;
+    }
     const bool written =
         !ccl::io::AutoSaveImage(
              *context_, flat.IsValid() ? flat : document_->Image(), *settings_,
