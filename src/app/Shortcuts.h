@@ -62,6 +62,14 @@ enum class Command {
     // The edge-and-shadow panel. Sits with Ctrl+B, Ctrl+I and Ctrl+U by
     // default, since it is the same kind of thing: what the letters look like.
     TextDecor,
+    // Getting a capture out of the way. "All" reaches every capture on the
+    // desktop, each of which is its own process. The two without a default
+    // key have other ways in: the title bar, the taskbar and Win+Up for the
+    // one, the menu of whichever capture is still showing for the other.
+    MinimizeWindow,
+    MinimizeAll,
+    RestoreAll,
+    ToggleMaximize,
     Count,
 };
 

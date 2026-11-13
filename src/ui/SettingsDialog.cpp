@@ -165,6 +165,14 @@ constexpr AssignRow kAssignRows[] = {
      kGroupWindow},
     {RowKind::Key, static_cast<int>(ccl::app::Command::HideWindow),
      kGroupWindow},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::MinimizeWindow),
+     kGroupWindow},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::MinimizeAll),
+     kGroupWindow},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::RestoreAll),
+     kGroupWindow},
+    {RowKind::Key, static_cast<int>(ccl::app::Command::ToggleMaximize),
+     kGroupWindow},
 };
 
 constexpr int kAssignRowCount = static_cast<int>(ARRAYSIZE(kAssignRows));

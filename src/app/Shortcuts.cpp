@@ -64,6 +64,12 @@ constexpr CommandInfo kCommands[] = {
     {L"Blur", L"ぼかし", {'M', false, true, false}},
     {L"InsertArrowhead", L"矢印の頭を挿入", {'R', false, false, false}},
     {L"TextDecor", L"文字の飾り", {'D', true, false, false}},
+    // N is what the window menu underlines for minimise, and nothing here used
+    // it. Shift widens it to every capture, the way Shift makes the pen a wash.
+    {L"MinimizeWindow", L"最小化", {'N', false, false, false}},
+    {L"MinimizeAll", L"すべて最小化", {'N', false, true, false}},
+    {L"RestoreAll", L"すべて元に戻す", {}},
+    {L"ToggleMaximize", L"最大化 / 元のサイズに戻す", {}},
 };
 
 static_assert(ARRAYSIZE(kCommands) == static_cast<size_t>(Command::Count),

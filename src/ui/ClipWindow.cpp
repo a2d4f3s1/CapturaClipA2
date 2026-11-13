@@ -218,6 +218,10 @@ enum MenuId : UINT {
     kMenuTextSize,
     kMenuTextDecor,
     kMenuFontPick,
+    kMenuMinimize,
+    kMenuToggleMaximize,
+    kMenuMinimizeAll,
+    kMenuRestoreAll,
 
     // Range bases, kept together at the end. Putting one in the middle
     // renumbers everything after it into that range, and an entry then arrives
@@ -281,6 +285,47 @@ constexpr UINT kResizeEditorMessage = WM_APP + 3;
 // Right click inside the editor. The styling menu has to be reachable from
 // there: while typing, the keys that would open it are just characters.
 constexpr UINT kEditorMenuMessage = WM_APP + 4;
+
+// Posted between captures to minimise or restore them all; wParam says which.
+// Registered by name rather than taken from the WM_APP range: it crosses
+// processes, and a build that gave the same number to something else would
+// otherwise act on it. Registered once the first frame is up, so it adds
+// nothing to the time before the window appears. Zero until then.
+UINT g_windowCommandMessage = 0;
+constexpr wchar_t kWindowCommandName[] = L"CapturaClipA2.WindowCommand";
+constexpr WPARAM kWindowCommandMinimize = 1;
+constexpr WPARAM kWindowCommandRestore = 2;
+
+UINT WindowCommandMessage() noexcept {
+    if (g_windowCommandMessage == 0) {
+        g_windowCommandMessage = ::RegisterWindowMessageW(kWindowCommandName);
+    }
+    return g_windowCommandMessage;
+}
+
+// Every other capture on the desktop, whatever process it is in. Matched on
+// the exact class name, so no other program's windows are ever touched.
+std::vector<HWND> OtherCaptures(HWND self) noexcept {
+    struct Search {
+        HWND self;
+        std::vector<HWND> found;
+    } search{self, {}};
+    ::EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            auto* state = reinterpret_cast<Search*>(param);
+            if (window == state->self) {
+                return TRUE;
+            }
+            wchar_t name[64];
+            const int length = ::GetClassNameW(window, name, ARRAYSIZE(name));
+            if (length > 0 && ::wcscmp(name, kClipWindowClass) == 0) {
+                state->found.push_back(window);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
 
 // Edit controls separate lines with CRLF; text layout wants a bare LF. The two
 // conversions are kept next to each other so they cannot drift apart -- getting
@@ -611,6 +656,13 @@ LRESULT CALLBACK ClipWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
 }
 
 LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Not a case below: a registered message has no compile-time value. The
+    // zero check keeps WM_NULL from matching before it is registered.
+    if (g_windowCommandMessage != 0 && msg == g_windowCommandMessage) {
+        OnWindowCommand(wParam);
+        return 0;
+    }
+
     switch (msg) {
         case WM_ERASEBKGND:
             return 1;
@@ -640,6 +692,12 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_NCHITTEST: {
             if (HasTitleBar()) {
                 break;  // there is a real frame for the system to hit-test
+            }
+            // A maximised window is not resized by its edges; offering the
+            // grips would let a drag take the size while it stays marked as
+            // maximised.
+            if (::IsZoomed(hwnd_)) {
+                return HTCLIENT;
             }
             // Supply the resize grips by hand, since there is no visible frame
             // for the system to hit-test against.
@@ -783,6 +841,56 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_WINDOWPOSCHANGING: {
+            // Maximised, the window is put on the work area of its monitor
+            // here rather than through WM_GETMINMAXINFO. The defaults were
+            // wrong for every frame but the ordinary one: without a title bar
+            // the frame that hangs off the monitor's edges is part of the
+            // picture, and both that and the tool window's caption covered the
+            // taskbar (2574x1454 and 2576x1456 on a 2560x1440 monitor whose
+            // work area is 2560x1392). And WM_GETMINMAXINFO cannot say it for
+            // every monitor: a size at least as large as the primary monitor
+            // is taken as "the whole monitor" and grown by the difference on a
+            // larger one -- 3840x2160 came back as 5120x2880.
+            auto* pos = reinterpret_cast<WINDOWPOS*>(lParam);
+            constexpr UINT kKeep = SWP_NOMOVE | SWP_NOSIZE;
+            if (::IsZoomed(hwnd_) && (pos->flags & kKeep) != kKeep) {
+                // The monitor it is going to, which for a window being
+                // maximised or moved across while maximised is where the
+                // proposed rectangle is, not where the window still is.
+                HMONITOR monitor = nullptr;
+                if ((pos->flags & kKeep) == 0) {
+                    const POINT middle{pos->x + pos->cx / 2, pos->y + pos->cy / 2};
+                    monitor = ::MonitorFromPoint(middle, MONITOR_DEFAULTTONEAREST);
+                } else {
+                    monitor = ::MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+                }
+                MONITORINFO info{};
+                info.cbSize = sizeof(info);
+                if (::GetMonitorInfoW(monitor, &info)) {
+                    RECT target = info.rcWork;
+                    // With a title bar the frame stays hung off the edges, as
+                    // it is for any maximised window, so what shows is the
+                    // work area exactly.
+                    if (HasTitleBar()) {
+                        const UINT dpi = ::GetDpiForWindow(hwnd_);
+                        const int padded =
+                            ::GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                        ::InflateRect(
+                            &target,
+                            ::GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + padded,
+                            ::GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + padded);
+                    }
+                    pos->x = target.left;
+                    pos->y = target.top;
+                    pos->cx = target.right - target.left;
+                    pos->cy = target.bottom - target.top;
+                    pos->flags &= ~kKeep;
+                }
+            }
+            break;
+        }
+
         case WM_SIZE:
             renderer_.Resize(LOWORD(lParam), HIWORD(lParam));
             // While the zoom is being applied the caller repaints once at the
@@ -858,6 +966,20 @@ LRESULT ClipWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SYSKEYUP:
             if (wParam == VK_MENU) {
                 UpdateCursor();
+            }
+            break;
+
+        case WM_SYSCOMMAND:
+            // Alt pressed and released on its own asks for keyboard access to
+            // the menus, and with a window menu and no menu bar that means the
+            // window menu: the window drops into menu mode with nothing on
+            // screen, and the next key press is spent leaving it. Alt is a
+            // modifier for drawing here, so that was the next tool key lost
+            // after every Alt. Measured on a stand-in window: two presses of B
+            // out of three swallowed, none out of five once this was refused.
+            // Alt+Space carries the space in lParam and still opens the menu.
+            if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0) {
+                return 0;
             }
             break;
 
@@ -2222,6 +2344,12 @@ void ClipWindow::BeginScrollDrag() noexcept {
 }
 
 void ClipWindow::BeginWindowMove() noexcept {
+    // A maximised window stays where it is: moving it would leave it marked as
+    // maximised in a place that is not. The gesture is still taken, so the
+    // press does not fall through to the tool.
+    if (::IsZoomed(hwnd_)) {
+        return;
+    }
     moving_ = true;
     ::GetCursorPos(&dragOrigin_);
     ::GetWindowRect(hwnd_, &windowOrigin_);
@@ -2291,6 +2419,88 @@ void ClipWindow::StopHiding() noexcept {
     // Shown without being activated: whatever the window was hiding from is
     // being worked in, and taking the focus back would interrupt it.
     ::ShowWindow(hwnd_, SW_SHOWNA);
+}
+
+void ClipWindow::SettleBeforeMinimizing() noexcept {
+    // Letting go of the pointer ends whatever drag was under way, the same way
+    // losing it to anything else does (WM_CAPTURECHANGED).
+    if (::GetCapture() == hwnd_) {
+        ::ReleaseCapture();
+    }
+    // The eyedropper holds the whole screen's mouse through a hook; it is not
+    // left running behind a window that is no longer there.
+    EndEyedropper();
+    // Hidden for a moment and then minimised: the timer would otherwise bring
+    // it back over whatever is being worked in. Only the timer is stopped;
+    // minimising is what shows the window again, as a minimised one.
+    if (hideTimer_ != 0) {
+        ::KillTimer(hwnd_, kHideTimer);
+        hideTimer_ = 0;
+    }
+}
+
+void ClipWindow::Minimize() noexcept {
+    SettleBeforeMinimizing();
+    // SW_MINIMIZE rather than the no-activate form: this is the window being
+    // worked in, so the focus goes on to whatever is next, as it would from
+    // the minimise button.
+    ::ShowWindow(hwnd_, SW_MINIMIZE);
+}
+
+void ClipWindow::MinimizeEveryCapture() noexcept {
+    const UINT message = WindowCommandMessage();
+    if (message != 0) {
+        for (HWND other : OtherCaptures(hwnd_)) {
+            ::PostMessageW(other, message, kWindowCommandMinimize, 0);
+        }
+    }
+    // This one last and directly, so the focus leaves the captures altogether
+    // rather than landing on one that is about to go.
+    Minimize();
+}
+
+void ClipWindow::RestoreEveryCapture() noexcept {
+    const UINT message = WindowCommandMessage();
+    if (message != 0) {
+        for (HWND other : OtherCaptures(hwnd_)) {
+            ::PostMessageW(other, message, kWindowCommandRestore, 0);
+        }
+    }
+    OnWindowCommand(kWindowCommandRestore);
+}
+
+void ClipWindow::ToggleMaximize() noexcept {
+    ::ShowWindow(hwnd_, ::IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE);
+}
+
+void ClipWindow::OnWindowCommand(WPARAM command) noexcept {
+    switch (command) {
+        case kWindowCommandMinimize:
+            if (::IsIconic(hwnd_)) {
+                return;
+            }
+            // Hidden and not merely for a moment: the window is on its way
+            // out (starting over hides it before the process ends). Showing it
+            // as a minimised one now would bring back what is being closed.
+            if (!::IsWindowVisible(hwnd_) && hideTimer_ == 0) {
+                return;
+            }
+            SettleBeforeMinimizing();
+            // Without activation: the request came from another capture, and
+            // the focus is that one's to give up.
+            ::ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);
+            return;
+        case kWindowCommandRestore:
+            // Only what is minimised. A window hidden for a moment comes back
+            // on its own, and one that is showing is already where it belongs.
+            if (!::IsIconic(hwnd_)) {
+                return;
+            }
+            ::ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+            return;
+        default:
+            return;
+    }
 }
 
 bool ClipWindow::ShowsBrushCursor() const noexcept {
@@ -5162,6 +5372,18 @@ bool ClipWindow::RunShortcut(WPARAM key) noexcept {
         case ccl::app::Command::HideWindow:
             HideTemporarily();
             return true;
+        case ccl::app::Command::MinimizeWindow:
+            Minimize();
+            return true;
+        case ccl::app::Command::MinimizeAll:
+            MinimizeEveryCapture();
+            return true;
+        case ccl::app::Command::RestoreAll:
+            RestoreEveryCapture();
+            return true;
+        case ccl::app::Command::ToggleMaximize:
+            ToggleMaximize();
+            return true;
         default:
             return false;
     }
@@ -5344,6 +5566,31 @@ ClipWindow::ZoomAnchor ClipWindow::WheelZoomAnchor(POINT client) noexcept {
 
 void ClipWindow::ApplyZoom(const ZoomAnchor* anchor) noexcept {
     const SIZE content = ContentSize();
+
+    // Maximised, the window is the work area and stays that way; only the
+    // picture inside it changes. The point under the pointer is held by
+    // scrolling alone, as far as scrolling can take it, and a picture smaller
+    // than the window sits in its corner with the grey around it.
+    if (::IsZoomed(hwnd_)) {
+        if (anchor != nullptr) {
+            POINT clientOrigin{0, 0};
+            ::ClientToScreen(hwnd_, &clientOrigin);
+            const float zoom = view_.Zoom();
+            const auto border = static_cast<float>(BorderWidth());
+            const float wantX = static_cast<float>(clientOrigin.x) + border +
+                                anchor->image.x * zoom -
+                                static_cast<float>(anchor->screen.x);
+            const float wantY = static_cast<float>(clientOrigin.y) + border +
+                                anchor->image.y * zoom -
+                                static_cast<float>(anchor->screen.y);
+            view_.SetScroll(POINT{std::lround(wantX), std::lround(wantY)},
+                            content, ViewportSize());
+        }
+        ClampScroll();
+        UpdateTitle();
+        Draw();
+        return;
+    }
 
     // The window itself never grows past the monitor: beyond that the image is
     // scrolled instead. Only the size is bounded this way -- where the window
@@ -5565,6 +5812,11 @@ void ClipWindow::ApplyOpacity() noexcept {
 }
 
 void ClipWindow::FitToImage() noexcept {
+    // The one command that is about the window rather than the picture, so it
+    // is the one that takes the window out of being maximised to do its job.
+    if (::IsZoomed(hwnd_)) {
+        ::ShowWindow(hwnd_, SW_RESTORE);
+    }
     view_.SetScroll(POINT{0, 0}, ContentSize(), ViewportSize());
     ApplyZoom();
 }
@@ -6258,6 +6510,33 @@ void ClipWindow::ShowContextMenu(POINT screen) noexcept {
     ::AppendMenuW(menu, plain, kMenuRecapture, L"撮り直す");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
+    // Getting the window out of the way, on every frame alike: without a title
+    // bar this is where the minimise and maximise buttons live.
+    ::AppendMenuW(
+        menu, plain, kMenuMinimize,
+        withKey(L"最小化", ccl::app::Command::MinimizeWindow).c_str());
+    ::AppendMenuW(menu, plain, kMenuToggleMaximize,
+                  withKey(::IsZoomed(hwnd_) ? L"元のサイズに戻す" : L"最大化",
+                          ccl::app::Command::ToggleMaximize)
+                      .c_str());
+    ::AppendMenuW(
+        menu, plain, kMenuMinimizeAll,
+        withKey(L"すべて最小化", ccl::app::Command::MinimizeAll).c_str());
+    // Greyed when there is nothing to bring back. Looked up only now, as the
+    // menu opens, so it costs nothing anywhere else.
+    const bool anyMinimized = [this] {
+        for (HWND other : OtherCaptures(hwnd_)) {
+            if (::IsIconic(other)) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    ::AppendMenuW(
+        menu, anyMinimized ? plain : (plain | MF_GRAYED), kMenuRestoreAll,
+        withKey(L"すべて元に戻す", ccl::app::Command::RestoreAll).c_str());
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
     ::AppendMenuW(menu, plain, kMenuSettings, L"設定...");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, plain, kMenuExit, L"終了");
@@ -6464,6 +6743,18 @@ void ClipWindow::OnCommand(int command) noexcept {
         case kMenuFontPick:
             OpenFontPicker();
             return;
+        case kMenuMinimize:
+            Minimize();
+            return;
+        case kMenuToggleMaximize:
+            ToggleMaximize();
+            return;
+        case kMenuMinimizeAll:
+            MinimizeEveryCapture();
+            return;
+        case kMenuRestoreAll:
+            RestoreEveryCapture();
+            return;
         case kMenuExit:
             ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
             return;
@@ -6541,6 +6832,11 @@ void ClipWindow::SaveAs() noexcept {
 
 void ClipWindow::ResizeToImage() noexcept {
     if (document_ == nullptr) {
+        return;
+    }
+    // Maximised, the window keeps the work area whatever the picture became;
+    // the callers re-clamp the scroll against the new picture themselves.
+    if (::IsZoomed(hwnd_)) {
         return;
     }
 
@@ -6873,7 +7169,8 @@ void ClipWindow::RotateFreely() noexcept {
     const POINT middleAfter = middleOnScreen();
     const LONG dx = middleAfter.x - middleBefore.x;
     const LONG dy = middleAfter.y - middleBefore.y;
-    if (dx == 0 && dy == 0) {
+    // Maximised, the window is not moved to make up the difference.
+    if ((dx == 0 && dy == 0) || ::IsZoomed(hwnd_)) {
         return;
     }
 
@@ -7082,7 +7379,8 @@ void ClipWindow::ConcatenateClipboard() noexcept {
         const int dy = layout.sourceY - heldY;
         heldX = layout.sourceX;
         heldY = layout.sourceY;
-        if (dx == 0 && dy == 0) {
+        // Maximised, the window stays put and the picture shifts inside it.
+        if ((dx == 0 && dy == 0) || ::IsZoomed(hwnd_)) {
             return;
         }
         RECT bounds{};
@@ -7395,19 +7693,26 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     // WS_CLIPCHILDREN keeps this window's own drawing out of the area the text
     // editor occupies. Without it the editor had to be told to repaint after
     // every frame, which is what made it flicker.
-    DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
+    //
+    // The window menu and the minimise and maximise boxes go on every frame,
+    // title bar or not. They are what the taskbar button reads: without the
+    // minimise box a click on it does nothing, and without the window menu
+    // Shift+right-click on it offers nothing. A tool window's caption still
+    // draws only the close button; the boxes take effect all the same.
+    DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_SYSMENU |
+                  WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
     // WS_EX_APPWINDOW forces a taskbar button even with no title bar, so it is
     // obvious whether a capture is still alive.
     DWORD exStyle = WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_APPWINDOW;
 
     switch (settings.windowFrame) {
         case ccl::app::WindowFrame::Normal:
-            style |= WS_CAPTION | WS_SYSMENU;
+            style |= WS_CAPTION;
             break;
         case ccl::app::WindowFrame::ThinTitleBar:
             // A tool window's caption is the narrow one, and it comes with no
             // taskbar button, so WS_EX_APPWINDOW has to go with it.
-            style |= WS_CAPTION | WS_SYSMENU;
+            style |= WS_CAPTION;
             exStyle = (exStyle & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
             break;
         case ccl::app::WindowFrame::NoTitleBar:
@@ -7464,6 +7769,12 @@ bool ClipWindow::Create(ccl::render::D2DContext& context,
     if (settings.copyOnCapture) {
         CopyImage();
     }
+
+    // Last, once the window is visible and has the focus, so that it costs
+    // nothing before then. Until it is registered this window simply does not
+    // hear the other captures, which for the instant in question changes
+    // nothing.
+    WindowCommandMessage();
     return true;
 }
 

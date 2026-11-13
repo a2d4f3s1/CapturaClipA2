@@ -93,6 +93,20 @@ private:
     void HideTemporarily() noexcept;
     void StopHiding() noexcept;
 
+    // Minimising and maximising. "All" reaches every capture on the desktop,
+    // each in its own process, by posting each a registered message; every
+    // window then puts itself away, so that whatever it was in the middle of
+    // is settled by the window it belongs to rather than from outside.
+    void Minimize() noexcept;
+    void MinimizeEveryCapture() noexcept;
+    void RestoreEveryCapture() noexcept;
+    void ToggleMaximize() noexcept;
+    // What a posted minimise or restore asks of this window.
+    void OnWindowCommand(WPARAM command) noexcept;
+    // Lets go of the pointer, the eyedropper and a pending return from hiding,
+    // none of which should outlast the window leaving the screen.
+    void SettleBeforeMinimizing() noexcept;
+
     // Resizes the window to the zoomed image (bounded by the work area),
     // re-clamps the scroll offset and repaints. With an anchor, the picture is
     // also slid -- and the window moved, if sliding is not enough -- so that
